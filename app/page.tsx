@@ -421,7 +421,7 @@ export default function Page() {
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
-              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete"
+              className="w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete appearance-none"
             />
           </Field>
           <Field label={tr.job}>
@@ -430,7 +430,7 @@ export default function Page() {
               value={job}
               onChange={(e) => setJob(e.target.value)}
               placeholder={tr.jobPlaceholder}
-              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete placeholder:text-rebar/60"
+              className="w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete placeholder:text-rebar/60"
             />
           </Field>
         </div>
@@ -626,7 +626,7 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <label className="block">
+    <label className="block min-w-0">
       <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
         {label.toUpperCase()}
       </div>

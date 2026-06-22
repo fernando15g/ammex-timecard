@@ -15,6 +15,17 @@ export const dynamic = "force-dynamic";
 const RECIPIENT = "fernando@ammexrebar.com";
 const FROM = "Ammex Timecard <timecards@send.ammexrebar.com>";
 
+// Format YYYY-MM-DD as "June 22, 2026" for the email body (no timezone drift).
+function prettyDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  return `${months[m - 1]} ${d}, ${y}`;
+}
+
 interface SubmitBody {
   foreman: string;
   date: string;
@@ -142,9 +153,10 @@ export async function POST(req: Request) {
       text:
         `Foreman: ${body.foreman}\n` +
         `Job: ${body.job}\n` +
-        `Date: ${body.date}\n` +
+        `Date: ${prettyDate(body.date)}\n` +
         `Workers: ${body.workers.length}\n` +
         `Total hours: ${Math.round(total * 100) / 100}\n\n` +
+        `Crew:\n` +
         body.workers.map((w) => `  ${w.name}: ${w.hours}`).join("\n") +
         (body.workDone?.trim() ? `\n\nWork done: ${body.workDone}` : "") +
         (body.notes?.trim() ? `\nNotes: ${body.notes}` : ""),

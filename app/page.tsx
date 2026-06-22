@@ -1,0 +1,842 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Lang, t } from "@/lib/strings";
+
+interface Worker {
+  name: string;
+  hours: number | null;
+  isNew?: boolean;
+}
+
+const DRAFT_KEY = "ammex_tc_draft_v1";
+const FOREMAN_KEY = "ammex_tc_foreman_v1";
+const LANG_KEY = "ammex_tc_lang_v1";
+const LASTCREW_KEY = "ammex_tc_lastcrew_v1";
+
+const QUICK_HOURS = [4, 6, 8, 10];
+
+function todayISO(): string {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+export default function Page() {
+  const [lang, setLang] = useState<Lang>("es");
+  const tr = t(lang);
+
+  const [foreman, setForeman] = useState<string>("");
+  const [showForemanPicker, setShowForemanPicker] = useState(false);
+
+  const [date, setDate] = useState<string>(todayISO());
+  const [job, setJob] = useState("");
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [workDone, setWorkDone] = useState("");
+  const [notes, setNotes] = useState("");
+
+  const [roster, setRoster] = useState<string[]>([]);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const [screen, setScreen] = useState<"form" | "review">("form");
+  const [submitState, setSubmitState] = useState<
+    "idle" | "submitting" | "sent" | "error"
+  >("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [validationMsg, setValidationMsg] = useState("");
+
+  const hydrated = useRef(false);
+
+  // ---- Hydrate persisted state on first load ----
+  useEffect(() => {
+    try {
+      const savedLang = localStorage.getItem(LANG_KEY) as Lang | null;
+      if (savedLang === "en" || savedLang === "es") setLang(savedLang);
+
+      const savedForeman = localStorage.getItem(FOREMAN_KEY);
+      if (savedForeman) setForeman(savedForeman);
+      else setShowForemanPicker(true);
+
+      const draftRaw = localStorage.getItem(DRAFT_KEY);
+      if (draftRaw) {
+        const d = JSON.parse(draftRaw);
+        if (d.date) setDate(d.date);
+        if (typeof d.job === "string") setJob(d.job);
+        if (Array.isArray(d.workers)) setWorkers(d.workers);
+        if (typeof d.workDone === "string") setWorkDone(d.workDone);
+        if (typeof d.notes === "string") setNotes(d.notes);
+      } else {
+        // No draft: prefill crew from last submitted crew, hours blank
+        const lastRaw = localStorage.getItem(LASTCREW_KEY);
+        if (lastRaw) {
+          const last = JSON.parse(lastRaw) as string[];
+          if (Array.isArray(last) && last.length) {
+            setWorkers(last.map((n) => ({ name: n, hours: null })));
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    hydrated.current = true;
+  }, []);
+
+  // ---- Fetch roster ----
+  useEffect(() => {
+    fetch("/api/roster")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d.workers)) setRoster(d.workers);
+      })
+      .catch(() => {})
+      .finally(() => setRosterLoaded(true));
+  }, []);
+
+  // ---- Persist draft whenever it changes ----
+  useEffect(() => {
+    if (!hydrated.current) return;
+    try {
+      localStorage.setItem(
+        DRAFT_KEY,
+        JSON.stringify({ date, job, workers, workDone, notes })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [date, job, workers, workDone, notes]);
+
+  useEffect(() => {
+    if (!hydrated.current) return;
+    try {
+      localStorage.setItem(LANG_KEY, lang);
+    } catch {
+      /* ignore */
+    }
+  }, [lang]);
+
+  // ---- Derived ----
+  const selectedNames = useMemo(
+    () => new Set(workers.map((w) => w.name.toLowerCase())),
+    [workers]
+  );
+
+  const suggestions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const pool = roster.filter((n) => !selectedNames.has(n.toLowerCase()));
+    if (!q) return pool.slice(0, 50);
+    return pool.filter((n) => n.toLowerCase().includes(q)).slice(0, 50);
+  }, [query, roster, selectedNames]);
+
+  const exactExists = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      roster.some((n) => n.toLowerCase() === q) ||
+      workers.some((w) => w.name.toLowerCase() === q)
+    );
+  }, [query, roster, workers]);
+
+  const total = useMemo(
+    () => workers.reduce((s, w) => s + (w.hours || 0), 0),
+    [workers]
+  );
+
+  // ---- Actions ----
+  function addWorker(name: string, isNew = false) {
+    const clean = name.trim();
+    if (!clean) return;
+    if (workers.some((w) => w.name.toLowerCase() === clean.toLowerCase())) {
+      setQuery("");
+      return;
+    }
+    setWorkers((prev) => [...prev, { name: clean, hours: null, isNew }]);
+    setQuery("");
+  }
+
+  function removeWorker(name: string) {
+    setWorkers((prev) => prev.filter((w) => w.name !== name));
+  }
+
+  function setWorkerHours(name: string, hours: number | null) {
+    setWorkers((prev) =>
+      prev.map((w) => (w.name === name ? { ...w, hours } : w))
+    );
+  }
+
+  function applyAll(hours: number) {
+    setWorkers((prev) => prev.map((w) => ({ ...w, hours })));
+  }
+
+  function chooseForeman(name: string) {
+    setForeman(name);
+    try {
+      localStorage.setItem(FOREMAN_KEY, name);
+    } catch {}
+    setShowForemanPicker(false);
+  }
+
+  function validate(): string {
+    if (!foreman) return tr.noForeman;
+    if (!job.trim()) return tr.noJob;
+    if (workers.length === 0) return tr.noCrew;
+    if (workers.some((w) => !w.hours || w.hours <= 0)) return tr.noHours;
+    return "";
+  }
+
+  function goReview() {
+    const msg = validate();
+    if (msg) {
+      setValidationMsg(msg);
+      return;
+    }
+    setValidationMsg("");
+    setScreen("review");
+  }
+
+  async function submit() {
+    setSubmitState("submitting");
+    setErrorMsg("");
+    try {
+      const res = await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          foreman,
+          date,
+          job: job.trim(),
+          workDone: workDone.trim(),
+          notes: notes.trim(),
+          workers: workers.map((w) => ({
+            name: w.name,
+            hours: w.hours,
+            isNew: !!w.isNew,
+          })),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || "fail");
+      }
+      // Success: remember crew, clear draft
+      try {
+        localStorage.setItem(
+          LASTCREW_KEY,
+          JSON.stringify(workers.map((w) => w.name))
+        );
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {}
+      setSubmitState("sent");
+    } catch (e: any) {
+      setSubmitState("error");
+      setErrorMsg(tr.failBody);
+    }
+  }
+
+  function clearForm(keepDate = false) {
+    setJob("");
+    setWorkers([]);
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    if (!keepDate) setDate(todayISO());
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {}
+    setShowClearConfirm(false);
+  }
+
+  function startNew() {
+    // After a successful submit: prefill crew from what was just sent
+    const last = workers.map((w) => w.name);
+    setJob("");
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    setDate(todayISO());
+    setWorkers(last.map((n) => ({ name: n, hours: null })));
+    setSubmitState("idle");
+    setScreen("form");
+  }
+
+  function logAnotherJob() {
+    // Keep date (still today), clear job + crew per split-day flow
+    setJob("");
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    setWorkers([]);
+    setSubmitState("idle");
+    setScreen("form");
+  }
+
+  // ---- Foreman picker (first-run / change) ----
+  if (showForemanPicker) {
+    return (
+      <ForemanPicker
+        roster={roster}
+        rosterLoaded={rosterLoaded}
+        tr={tr}
+        lang={lang}
+        setLang={setLang}
+        onPick={chooseForeman}
+        current={foreman}
+        onCancel={foreman ? () => setShowForemanPicker(false) : undefined}
+      />
+    );
+  }
+
+  // ---- Sent confirmation screen ----
+  if (submitState === "sent") {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
+        <div className="text-safety text-6xl mb-4">✓</div>
+        <h1 className="text-2xl font-bold mb-2">{tr.sent}</h1>
+        <p className="text-rebar mb-10">{job}</p>
+        <button
+          onClick={logAnotherJob}
+          className="w-full max-w-sm bg-safety text-steel font-bold py-4 rounded-2xl mb-3 active:bg-safetyDark"
+        >
+          {tr.logAnother}
+        </button>
+        <button
+          onClick={startNew}
+          className="w-full max-w-sm bg-graphite text-concrete font-semibold py-4 rounded-2xl"
+        >
+          {tr.newTimecard}
+        </button>
+      </div>
+    );
+  }
+
+  // ---- Review screen ----
+  if (screen === "review") {
+    return (
+      <div className="min-h-screen flex flex-col">
+        <TopBar tr={tr} lang={lang} setLang={setLang} />
+        <div className="flex-1 overflow-y-auto px-5 pb-32">
+          <h2 className="text-xs font-bold text-rebar tracking-wide mt-4 mb-3">
+            {tr.reviewTitle.toUpperCase()}
+          </h2>
+          <div className="bg-concrete text-steel rounded-2xl p-5">
+            <div className="text-lg font-bold">{job}</div>
+            <div className="text-sm text-graphite/70 mb-4">
+              {prettyDate(date, lang)} · {foreman}
+            </div>
+            <div className="flex justify-between text-[11px] font-bold text-graphite/50 border-b border-graphite/20 pb-1 mb-2">
+              <span>{tr.workerHeader.toUpperCase()}</span>
+              <span>{tr.hoursHeader.toUpperCase()}</span>
+            </div>
+            {workers.map((w) => (
+              <button
+                key={w.name}
+                onClick={() => setScreen("form")}
+                className="w-full flex justify-between py-2 border-b border-graphite/10 text-left active:bg-graphite/5"
+              >
+                <span className="font-medium">{w.name}</span>
+                <span className="font-semibold tabular-nums">{w.hours}</span>
+              </button>
+            ))}
+            <div className="flex justify-between items-center pt-3 mt-1">
+              <span className="font-bold">{tr.total}</span>
+              <span className="text-2xl font-extrabold text-safetyDark tabular-nums">
+                {round2(total)}
+              </span>
+            </div>
+            {workDone.trim() && (
+              <div className="mt-4 text-sm">
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.workDone.toUpperCase()}
+                </div>
+                <div>{workDone}</div>
+              </div>
+            )}
+            {notes.trim() && (
+              <div className="mt-3 text-sm">
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.notes.toUpperCase()}
+                </div>
+                <div>{notes}</div>
+              </div>
+            )}
+          </div>
+
+          {submitState === "error" && (
+            <div className="mt-4 bg-red-500/15 border border-red-500/40 rounded-2xl p-4 text-red-200">
+              <div className="font-bold">{tr.failTitle}</div>
+              <div className="text-sm">{errorMsg}</div>
+            </div>
+          )}
+        </div>
+
+        {/* Sticky bottom bar */}
+        <div className="fixed bottom-0 inset-x-0 bg-steel border-t border-line p-4 flex gap-3">
+          <button
+            onClick={() => setScreen("form")}
+            disabled={submitState === "submitting"}
+            className="px-5 py-4 rounded-2xl bg-graphite text-concrete font-semibold disabled:opacity-50"
+          >
+            {tr.back}
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitState === "submitting"}
+            className="flex-1 py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
+          >
+            {submitState === "submitting" ? tr.submitting : tr.submit}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Main form ----
+  return (
+    <div className="min-h-screen flex flex-col">
+      <TopBar tr={tr} lang={lang} setLang={setLang} />
+
+      <div className="flex-1 overflow-y-auto px-5 pb-32">
+        {/* Foreman line */}
+        <button
+          onClick={() => setShowForemanPicker(true)}
+          className="w-full flex items-center justify-between mt-4 mb-5 text-left"
+        >
+          <div>
+            <div className="text-[11px] font-bold text-rebar tracking-wide">
+              {tr.foreman.toUpperCase()}
+            </div>
+            <div className="text-lg font-bold">{foreman}</div>
+          </div>
+          <span className="text-safety text-sm font-semibold">
+            {tr.changeForeman}
+          </span>
+        </button>
+
+        {/* Date + Job */}
+        <div className="grid grid-cols-2 gap-3 mb-5">
+          <Field label={tr.date}>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete"
+            />
+          </Field>
+          <Field label={tr.job}>
+            <input
+              type="text"
+              value={job}
+              onChange={(e) => setJob(e.target.value)}
+              placeholder={tr.jobPlaceholder}
+              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete placeholder:text-rebar/60"
+            />
+          </Field>
+        </div>
+
+        {/* Crew */}
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-[11px] font-bold text-rebar tracking-wide">
+            {tr.crew.toUpperCase()}
+          </div>
+          {workers.length > 1 && (
+            <ApplyAll tr={tr} onApply={applyAll} />
+          )}
+        </div>
+
+        {/* Selected workers with hours */}
+        <div className="space-y-2 mb-3">
+          {workers.map((w) => (
+            <div
+              key={w.name}
+              className="bg-graphite rounded-2xl p-3 flex items-center gap-3"
+            >
+              <button
+                onClick={() => removeWorker(w.name)}
+                aria-label={tr.remove}
+                className="text-rebar text-xl leading-none w-7 h-7 flex items-center justify-center rounded-full bg-steel/60"
+              >
+                ×
+              </button>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold truncate">{w.name}</div>
+                {w.isNew && (
+                  <div className="text-[10px] text-safety font-bold">
+                    {lang === "es" ? "NUEVO" : "NEW"}
+                  </div>
+                )}
+              </div>
+              <HoursControl
+                value={w.hours}
+                onChange={(h) => setWorkerHours(w.name, h)}
+                lang={lang}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Add / search box */}
+        <div className="bg-graphite rounded-2xl p-2">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={tr.addWorkerSearch}
+            className="w-full bg-transparent px-2 py-2 text-concrete placeholder:text-rebar/60 outline-none"
+          />
+          {(query.trim() || suggestions.length > 0) && (
+            <div className="max-h-56 overflow-y-auto mt-1">
+              {!exactExists && query.trim() && (
+                <button
+                  onClick={() => addWorker(query, true)}
+                  className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mb-1"
+                >
+                  + {tr.addNew} “{query.trim()}”
+                </button>
+              )}
+              {suggestions.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => addWorker(n)}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel/60 text-concrete"
+                >
+                  {n}
+                </button>
+              ))}
+              {!rosterLoaded && (
+                <div className="px-3 py-3 text-rebar text-sm">{tr.loading}</div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Work done + notes */}
+        <div className="mt-5 space-y-4">
+          <Field label={tr.workDone}>
+            <textarea
+              value={workDone}
+              onChange={(e) => setWorkDone(e.target.value)}
+              placeholder={tr.workDonePlaceholder}
+              rows={2}
+              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete placeholder:text-rebar/60 resize-none"
+            />
+          </Field>
+          <Field label={tr.notes}>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={tr.notesPlaceholder}
+              rows={2}
+              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete placeholder:text-rebar/60 resize-none"
+            />
+          </Field>
+        </div>
+
+        {/* Clear */}
+        <button
+          onClick={() => setShowClearConfirm(true)}
+          className="mt-6 text-rebar text-sm font-semibold underline underline-offset-4"
+        >
+          {tr.clear}
+        </button>
+      </div>
+
+      {/* Sticky review bar */}
+      <div className="fixed bottom-0 inset-x-0 bg-steel border-t border-line p-4">
+        {validationMsg && (
+          <div className="text-red-300 text-sm font-semibold mb-2 text-center">
+            {validationMsg}
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <div className="text-rebar text-sm">
+            {tr.total}:{" "}
+            <span className="text-concrete font-bold tabular-nums">
+              {round2(total)}
+            </span>
+          </div>
+          <button
+            onClick={goReview}
+            className="px-8 py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark"
+          >
+            {tr.review}
+          </button>
+        </div>
+      </div>
+
+      {/* Clear confirm */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center p-4 z-50">
+          <div className="bg-graphite rounded-3xl p-6 w-full max-w-sm">
+            <div className="font-bold text-lg mb-5">{tr.clearConfirm}</div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowClearConfirm(false)}
+                className="flex-1 py-4 rounded-2xl bg-steel text-concrete font-semibold"
+              >
+                {tr.no}
+              </button>
+              <button
+                onClick={() => clearForm(false)}
+                className="flex-1 py-4 rounded-2xl bg-safety text-steel font-bold"
+              >
+                {tr.yes}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Subcomponents ----------
+
+function TopBar({
+  tr,
+  lang,
+  setLang,
+}: {
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  setLang: (l: Lang) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between px-5 pt-5 pb-2">
+      <div className="flex items-center gap-2">
+        <div className="w-2.5 h-6 bg-safety rounded-sm" />
+        <span className="font-extrabold tracking-tight">{tr.appTitle}</span>
+      </div>
+      <button
+        onClick={() => setLang(lang === "es" ? "en" : "es")}
+        className="text-xs font-bold bg-graphite px-3 py-2 rounded-full text-concrete"
+      >
+        {lang === "es" ? "EN" : "ES"}
+      </button>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block">
+      <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
+        {label.toUpperCase()}
+      </div>
+      {children}
+    </label>
+  );
+}
+
+function HoursControl({
+  value,
+  onChange,
+  lang,
+}: {
+  value: number | null;
+  onChange: (h: number | null) => void;
+  lang: Lang;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [raw, setRaw] = useState(value != null ? String(value) : "");
+
+  useEffect(() => {
+    setRaw(value != null ? String(value) : "");
+  }, [value]);
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        inputMode="decimal"
+        step="0.25"
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        onBlur={() => {
+          const n = parseFloat(raw);
+          onChange(isNaN(n) ? null : n);
+          setEditing(false);
+        }}
+        className="w-20 text-center bg-steel rounded-xl py-2 font-bold text-concrete"
+      />
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <div className="hidden">{lang}</div>
+      {QUICK_HOURS.map((h) => (
+        <button
+          key={h}
+          onClick={() => onChange(h)}
+          className={`w-9 h-10 rounded-lg text-sm font-bold ${
+            value === h
+              ? "bg-safety text-steel"
+              : "bg-steel/70 text-rebar"
+          }`}
+        >
+          {h}
+        </button>
+      ))}
+      <button
+        onClick={() => setEditing(true)}
+        className={`min-w-[2.75rem] h-10 px-2 rounded-lg text-sm font-bold ${
+          value != null && !QUICK_HOURS.includes(value)
+            ? "bg-safety text-steel"
+            : "bg-steel/70 text-concrete"
+        }`}
+      >
+        {value != null && !QUICK_HOURS.includes(value) ? value : "·.·"}
+      </button>
+    </div>
+  );
+}
+
+function ApplyAll({
+  tr,
+  onApply,
+}: {
+  tr: ReturnType<typeof t>;
+  onApply: (h: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [raw, setRaw] = useState("8");
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="text-safety text-xs font-bold"
+      >
+        {tr.applyAll}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-7 z-20 bg-graphite rounded-2xl p-3 shadow-xl flex items-center gap-2 border border-line">
+          <input
+            type="number"
+            inputMode="decimal"
+            step="0.25"
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            className="w-16 text-center bg-steel rounded-lg py-2 font-bold text-concrete"
+          />
+          <button
+            onClick={() => {
+              const n = parseFloat(raw);
+              if (!isNaN(n)) onApply(n);
+              setOpen(false);
+            }}
+            className="bg-safety text-steel font-bold px-3 py-2 rounded-lg text-sm"
+          >
+            {tr.done}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ForemanPicker({
+  roster,
+  rosterLoaded,
+  tr,
+  lang,
+  setLang,
+  onPick,
+  current,
+  onCancel,
+}: {
+  roster: string[];
+  rosterLoaded: boolean;
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  setLang: (l: Lang) => void;
+  onPick: (n: string) => void;
+  current: string;
+  onCancel?: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const list = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return roster;
+    return roster.filter((n) => n.toLowerCase().includes(query));
+  }, [q, roster]);
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <TopBar tr={tr} lang={lang} setLang={setLang} />
+      <div className="px-5 flex-1 flex flex-col">
+        <h1 className="text-2xl font-extrabold mt-6 mb-1">{tr.pickForeman}</h1>
+        <input
+          type="text"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={tr.addWorkerSearch}
+          className="w-full bg-graphite rounded-xl px-4 py-3 my-4 text-concrete placeholder:text-rebar/60"
+        />
+        <div className="flex-1 overflow-y-auto space-y-2 pb-6">
+          {!rosterLoaded && (
+            <div className="text-rebar">{tr.loading}</div>
+          )}
+          {list.map((n) => (
+            <button
+              key={n}
+              onClick={() => onPick(n)}
+              className={`w-full text-left px-4 py-4 rounded-2xl font-semibold ${
+                n === current
+                  ? "bg-safety text-steel"
+                  : "bg-graphite text-concrete active:bg-line"
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+          {rosterLoaded && list.length === 0 && (
+            <div className="text-rebar text-sm">
+              {q.trim()
+                ? lang === "es"
+                  ? "Sin resultados"
+                  : "No matches"
+                : ""}
+            </div>
+          )}
+        </div>
+        {onCancel && (
+          <button
+            onClick={onCancel}
+            className="mb-6 py-4 rounded-2xl bg-graphite text-concrete font-semibold"
+          >
+            {tr.back}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- helpers ----------
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
+}
+
+function prettyDate(iso: string, lang: Lang) {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const monthsEs = [
+    "ene", "feb", "mar", "abr", "may", "jun",
+    "jul", "ago", "sep", "oct", "nov", "dic",
+  ];
+  const monthsEn = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const mo = (lang === "es" ? monthsEs : monthsEn)[m - 1];
+  return `${d} ${mo} ${y}`;
+}

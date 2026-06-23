@@ -16,6 +16,7 @@ export const ROSTER_PROPS = {
   name: "Name", // Title property
   active: "Active", // Checkbox
   status: "Status", // Text
+  role: "Role", // Text/Select — used to identify foremen
 };
 
 // Property names in the Timecards database.

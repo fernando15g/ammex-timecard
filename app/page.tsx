@@ -37,6 +37,7 @@ export default function Page() {
   const [notes, setNotes] = useState("");
 
   const [roster, setRoster] = useState<string[]>([]);
+  const [foremen, setForemen] = useState<string[]>([]);
   const [rosterLoaded, setRosterLoaded] = useState(false);
   const [query, setQuery] = useState("");
 
@@ -46,9 +47,16 @@ export default function Page() {
   >("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [selfRemoveName, setSelfRemoveName] = useState<string | null>(null);
   const [validationMsg, setValidationMsg] = useState("");
 
   const hydrated = useRef(false);
+  // Tracks whether the foreman deliberately changed the date. If he hasn't,
+  // the date auto-follows "today" (including when the app returns to focus).
+  const dateManual = useRef(false);
+  // Tracks whether the foreman deliberately took himself out of the crew for
+  // this card, so we don't keep auto-adding him back.
+  const foremanRemoved = useRef(false);
 
   // ---- Hydrate persisted state on first load ----
   useEffect(() => {
@@ -63,20 +71,33 @@ export default function Page() {
       const draftRaw = localStorage.getItem(DRAFT_KEY);
       if (draftRaw) {
         const d = JSON.parse(draftRaw);
-        if (d.date) setDate(d.date);
+        if (d.foremanRemoved) foremanRemoved.current = true;
+        if (d.date) {
+          setDate(d.date);
+          // A saved draft may hold a deliberately chosen date; if it's not
+          // today, treat it as manual so focus re-check won't overwrite it.
+          if (d.date !== todayISO()) dateManual.current = true;
+        }
         if (typeof d.job === "string") setJob(d.job);
-        if (Array.isArray(d.workers)) setWorkers(d.workers);
+        let restored: Worker[] = Array.isArray(d.workers) ? d.workers : [];
+        if (savedForeman && !foremanRemoved.current) {
+          restored = ensureForeman(savedForeman, restored);
+        }
+        setWorkers(restored);
         if (typeof d.workDone === "string") setWorkDone(d.workDone);
         if (typeof d.notes === "string") setNotes(d.notes);
       } else {
         // No draft: prefill crew from last submitted crew, hours blank
+        let initial: Worker[] = [];
         const lastRaw = localStorage.getItem(LASTCREW_KEY);
         if (lastRaw) {
           const last = JSON.parse(lastRaw) as string[];
           if (Array.isArray(last) && last.length) {
-            setWorkers(last.map((n) => ({ name: n, hours: null })));
+            initial = last.map((n) => ({ name: n, hours: null }));
           }
         }
+        if (savedForeman) initial = ensureForeman(savedForeman, initial);
+        setWorkers(initial);
       }
     } catch {
       /* ignore */
@@ -90,10 +111,32 @@ export default function Page() {
       .then((r) => r.json())
       .then((d) => {
         if (Array.isArray(d.workers)) setRoster(d.workers);
+        if (Array.isArray(d.foremen)) setForemen(d.foremen);
       })
       .catch(() => {})
       .finally(() => setRosterLoaded(true));
   }, []);
+
+  // ---- Re-check today's date whenever the app returns to focus ----
+  // Foremen often leave the app open in the background overnight; this makes
+  // sure the date is correct for the current day when they come back, unless
+  // they deliberately picked a different date.
+  useEffect(() => {
+    function refresh() {
+      if (!dateManual.current && submitState !== "sent") {
+        setDate(todayISO());
+      }
+    }
+    function onVisible() {
+      if (document.visibilityState === "visible") refresh();
+    }
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [submitState]);
 
   // ---- Persist draft whenever it changes ----
   useEffect(() => {
@@ -101,7 +144,14 @@ export default function Page() {
     try {
       localStorage.setItem(
         DRAFT_KEY,
-        JSON.stringify({ date, job, workers, workDone, notes })
+        JSON.stringify({
+          date,
+          job,
+          workers,
+          workDone,
+          notes,
+          foremanRemoved: foremanRemoved.current,
+        })
       );
     } catch {
       /* ignore */
@@ -157,7 +207,21 @@ export default function Page() {
   }
 
   function removeWorker(name: string) {
+    // Removing yourself (the foreman) asks for a quick confirm.
+    if (foreman && name.toLowerCase() === foreman.toLowerCase()) {
+      setSelfRemoveName(name);
+      return;
+    }
     setWorkers((prev) => prev.filter((w) => w.name !== name));
+  }
+
+  function confirmSelfRemove() {
+    if (!selfRemoveName) return;
+    foremanRemoved.current = true;
+    setWorkers((prev) =>
+      prev.filter((w) => w.name.toLowerCase() !== selfRemoveName.toLowerCase())
+    );
+    setSelfRemoveName(null);
   }
 
   function setWorkerHours(name: string, hours: number | null) {
@@ -171,10 +235,23 @@ export default function Page() {
   }
 
   function chooseForeman(name: string) {
+    const prev = foreman;
     setForeman(name);
     try {
       localStorage.setItem(FOREMAN_KEY, name);
     } catch {}
+    foremanRemoved.current = false;
+    setWorkers((list) => {
+      let next = list;
+      // On a clean swap, drop the old foreman if he was added but untouched.
+      if (prev && prev.toLowerCase() !== name.toLowerCase()) {
+        next = next.filter(
+          (w) =>
+            !(w.name.toLowerCase() === prev.toLowerCase() && w.hours == null)
+        );
+      }
+      return ensureForeman(name, next);
+    });
     setShowForemanPicker(false);
   }
 
@@ -237,11 +314,15 @@ export default function Page() {
 
   function clearForm(keepDate = false) {
     setJob("");
-    setWorkers([]);
+    foremanRemoved.current = false;
+    setWorkers(foreman ? ensureForeman(foreman, []) : []);
     setWorkDone("");
     setNotes("");
     setQuery("");
-    if (!keepDate) setDate(todayISO());
+    if (!keepDate) {
+      dateManual.current = false;
+      setDate(todayISO());
+    }
     try {
       localStorage.removeItem(DRAFT_KEY);
     } catch {}
@@ -255,8 +336,12 @@ export default function Page() {
     setWorkDone("");
     setNotes("");
     setQuery("");
+    dateManual.current = false;
     setDate(todayISO());
-    setWorkers(last.map((n) => ({ name: n, hours: null })));
+    foremanRemoved.current = false;
+    let next = last.map((n) => ({ name: n, hours: null as number | null }));
+    if (foreman) next = ensureForeman(foreman, next);
+    setWorkers(next);
     setSubmitState("idle");
     setScreen("form");
   }
@@ -267,7 +352,8 @@ export default function Page() {
     setWorkDone("");
     setNotes("");
     setQuery("");
-    setWorkers([]);
+    foremanRemoved.current = false;
+    setWorkers(foreman ? ensureForeman(foreman, []) : []);
     setSubmitState("idle");
     setScreen("form");
   }
@@ -276,7 +362,7 @@ export default function Page() {
   if (showForemanPicker) {
     return (
       <ForemanPicker
-        roster={roster}
+        roster={foremen}
         rosterLoaded={rosterLoaded}
         tr={tr}
         lang={lang}
@@ -420,7 +506,10 @@ export default function Page() {
             <input
               type="date"
               value={date}
-              onChange={(e) => setDate(e.target.value)}
+              onChange={(e) => {
+                dateManual.current = true;
+                setDate(e.target.value);
+              }}
               className="w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete appearance-none"
             />
           </Field>
@@ -579,6 +668,29 @@ export default function Page() {
               </button>
               <button
                 onClick={() => clearForm(false)}
+                className="flex-1 py-4 rounded-2xl bg-safety text-steel font-bold"
+              >
+                {tr.yes}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Self-removal confirm (foreman taking himself off the crew) */}
+      {selfRemoveName && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center p-4 z-50">
+          <div className="bg-graphite rounded-3xl p-6 w-full max-w-sm">
+            <div className="font-bold text-lg mb-5">{tr.selfRemoveConfirm}</div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setSelfRemoveName(null)}
+                className="flex-1 py-4 rounded-2xl bg-steel text-concrete font-semibold"
+              >
+                {tr.no}
+              </button>
+              <button
+                onClick={confirmSelfRemove}
                 className="flex-1 py-4 rounded-2xl bg-safety text-steel font-bold"
               >
                 {tr.yes}
@@ -822,6 +934,13 @@ function ForemanPicker({
 }
 
 // ---------- helpers ----------
+// Put the foreman in the crew (at the top) if he's not already there.
+function ensureForeman(name: string, list: Worker[]): Worker[] {
+  if (!name) return list;
+  if (list.some((w) => w.name.toLowerCase() === name.toLowerCase())) return list;
+  return [{ name, hours: null }, ...list];
+}
+
 function round2(n: number) {
   return Math.round(n * 100) / 100;
 }

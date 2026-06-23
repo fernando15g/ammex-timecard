@@ -7,9 +7,23 @@ import {
 } from "@/lib/notion";
 
 // Reads the crew roster: every worker whose "Active" checkbox is checked.
-// Returns a simple list of names for the picker.
+// Returns two lists:
+//   workers  - all active names (for the crew picker)
+//   foremen  - active names whose Role is "Foreman" (for the "who are you?" screen)
 
 export const dynamic = "force-dynamic"; // always fetch fresh roster
+
+// Pull a plain-text value from either a Select or a Text (rich_text) property,
+// so it works whichever type "Role" happens to be in Notion.
+function readRole(prop: any): string {
+  if (!prop) return "";
+  if (prop.type === "select") return prop.select?.name || "";
+  if (prop.type === "rich_text")
+    return prop.rich_text?.map((t: any) => t.plain_text).join("") || "";
+  if (prop.type === "multi_select")
+    return (prop.multi_select || []).map((s: any) => s.name).join(", ");
+  return "";
+}
 
 export async function GET() {
   if (!NOTION_TOKEN) {
@@ -22,7 +36,8 @@ export async function GET() {
   const notion = new Client({ auth: NOTION_TOKEN });
 
   try {
-    const names: string[] = [];
+    const workers: string[] = [];
+    const foremen: string[] = [];
     let cursor: string | undefined = undefined;
 
     do {
@@ -38,18 +53,26 @@ export async function GET() {
 
       for (const page of res.results) {
         const titleProp = page.properties?.[ROSTER_PROPS.name];
-        const title = titleProp?.title?.map((t: any) => t.plain_text).join("") || "";
+        const title =
+          titleProp?.title?.map((t: any) => t.plain_text).join("") || "";
         const name = title.trim();
-        if (name) names.push(name);
+        if (!name) continue;
+
+        workers.push(name);
+
+        const role = readRole(page.properties?.[ROSTER_PROPS.role]).toLowerCase();
+        if (role.includes("foreman")) foremen.push(name);
       }
 
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
 
-    // Sort alphabetically, case-insensitive
-    names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+    const sorter = (a: string, b: string) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" });
+    workers.sort(sorter);
+    foremen.sort(sorter);
 
-    return NextResponse.json({ workers: names });
+    return NextResponse.json({ workers, foremen });
   } catch (err: any) {
     console.error("Roster read failed:", err?.message || err);
     return NextResponse.json(

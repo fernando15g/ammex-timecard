@@ -41,6 +41,7 @@ export default function Page() {
   const [rosterLoaded, setRosterLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [justUpdated, setJustUpdated] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [query, setQuery] = useState("");
 
   const [screen, setScreen] = useState<"form" | "review">("form");
@@ -632,7 +633,11 @@ export default function Page() {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onFocus={liftSearchBox}
+            onFocus={() => {
+              setSearchFocused(true);
+              liftSearchBox();
+            }}
+            onBlur={() => setSearchFocused(false)}
             placeholder={tr.addWorkerSearch}
             className="w-full bg-transparent px-2 py-2 text-concrete placeholder:text-rebar/60 outline-none"
           />
@@ -698,28 +703,31 @@ export default function Page() {
         </button>
       </div>
 
-      {/* Sticky review bar */}
-      <div className="fixed bottom-0 inset-x-0 bg-steel border-t border-line p-4">
-        {validationMsg && (
-          <div className="text-red-300 text-sm font-semibold mb-2 text-center">
-            {validationMsg}
+      {/* Sticky review bar — hidden while searching so it doesn't float over
+          the name list above the keyboard */}
+      {!searchFocused && (
+        <div className="fixed bottom-0 inset-x-0 bg-steel border-t border-line p-4">
+          {validationMsg && (
+            <div className="text-red-300 text-sm font-semibold mb-2 text-center">
+              {validationMsg}
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <div className="text-rebar text-sm">
+              {tr.total}:{" "}
+              <span className="text-concrete font-bold tabular-nums">
+                {round2(total)}
+              </span>
+            </div>
+            <button
+              onClick={goReview}
+              className="px-8 py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark"
+            >
+              {tr.review}
+            </button>
           </div>
-        )}
-        <div className="flex items-center justify-between">
-          <div className="text-rebar text-sm">
-            {tr.total}:{" "}
-            <span className="text-concrete font-bold tabular-nums">
-              {round2(total)}
-            </span>
-          </div>
-          <button
-            onClick={goReview}
-            className="px-8 py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark"
-          >
-            {tr.review}
-          </button>
         </div>
-      </div>
+      )}
 
       {/* Clear confirm */}
       {showClearConfirm && (
@@ -990,7 +998,7 @@ function ForemanPicker({
           type="text"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={tr.addWorkerSearch}
+          placeholder={tr.searchForeman}
           className="w-full bg-graphite rounded-xl px-4 py-3 my-4 text-concrete placeholder:text-rebar/60"
         />
         <div className="flex-1 overflow-y-auto space-y-2 pb-6">

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Lang, t } from "@/lib/strings";
 
 interface Worker {
@@ -39,6 +39,8 @@ export default function Page() {
   const [roster, setRoster] = useState<string[]>([]);
   const [foremen, setForemen] = useState<string[]>([]);
   const [rosterLoaded, setRosterLoaded] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [justUpdated, setJustUpdated] = useState(false);
   const [query, setQuery] = useState("");
 
   const [screen, setScreen] = useState<"form" | "review">("form");
@@ -51,6 +53,7 @@ export default function Page() {
   const [validationMsg, setValidationMsg] = useState("");
 
   const hydrated = useRef(false);
+  const addBoxRef = useRef<HTMLDivElement>(null);
   // Tracks whether the foreman deliberately changed the date. If he hasn't,
   // the date auto-follows "today" (including when the app returns to focus).
   const dateManual = useRef(false);
@@ -105,17 +108,34 @@ export default function Page() {
     hydrated.current = true;
   }, []);
 
-  // ---- Fetch roster ----
-  useEffect(() => {
-    fetch("/api/roster")
-      .then((r) => r.json())
-      .then((d) => {
-        if (Array.isArray(d.workers)) setRoster(d.workers);
-        if (Array.isArray(d.foremen)) setForemen(d.foremen);
-      })
-      .catch(() => {})
-      .finally(() => setRosterLoaded(true));
+  // ---- Fetch roster (reusable, used on load and by the refresh button) ----
+  const loadRoster = useCallback(async () => {
+    try {
+      const r = await fetch("/api/roster");
+      const d = await r.json();
+      if (Array.isArray(d.workers)) setRoster(d.workers);
+      if (Array.isArray(d.foremen)) setForemen(d.foremen);
+    } catch {
+      /* ignore */
+    } finally {
+      setRosterLoaded(true);
+    }
   }, []);
+
+  useEffect(() => {
+    loadRoster();
+  }, [loadRoster]);
+
+  // Refresh the roster only (never touches the form). Brief spin + confirm.
+  async function refreshRoster() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setJustUpdated(false);
+    await loadRoster();
+    setRefreshing(false);
+    setJustUpdated(true);
+    window.setTimeout(() => setJustUpdated(false), 1800);
+  }
 
   // ---- Re-check today's date whenever the app returns to focus ----
   // Foremen often leave the app open in the background overnight; this makes
@@ -176,9 +196,21 @@ export default function Page() {
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
     const pool = roster.filter((n) => !selectedNames.has(n.toLowerCase()));
-    if (!q) return pool.slice(0, 50);
-    return pool.filter((n) => n.toLowerCase().includes(q)).slice(0, 50);
+    if (!q) return pool.slice(0, 100);
+    // Rank: names that start with the query come first, then the rest.
+    const matches = pool.filter((n) => n.toLowerCase().includes(q));
+    matches.sort((a, b) => {
+      const aStarts = a.toLowerCase().startsWith(q) ? 0 : 1;
+      const bStarts = b.toLowerCase().startsWith(q) ? 0 : 1;
+      if (aStarts !== bStarts) return aStarts - bStarts;
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    });
+    return matches.slice(0, 100);
   }, [query, roster, selectedNames]);
+
+  // The single best match, surfaced at the top of the box when searching.
+  const topMatch = query.trim() ? suggestions[0] : undefined;
+  const restMatches = topMatch ? suggestions.slice(1) : suggestions;
 
   const exactExists = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -258,6 +290,7 @@ export default function Page() {
   function validate(): string {
     if (!foreman) return tr.noForeman;
     if (!job.trim()) return tr.noJob;
+    if (date > todayISO()) return tr.noFutureDate;
     if (workers.length === 0) return tr.noCrew;
     if (workers.some((w) => !w.hours || w.hours <= 0)) return tr.noHours;
     return "";
@@ -406,6 +439,17 @@ export default function Page() {
           <h2 className="text-xs font-bold text-rebar tracking-wide mt-4 mb-3">
             {tr.reviewTitle.toUpperCase()}
           </h2>
+
+          {/* Date heads-up: only when the card isn't dated today. */}
+          {date !== todayISO() && (
+            <div className="mb-3 rounded-2xl bg-safety/15 border border-safety/40 px-4 py-3 flex items-start gap-2">
+              <span className="text-safety text-base leading-none mt-0.5">⚠</span>
+              <span className="text-sm text-concrete">
+                {tr.dateNotToday.replace("{date}", prettyDate(date, lang))}
+              </span>
+            </div>
+          )}
+
           <div className="bg-concrete text-steel rounded-2xl p-5">
             <div className="text-lg font-bold">{job}</div>
             <div className="text-sm text-graphite/70 mb-4">
@@ -481,7 +525,14 @@ export default function Page() {
   // ---- Main form ----
   return (
     <div className="min-h-screen flex flex-col">
-      <TopBar tr={tr} lang={lang} setLang={setLang} />
+      <TopBar
+        tr={tr}
+        lang={lang}
+        setLang={setLang}
+        onRefresh={refreshRoster}
+        refreshing={refreshing}
+        justUpdated={justUpdated}
+      />
 
       <div className="flex-1 overflow-y-auto px-5 pb-32">
         {/* Foreman line */}
@@ -506,6 +557,7 @@ export default function Page() {
             <input
               type="date"
               value={date}
+              max={todayISO()}
               onChange={(e) => {
                 dateManual.current = true;
                 setDate(e.target.value);
@@ -566,29 +618,53 @@ export default function Page() {
         </div>
 
         {/* Add / search box */}
-        <div className="bg-graphite rounded-2xl p-2">
+        <div ref={addBoxRef} className="bg-graphite rounded-2xl p-2 scroll-mt-4">
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => {
+              // Bring the box up so matches stay visible above the keyboard.
+              window.setTimeout(() => {
+                addBoxRef.current?.scrollIntoView({
+                  block: "start",
+                  behavior: "smooth",
+                });
+              }, 250);
+            }}
             placeholder={tr.addWorkerSearch}
             className="w-full bg-transparent px-2 py-2 text-concrete placeholder:text-rebar/60 outline-none"
           />
-          {(query.trim() || suggestions.length > 0) && (
-            <div className="max-h-56 overflow-y-auto mt-1">
-              {!exactExists && query.trim() && (
-                <button
-                  onClick={() => addWorker(query, true)}
-                  className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mb-1"
-                >
-                  + {tr.addNew} “{query.trim()}”
-                </button>
-              )}
-              {suggestions.map((n) => (
+
+          {/* Add-new option (when the typed name isn't in the roster) */}
+          {!exactExists && query.trim() && (
+            <button
+              onClick={() => addWorker(query, true)}
+              className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mb-1 mt-1"
+            >
+              + {tr.addNew} “{query.trim()}”
+            </button>
+          )}
+
+          {/* Best match, surfaced at the top when searching */}
+          {topMatch && (
+            <button
+              onClick={() => addWorker(topMatch)}
+              className="w-full text-left px-3 py-3 rounded-xl bg-safety/10 ring-1 ring-safety/40 text-concrete font-semibold mb-1 flex items-center justify-between"
+            >
+              <span>{topMatch}</span>
+              <span className="text-safety text-xl leading-none">＋</span>
+            </button>
+          )}
+
+          {/* The rest of the matches (taller list before scrolling) */}
+          {(query.trim() || restMatches.length > 0) && (
+            <div className="max-h-[60vh] overflow-y-auto mt-1">
+              {restMatches.map((n) => (
                 <button
                   key={n}
                   onClick={() => addWorker(n)}
-                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel/60 text-concrete"
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel/60 text-concrete border-b border-line/40 last:border-0"
                 >
                   {n}
                 </button>
@@ -709,10 +785,16 @@ function TopBar({
   tr,
   lang,
   setLang,
+  onRefresh,
+  refreshing,
+  justUpdated,
 }: {
   tr: ReturnType<typeof t>;
   lang: Lang;
   setLang: (l: Lang) => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  justUpdated?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between px-5 pt-5 pb-2">
@@ -720,12 +802,39 @@ function TopBar({
         <div className="w-2.5 h-6 bg-safety rounded-sm" />
         <span className="font-extrabold tracking-tight">{tr.appTitle}</span>
       </div>
-      <button
-        onClick={() => setLang(lang === "es" ? "en" : "es")}
-        className="text-xs font-bold bg-graphite px-3 py-2 rounded-full text-concrete"
-      >
-        {lang === "es" ? "EN" : "ES"}
-      </button>
+      <div className="flex items-center gap-2">
+        {justUpdated && (
+          <span className="text-xs font-bold text-safety">{tr.updated}</span>
+        )}
+        {onRefresh && (
+          <button
+            onClick={onRefresh}
+            aria-label={tr.refresh}
+            className="bg-graphite w-9 h-9 rounded-full text-concrete flex items-center justify-center"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={refreshing ? "animate-spin" : ""}
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        )}
+        <button
+          onClick={() => setLang(lang === "es" ? "en" : "es")}
+          className="text-xs font-bold bg-graphite px-3 py-2 rounded-full text-concrete"
+        >
+          {lang === "es" ? "EN" : "ES"}
+        </button>
+      </div>
     </div>
   );
 }

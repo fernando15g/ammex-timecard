@@ -48,6 +48,10 @@ export const strings = {
     continue: "Continuar",
     remove: "Quitar",
     loading: "Cargando…",
+    updated: "✓ Actualizado",
+    refresh: "Actualizar lista",
+    dateNotToday: "Esta tarjeta es del {date}. Confirma que la fecha es correcta.",
+    noFutureDate: "No se puede enviar una tarjeta con fecha futura.",
   },
   en: {
     appTitle: "Timecard",
@@ -95,6 +99,10 @@ export const strings = {
     continue: "Continue",
     remove: "Remove",
     loading: "Loading…",
+    updated: "✓ Updated",
+    refresh: "Refresh list",
+    dateNotToday: "This timecard is dated {date}. Please confirm the date is correct.",
+    noFutureDate: "Can't submit a timecard for a future date.",
   },
 } as const;
 

@@ -137,6 +137,17 @@ export default function Page() {
     window.setTimeout(() => setJustUpdated(false), 1800);
   }
 
+  // When the search box is focused, lift it toward the top so the matching
+  // names stay visible above the on-screen keyboard. Fires a few times to ride
+  // out the keyboard's open animation (iOS timing is inconsistent).
+  function liftSearchBox() {
+    const doScroll = () =>
+      addBoxRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    window.setTimeout(doScroll, 150);
+    window.setTimeout(doScroll, 400);
+    window.setTimeout(doScroll, 650);
+  }
+
   // ---- Re-check today's date whenever the app returns to focus ----
   // Foremen often leave the app open in the background overnight; this makes
   // sure the date is correct for the current day when they come back, unless
@@ -196,8 +207,10 @@ export default function Page() {
   const suggestions = useMemo(() => {
     const q = query.trim().toLowerCase();
     const pool = roster.filter((n) => !selectedNames.has(n.toLowerCase()));
-    if (!q) return pool.slice(0, 100);
-    // Rank: names that start with the query come first, then the rest.
+    if (!q) return pool.slice(0, 200);
+    // Rank: names that start with the query come first, then the rest —
+    // but every match is shown as an equal option (no single highlighted pick),
+    // so common first names don't hide the person you actually want.
     const matches = pool.filter((n) => n.toLowerCase().includes(q));
     matches.sort((a, b) => {
       const aStarts = a.toLowerCase().startsWith(q) ? 0 : 1;
@@ -205,12 +218,8 @@ export default function Page() {
       if (aStarts !== bStarts) return aStarts - bStarts;
       return a.localeCompare(b, undefined, { sensitivity: "base" });
     });
-    return matches.slice(0, 100);
+    return matches.slice(0, 200);
   }, [query, roster, selectedNames]);
-
-  // The single best match, surfaced at the top of the box when searching.
-  const topMatch = query.trim() ? suggestions[0] : undefined;
-  const restMatches = topMatch ? suggestions.slice(1) : suggestions;
 
   const exactExists = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -618,49 +627,20 @@ export default function Page() {
         </div>
 
         {/* Add / search box */}
-        <div ref={addBoxRef} className="bg-graphite rounded-2xl p-2 scroll-mt-4">
+        <div ref={addBoxRef} className="bg-graphite rounded-2xl p-2 scroll-mt-3">
           <input
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onFocus={() => {
-              // Bring the box up so matches stay visible above the keyboard.
-              window.setTimeout(() => {
-                addBoxRef.current?.scrollIntoView({
-                  block: "start",
-                  behavior: "smooth",
-                });
-              }, 250);
-            }}
+            onFocus={liftSearchBox}
             placeholder={tr.addWorkerSearch}
             className="w-full bg-transparent px-2 py-2 text-concrete placeholder:text-rebar/60 outline-none"
           />
 
-          {/* Add-new option (when the typed name isn't in the roster) */}
-          {!exactExists && query.trim() && (
-            <button
-              onClick={() => addWorker(query, true)}
-              className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mb-1 mt-1"
-            >
-              + {tr.addNew} “{query.trim()}”
-            </button>
-          )}
-
-          {/* Best match, surfaced at the top when searching */}
-          {topMatch && (
-            <button
-              onClick={() => addWorker(topMatch)}
-              className="w-full text-left px-3 py-3 rounded-xl bg-safety/10 ring-1 ring-safety/40 text-concrete font-semibold mb-1 flex items-center justify-between"
-            >
-              <span>{topMatch}</span>
-              <span className="text-safety text-xl leading-none">＋</span>
-            </button>
-          )}
-
-          {/* The rest of the matches (taller list before scrolling) */}
-          {(query.trim() || restMatches.length > 0) && (
-            <div className="max-h-[60vh] overflow-y-auto mt-1">
-              {restMatches.map((n) => (
+          {(query.trim() || suggestions.length > 0) && (
+            <div className="max-h-[46vh] overflow-y-auto mt-1">
+              {/* Matching people first — all shown equally, none pre-picked */}
+              {suggestions.map((n) => (
                 <button
                   key={n}
                   onClick={() => addWorker(n)}
@@ -669,8 +649,19 @@ export default function Page() {
                   {n}
                 </button>
               ))}
+
               {!rosterLoaded && (
                 <div className="px-3 py-3 text-rebar text-sm">{tr.loading}</div>
+              )}
+
+              {/* Create-new option LAST, so it's never an accidental tap */}
+              {!exactExists && query.trim() && (
+                <button
+                  onClick={() => addWorker(query, true)}
+                  className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mt-1"
+                >
+                  + {tr.addNew} “{query.trim()}”
+                </button>
               )}
             </div>
           )}

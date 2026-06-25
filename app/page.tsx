@@ -393,6 +393,24 @@ export default function Page() {
     setScreen("form");
   }
 
+  function finishSession() {
+    // The clean exit from the "Sent" screen: a fresh card, date back to today,
+    // crew remembered for next time.
+    const last = workers.map((w) => w.name);
+    setJob("");
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    dateManual.current = false;
+    setDate(todayISO());
+    foremanRemoved.current = false;
+    let next = last.map((n) => ({ name: n, hours: null as number | null }));
+    if (foreman) next = ensureForeman(foreman, next);
+    setWorkers(next);
+    setSubmitState("idle");
+    setScreen("form");
+  }
+
   // ---- Foreman picker (first-run / change) ----
   if (showForemanPicker) {
     return (
@@ -418,9 +436,15 @@ export default function Page() {
         <p className="text-rebar mb-10">{job}</p>
         <button
           onClick={logAnotherTimecard}
-          className="w-full max-w-sm bg-safety text-steel font-bold py-4 rounded-2xl active:bg-safetyDark"
+          className="w-full max-w-sm bg-safety text-steel font-bold py-4 rounded-2xl mb-3 active:bg-safetyDark"
         >
           {tr.logAnotherCard}
+        </button>
+        <button
+          onClick={finishSession}
+          className="w-full max-w-sm bg-graphite text-concrete font-semibold py-4 rounded-2xl"
+        >
+          {tr.done}
         </button>
       </div>
     );

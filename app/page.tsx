@@ -372,31 +372,23 @@ export default function Page() {
     setShowClearConfirm(false);
   }
 
-  function startNew() {
-    // After a successful submit: prefill crew from what was just sent
+  function logAnotherTimecard() {
+    // After a successful submit: keep the crew, clear job + hours, and carry
+    // the last-used date forward (so a Saturday batch flows day to day).
+    // The carried date is session-only — a true cold start still defaults to
+    // today, and an unfinished card is preserved as-is by the draft system.
     const last = workers.map((w) => w.name);
     setJob("");
     setWorkDone("");
     setNotes("");
     setQuery("");
-    dateManual.current = false;
-    setDate(todayISO());
     foremanRemoved.current = false;
+    // Carry the current date forward; mark it manual so the focus re-check
+    // doesn't snap it back to today during the batch.
+    dateManual.current = true;
     let next = last.map((n) => ({ name: n, hours: null as number | null }));
     if (foreman) next = ensureForeman(foreman, next);
     setWorkers(next);
-    setSubmitState("idle");
-    setScreen("form");
-  }
-
-  function logAnotherJob() {
-    // Keep date (still today), clear job + crew per split-day flow
-    setJob("");
-    setWorkDone("");
-    setNotes("");
-    setQuery("");
-    foremanRemoved.current = false;
-    setWorkers(foreman ? ensureForeman(foreman, []) : []);
     setSubmitState("idle");
     setScreen("form");
   }
@@ -425,16 +417,10 @@ export default function Page() {
         <h1 className="text-2xl font-bold mb-2">{tr.sent}</h1>
         <p className="text-rebar mb-10">{job}</p>
         <button
-          onClick={logAnotherJob}
-          className="w-full max-w-sm bg-safety text-steel font-bold py-4 rounded-2xl mb-3 active:bg-safetyDark"
+          onClick={logAnotherTimecard}
+          className="w-full max-w-sm bg-safety text-steel font-bold py-4 rounded-2xl active:bg-safetyDark"
         >
-          {tr.logAnother}
-        </button>
-        <button
-          onClick={startNew}
-          className="w-full max-w-sm bg-graphite text-concrete font-semibold py-4 rounded-2xl"
-        >
-          {tr.newTimecard}
+          {tr.logAnotherCard}
         </button>
       </div>
     );

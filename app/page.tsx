@@ -949,11 +949,21 @@ function ReportsPanel({
 
   const weeks = useMemo(() => weekOptions(), []);
   const [weekStart, setWeekStart] = useState(weeks[0]?.iso || "");
+  const thisWeekStart = weeks[0]?.iso || "";
+  const thisWeekEnd = useMemo(() => {
+    if (!thisWeekStart) return "";
+    const [y, m, d] = thisWeekStart.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + 6));
+    return dt.toISOString().slice(0, 10);
+  }, [thisWeekStart]);
+  const [customStart, setCustomStart] = useState(thisWeekStart);
+  const [customEnd, setCustomEnd] = useState(thisWeekEnd);
   const [flagsOn, setFlagsOn] = useState(true);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
     "idle"
   );
   const [resultMsg, setResultMsg] = useState("");
+  const [debugText, setDebugText] = useState("");
 
   function onPinChange(v: string) {
     const digits = v.replace(/\D/g, "").slice(0, 4);
@@ -977,7 +987,11 @@ function ReportsPanel({
       const res = await fetch("/api/report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pin, weekStart, flags: flagsOn }),
+        body: JSON.stringify(
+          weekStart === "custom"
+            ? { pin, startISO: customStart, endISO: customEnd, flags: flagsOn }
+            : { pin, weekStart, flags: flagsOn }
+        ),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error || "fail");
@@ -985,6 +999,7 @@ function ReportsPanel({
       setResultMsg(
         `${d.jobs} job(s), ${d.unassigned} unassigned, ${d.noHours} no-hours, ${d.flags} flag(s)`
       );
+      if (d.debug) setDebugText(JSON.stringify(d.debug, null, 2));
     } catch (e: any) {
       setState("error");
       setResultMsg(e?.message || "");
@@ -1062,8 +1077,30 @@ function ReportsPanel({
                 {w.label}
               </option>
             ))}
+            <option value="custom">{tr.customRange}</option>
           </select>
         </Field>
+
+        {weekStart === "custom" && (
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={tr.fromLabel}>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+              />
+            </Field>
+            <Field label={tr.toLabel}>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+              />
+            </Field>
+          </div>
+        )}
 
         <button
           onClick={() => setFlagsOn((f) => !f)}
@@ -1091,6 +1128,19 @@ function ReportsPanel({
           <div className="bg-safety/15 border border-safety/40 rounded-2xl p-4">
             <div className="font-bold text-safety">{tr.reportSent}</div>
             <div className="text-sm text-rebar mt-1">{resultMsg}</div>
+          </div>
+        )}
+        {debugText && (
+          <div className="bg-graphite rounded-2xl p-3">
+            <div className="text-[11px] font-bold text-rebar tracking-wide mb-2">
+              DIAGNOSTIC (copy &amp; send to support)
+            </div>
+            <textarea
+              readOnly
+              value={debugText}
+              onFocus={(e) => e.currentTarget.select()}
+              className="w-full h-56 bg-steel rounded-xl p-3 text-[11px] text-concrete font-mono"
+            />
           </div>
         )}
         {state === "error" && (

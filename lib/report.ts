@@ -72,25 +72,38 @@ function dayIndex(weekStartISO: string, dateISO: string): number {
   return Math.round((b - a) / 86400000);
 }
 
-function fmtDayLabel(iso: string, idx: number): string {
-  const [, m, d] = iso.split("-").map(Number);
-  return `${DAY_NAMES[idx]} ${m}/${d}`;
+function fmtDayLabel(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return `${DAY_NAMES[dow]} ${m}/${d}`;
 }
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-// Build the full report from raw rows + the active roster.
+function spanDays(startISO: string, endISO: string): number {
+  const [y1, m1, d1] = startISO.split("-").map(Number);
+  const [y2, m2, d2] = endISO.split("-").map(Number);
+  const a = Date.UTC(y1, m1 - 1, d1);
+  const b = Date.UTC(y2, m2 - 1, d2);
+  return Math.round((b - a) / 86400000) + 1; // inclusive
+}
+
+// Build the full report from raw rows + the active roster, over an arbitrary
+// inclusive date span (startISO..endISO). For the weekly presets the span is
+// a 7-day Sun..Sat; custom ranges may be any length.
 export function buildReport(
   rows: RawRow[],
   activeRoster: string[],
-  weekStartISO: string, // Sunday
-  overHoursThreshold: number
+  weekStartISO: string, // span start
+  overHoursThreshold: number,
+  weekEndOverrideISO?: string // span end; defaults to start + 6 (a week)
 ): ReportData {
-  const weekEndISO = addDaysISO(weekStartISO, 6);
-  const dayLabels = Array.from({ length: 7 }, (_, i) =>
-    fmtDayLabel(addDaysISO(weekStartISO, i), i)
+  const weekEndISO = weekEndOverrideISO || addDaysISO(weekStartISO, 6);
+  const nDays = Math.max(1, spanDays(weekStartISO, weekEndISO));
+  const dayLabels = Array.from({ length: nDays }, (_, i) =>
+    fmtDayLabel(addDaysISO(weekStartISO, i))
   );
 
   // Group key: prefer clean project; else fall back to job text (unassigned).
@@ -110,7 +123,7 @@ export function buildReport(
 
   for (const r of rows) {
     const idx = dayIndex(weekStartISO, r.dateISO);
-    if (idx < 0 || idx > 6) continue; // outside the week
+    if (idx < 0 || idx >= nDays) continue; // outside the span
 
     const assigned = !!r.projectName.trim();
     const groupKey = assigned
@@ -132,7 +145,7 @@ export function buildReport(
 
     let days = g.byWorker.get(r.worker);
     if (!days) {
-      days = [0, 0, 0, 0, 0, 0, 0];
+      days = new Array(nDays).fill(0);
       g.byWorker.set(r.worker, days);
     }
     days[idx] += r.hours;
@@ -163,7 +176,7 @@ export function buildReport(
       a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
     );
 
-    const dailyTotals = [0, 0, 0, 0, 0, 0, 0];
+    const dailyTotals = new Array(nDays).fill(0);
     for (const p of people) {
       p.perDay.forEach((h, i) => {
         if (h != null) dailyTotals[i] += h;
@@ -181,10 +194,11 @@ export function buildReport(
     });
   }
 
-  // Who worked at all this week?
+  // Who worked at all during the span?
   const workedNames = new Set<string>();
   for (const r of rows) {
-    if (dayIndex(weekStartISO, r.dateISO) >= 0) workedNames.add(r.worker);
+    const idx = dayIndex(weekStartISO, r.dateISO);
+    if (idx >= 0 && idx < nDays) workedNames.add(r.worker);
   }
   const noHours = activeRoster
     .filter((n) => !workedNames.has(n))

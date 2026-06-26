@@ -64,6 +64,9 @@ export const strings = {
     reportSent: "✓ Reporte enviado",
     reportFail: "No se pudo generar el reporte. Inténtalo de nuevo.",
     close: "Cerrar",
+    customRange: "Rango personalizado…",
+    fromLabel: "Desde",
+    toLabel: "Hasta",
   },
   en: {
     appTitle: "Timecard",
@@ -127,6 +130,9 @@ export const strings = {
     reportSent: "✓ Report sent",
     reportFail: "Couldn't generate the report. Try again.",
     close: "Close",
+    customRange: "Custom range…",
+    fromLabel: "From",
+    toLabel: "To",
   },
 } as const;
 

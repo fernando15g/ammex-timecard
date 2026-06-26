@@ -58,16 +58,10 @@ export function buildReportXlsx(rd: ReportData): Buffer {
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-  // Column widths
+  // Column widths: name + one per day + total
   ws["!cols"] = [
     { wch: 26 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 10 },
-    { wch: 10 },
+    ...rd.dayLabels.map(() => ({ wch: 10 })),
     { wch: 10 },
   ];
 

@@ -31,13 +31,14 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     if (y - need < MARGIN) newPage();
   };
 
-  // Column geometry: name col + 7 day cols + total col
+  // Column geometry: name col + N day cols + total col
+  const nDays = rd.dayLabels.length || 7;
   const nameW = 150;
   const totalW = 60;
   const gridW = PAGE_W - MARGIN * 2 - nameW - totalW;
-  const dayW = gridW / 7;
+  const dayW = gridW / nDays;
   const colX = (i: number) => MARGIN + nameW + i * dayW;
-  const totalX = MARGIN + nameW + 7 * dayW;
+  const totalX = MARGIN + nameW + nDays * dayW;
   const rowH = 18;
 
   // Title

@@ -23,9 +23,13 @@ export const ROSTER_PROPS = {
 export const TIMECARD_PROPS = {
   worker: "Worker", // Title
   date: "Date", // Date
-  job: "Job", // Text (rich_text)
+  job: "Job", // Text (rich_text) — foreman's typed job name
   hours: "Hours", // Number
   workDone: "Work Done", // Text (rich_text)
   foreman: "Foreman", // Text (rich_text)
   notes: "Notes", // Text (rich_text)
+  projectHelper: "Project Helper", // Relation/rollup — clean project name
+  jobIdHelper: "Job ID Helper", // Rollup — clean job ID (text, e.g. "26-4")
 };
+
+export const PAYROLL_RECIPIENT = "fernando@ammexrebar.com";

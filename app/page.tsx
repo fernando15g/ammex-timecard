@@ -42,6 +42,7 @@ export default function Page() {
   const [refreshing, setRefreshing] = useState(false);
   const [justUpdated, setJustUpdated] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
+  const [showReports, setShowReports] = useState(false);
   const [query, setQuery] = useState("");
 
   const [screen, setScreen] = useState<"form" | "review">("form");
@@ -552,6 +553,7 @@ export default function Page() {
         onRefresh={refreshRoster}
         refreshing={refreshing}
         justUpdated={justUpdated}
+        onMenu={() => setShowReports(true)}
       />
 
       <div className="flex-1 overflow-y-auto px-5 pb-32">
@@ -784,6 +786,11 @@ export default function Page() {
           </div>
         </div>
       )}
+
+      {/* Reports admin panel (PIN-gated) */}
+      {showReports && (
+        <ReportsPanel tr={tr} onClose={() => setShowReports(false)} />
+      )}
     </div>
   );
 }
@@ -797,6 +804,7 @@ function TopBar({
   onRefresh,
   refreshing,
   justUpdated,
+  onMenu,
 }: {
   tr: ReturnType<typeof t>;
   lang: Lang;
@@ -804,10 +812,22 @@ function TopBar({
   onRefresh?: () => void;
   refreshing?: boolean;
   justUpdated?: boolean;
+  onMenu?: () => void;
 }) {
   return (
     <div className="flex items-center justify-between px-5 pt-5 pb-2">
       <div className="flex items-center gap-2">
+        {onMenu && (
+          <button
+            onClick={onMenu}
+            aria-label="Menu"
+            className="w-9 h-9 rounded-lg bg-graphite text-concrete flex items-center justify-center mr-1"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+              <path d="M3 6h18M3 12h18M3 18h18" />
+            </svg>
+          </button>
+        )}
         <div className="w-2.5 h-6 bg-safety rounded-sm" />
         <span className="font-extrabold tracking-tight">{tr.appTitle}</span>
       </div>
@@ -862,6 +882,173 @@ function Field({
       </div>
       {children}
     </label>
+  );
+}
+
+function weekStartsBack(count: number): { iso: string; label: string }[] {
+  const out: { iso: string; label: string }[] = [];
+  const now = new Date();
+  const off = now.getTimezoneOffset();
+  const today = new Date(now.getTime() - off * 60000);
+  const dow = today.getUTCDay();
+  const thisSun = new Date(today);
+  thisSun.setUTCDate(thisSun.getUTCDate() - dow);
+  for (let i = 1; i <= count; i++) {
+    const s = new Date(thisSun);
+    s.setUTCDate(s.getUTCDate() - 7 * i);
+    const e = new Date(s);
+    e.setUTCDate(e.getUTCDate() + 6);
+    const iso = s.toISOString().slice(0, 10);
+    const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+    out.push({ iso, label: `${fmt(s)} – ${fmt(e)}, ${s.getUTCFullYear()}` });
+  }
+  return out;
+}
+
+function ReportsPanel({
+  tr,
+  onClose,
+}: {
+  tr: ReturnType<typeof t>;
+  onClose: () => void;
+}) {
+  const [pin, setPin] = useState("");
+  const [pinOk, setPinOk] = useState(false);
+  const [pinError, setPinError] = useState(false);
+
+  const weeks = useMemo(() => weekStartsBack(52), []);
+  const [weekStart, setWeekStart] = useState(weeks[0]?.iso || "");
+  const [flagsOn, setFlagsOn] = useState(true);
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
+    "idle"
+  );
+  const [resultMsg, setResultMsg] = useState("");
+
+  function submitPin() {
+    if (pin === "5314") {
+      setPinOk(true);
+      setPinError(false);
+    } else {
+      setPinError(true);
+    }
+  }
+
+  async function generate() {
+    setState("sending");
+    setResultMsg("");
+    try {
+      const res = await fetch("/api/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin, weekStart, flags: flagsOn }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || "fail");
+      setState("sent");
+      setResultMsg(
+        `${d.jobs} job(s), ${d.unassigned} unassigned, ${d.noHours} no-hours, ${d.flags} flag(s)`
+      );
+    } catch (e: any) {
+      setState("error");
+      setResultMsg(e?.message || "");
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-steel z-[60] flex flex-col">
+      <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-line">
+        <span className="font-extrabold text-lg">{tr.reportsTitle}</span>
+        <button
+          onClick={onClose}
+          className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+        >
+          {tr.close}
+        </button>
+      </div>
+
+      {!pinOk ? (
+        <div className="flex-1 flex flex-col items-center justify-center px-6">
+          <div className="text-[11px] font-bold text-rebar tracking-wide mb-3">
+            {tr.enterPin.toUpperCase()}
+          </div>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoFocus
+            value={pin}
+            onChange={(e) => {
+              setPin(e.target.value);
+              setPinError(false);
+            }}
+            onKeyDown={(e) => e.key === "Enter" && submitPin()}
+            className="w-40 text-center text-2xl tracking-[0.4em] bg-graphite rounded-2xl py-4 text-concrete"
+            placeholder="••••"
+          />
+          {pinError && (
+            <div className="text-red-300 text-sm font-semibold mt-3">
+              {tr.wrongPin}
+            </div>
+          )}
+          <button
+            onClick={submitPin}
+            className="mt-6 w-40 py-4 rounded-2xl bg-safety text-steel font-extrabold"
+          >
+            {tr.continue}
+          </button>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
+          <Field label={tr.weekLabel}>
+            <select
+              value={weekStart}
+              onChange={(e) => setWeekStart(e.target.value)}
+              className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+            >
+              {weeks.map((w) => (
+                <option key={w.iso} value={w.iso}>
+                  {w.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <button
+            onClick={() => setFlagsOn((f) => !f)}
+            className="w-full flex items-center justify-between bg-graphite rounded-xl px-4 py-3"
+          >
+            <span className="font-semibold">{tr.includeFlags}</span>
+            <span
+              className={`w-12 h-7 rounded-full flex items-center px-1 transition ${
+                flagsOn ? "bg-safety justify-end" : "bg-steel justify-start"
+              }`}
+            >
+              <span className="w-5 h-5 rounded-full bg-concrete" />
+            </span>
+          </button>
+
+          <button
+            onClick={generate}
+            disabled={state === "sending"}
+            className="w-full py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
+          >
+            {state === "sending" ? tr.generating : tr.generateSend}
+          </button>
+
+          {state === "sent" && (
+            <div className="bg-safety/15 border border-safety/40 rounded-2xl p-4">
+              <div className="font-bold text-safety">{tr.reportSent}</div>
+              <div className="text-sm text-rebar mt-1">{resultMsg}</div>
+            </div>
+          )}
+          {state === "error" && (
+            <div className="bg-red-500/15 border border-red-500/40 rounded-2xl p-4 text-red-200">
+              <div className="font-bold">{tr.reportFail}</div>
+              {resultMsg && <div className="text-sm mt-1">{resultMsg}</div>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

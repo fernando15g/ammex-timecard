@@ -43,6 +43,7 @@ export default function Page() {
   const [justUpdated, setJustUpdated] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const [showReports, setShowReports] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const [query, setQuery] = useState("");
 
   const [screen, setScreen] = useState<"form" | "review">("form");
@@ -553,7 +554,7 @@ export default function Page() {
         onRefresh={refreshRoster}
         refreshing={refreshing}
         justUpdated={justUpdated}
-        onMenu={() => setShowReports(true)}
+        onMenu={() => setShowMenu(true)}
       />
 
       <div className="flex-1 overflow-y-auto px-5 pb-32">
@@ -787,6 +788,34 @@ export default function Page() {
         </div>
       )}
 
+      {/* Hamburger dropdown menu */}
+      {showMenu && (
+        <div
+          className="fixed inset-0 z-[55]"
+          onClick={() => setShowMenu(false)}
+        >
+          <div
+            className="absolute top-16 left-4 bg-graphite rounded-2xl shadow-xl overflow-hidden min-w-[180px] border border-line"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => {
+                setShowMenu(false);
+                setShowReports(true);
+              }}
+              className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                <path d="M9 13h6M9 17h3" />
+              </svg>
+              {tr.reportsTitle}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Reports admin panel (PIN-gated) */}
       {showReports && (
         <ReportsPanel tr={tr} onClose={() => setShowReports(false)} />
@@ -885,24 +914,26 @@ function Field({
   );
 }
 
-function weekStartsBack(count: number): { iso: string; label: string }[] {
-  const out: { iso: string; label: string }[] = [];
+function weekOptions(): { iso: string; label: string }[] {
   const now = new Date();
   const off = now.getTimezoneOffset();
   const today = new Date(now.getTime() - off * 60000);
   const dow = today.getUTCDay();
   const thisSun = new Date(today);
   thisSun.setUTCDate(thisSun.getUTCDate() - dow);
-  for (let i = 1; i <= count; i++) {
+  const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+  const mk = (weeksBack: number, name: string) => {
     const s = new Date(thisSun);
-    s.setUTCDate(s.getUTCDate() - 7 * i);
+    s.setUTCDate(s.getUTCDate() - 7 * weeksBack);
     const e = new Date(s);
     e.setUTCDate(e.getUTCDate() + 6);
-    const iso = s.toISOString().slice(0, 10);
-    const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-    out.push({ iso, label: `${fmt(s)} – ${fmt(e)}, ${s.getUTCFullYear()}` });
-  }
-  return out;
+    return {
+      iso: s.toISOString().slice(0, 10),
+      label: `${name} (${fmt(s)} – ${fmt(e)})`,
+    };
+  };
+  // This week first (default), then last week. Recomputed every open.
+  return [mk(0, "This week"), mk(1, "Last week")];
 }
 
 function ReportsPanel({
@@ -916,7 +947,7 @@ function ReportsPanel({
   const [pinOk, setPinOk] = useState(false);
   const [pinError, setPinError] = useState(false);
 
-  const weeks = useMemo(() => weekStartsBack(52), []);
+  const weeks = useMemo(() => weekOptions(), []);
   const [weekStart, setWeekStart] = useState(weeks[0]?.iso || "");
   const [flagsOn, setFlagsOn] = useState(true);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
@@ -924,12 +955,18 @@ function ReportsPanel({
   );
   const [resultMsg, setResultMsg] = useState("");
 
-  function submitPin() {
-    if (pin === "5314") {
-      setPinOk(true);
-      setPinError(false);
-    } else {
-      setPinError(true);
+  function onPinChange(v: string) {
+    const digits = v.replace(/\D/g, "").slice(0, 4);
+    setPin(digits);
+    setPinError(false);
+    if (digits.length === 4) {
+      if (digits === "5314") {
+        setPinOk(true);
+        setPinError(false);
+      } else {
+        setPinError(true);
+        setTimeout(() => setPin(""), 350);
+      }
     }
   }
 
@@ -954,6 +991,53 @@ function ReportsPanel({
     }
   }
 
+  // ---- PIN gate: compact popup anchored near the top ----
+  if (!pinOk) {
+    return (
+      <div
+        className="fixed inset-0 bg-black/60 z-[60] flex items-start justify-center px-4 pt-20"
+        onClick={onClose}
+      >
+        <div
+          className="bg-graphite rounded-3xl p-6 w-full max-w-sm relative"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={onClose}
+            aria-label={tr.close}
+            className="absolute top-4 right-4 w-8 h-8 rounded-full bg-steel text-rebar flex items-center justify-center text-lg font-bold"
+          >
+            ✕
+          </button>
+          <div className="text-[11px] font-bold text-rebar tracking-wide mb-4 mt-1">
+            {tr.enterPin.toUpperCase()}
+          </div>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoFocus
+            value={pin}
+            onChange={(e) => onPinChange(e.target.value)}
+            className="w-full text-center text-3xl tracking-[0.5em] bg-steel rounded-2xl py-4 text-concrete"
+            placeholder="••••"
+          />
+          {pinError && (
+            <div className="text-red-300 text-sm font-semibold mt-3 text-center">
+              {tr.wrongPin}
+            </div>
+          )}
+          <button
+            onClick={onClose}
+            className="mt-5 w-full py-4 rounded-2xl bg-steel text-concrete font-bold"
+          >
+            {tr.close}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Unlocked: the Reports panel ----
   return (
     <div className="fixed inset-0 bg-steel z-[60] flex flex-col">
       <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-line">
@@ -966,88 +1050,56 @@ function ReportsPanel({
         </button>
       </div>
 
-      {!pinOk ? (
-        <div className="flex-1 flex flex-col items-center justify-center px-6">
-          <div className="text-[11px] font-bold text-rebar tracking-wide mb-3">
-            {tr.enterPin.toUpperCase()}
+      <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
+        <Field label={tr.weekLabel}>
+          <select
+            value={weekStart}
+            onChange={(e) => setWeekStart(e.target.value)}
+            className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+          >
+            {weeks.map((w) => (
+              <option key={w.iso} value={w.iso}>
+                {w.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <button
+          onClick={() => setFlagsOn((f) => !f)}
+          className="w-full flex items-center justify-between bg-graphite rounded-xl px-4 py-3"
+        >
+          <span className="font-semibold">{tr.includeFlags}</span>
+          <span
+            className={`w-12 h-7 rounded-full flex items-center px-1 transition ${
+              flagsOn ? "bg-safety justify-end" : "bg-steel justify-start"
+            }`}
+          >
+            <span className="w-5 h-5 rounded-full bg-concrete" />
+          </span>
+        </button>
+
+        <button
+          onClick={generate}
+          disabled={state === "sending"}
+          className="w-full py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
+        >
+          {state === "sending" ? tr.generating : tr.generateSend}
+        </button>
+
+        {state === "sent" && (
+          <div className="bg-safety/15 border border-safety/40 rounded-2xl p-4">
+            <div className="font-bold text-safety">{tr.reportSent}</div>
+            <div className="text-sm text-rebar mt-1">{resultMsg}</div>
           </div>
-          <input
-            type="password"
-            inputMode="numeric"
-            autoFocus
-            value={pin}
-            onChange={(e) => {
-              setPin(e.target.value);
-              setPinError(false);
-            }}
-            onKeyDown={(e) => e.key === "Enter" && submitPin()}
-            className="w-40 text-center text-2xl tracking-[0.4em] bg-graphite rounded-2xl py-4 text-concrete"
-            placeholder="••••"
-          />
-          {pinError && (
-            <div className="text-red-300 text-sm font-semibold mt-3">
-              {tr.wrongPin}
-            </div>
-          )}
-          <button
-            onClick={submitPin}
-            className="mt-6 w-40 py-4 rounded-2xl bg-safety text-steel font-extrabold"
-          >
-            {tr.continue}
-          </button>
-        </div>
-      ) : (
-        <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
-          <Field label={tr.weekLabel}>
-            <select
-              value={weekStart}
-              onChange={(e) => setWeekStart(e.target.value)}
-              className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
-            >
-              {weeks.map((w) => (
-                <option key={w.iso} value={w.iso}>
-                  {w.label}
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <button
-            onClick={() => setFlagsOn((f) => !f)}
-            className="w-full flex items-center justify-between bg-graphite rounded-xl px-4 py-3"
-          >
-            <span className="font-semibold">{tr.includeFlags}</span>
-            <span
-              className={`w-12 h-7 rounded-full flex items-center px-1 transition ${
-                flagsOn ? "bg-safety justify-end" : "bg-steel justify-start"
-              }`}
-            >
-              <span className="w-5 h-5 rounded-full bg-concrete" />
-            </span>
-          </button>
-
-          <button
-            onClick={generate}
-            disabled={state === "sending"}
-            className="w-full py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
-          >
-            {state === "sending" ? tr.generating : tr.generateSend}
-          </button>
-
-          {state === "sent" && (
-            <div className="bg-safety/15 border border-safety/40 rounded-2xl p-4">
-              <div className="font-bold text-safety">{tr.reportSent}</div>
-              <div className="text-sm text-rebar mt-1">{resultMsg}</div>
-            </div>
-          )}
-          {state === "error" && (
-            <div className="bg-red-500/15 border border-red-500/40 rounded-2xl p-4 text-red-200">
-              <div className="font-bold">{tr.reportFail}</div>
-              {resultMsg && <div className="text-sm mt-1">{resultMsg}</div>}
-            </div>
-          )}
-        </div>
-      )}
+        )}
+        {state === "error" && (
+          <div className="bg-red-500/15 border border-red-500/40 rounded-2xl p-4 text-red-200">
+            <div className="font-bold">{tr.reportFail}</div>
+            {resultMsg && <div className="text-sm mt-1">{resultMsg}</div>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

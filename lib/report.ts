@@ -2,6 +2,16 @@
 // rows. Pure data shaping — no file generation here (that's report-excel.ts
 // and report-pdf.ts). Read-only with respect to Notion.
 
+import {
+  ReportLang,
+  DAY_NAMES as DAY_NAMES_I18N,
+  phraseOverHours,
+  phraseDoubleEntry,
+  phraseMultiJob,
+  phraseSingleHigh,
+  phraseOffRoster,
+} from "./report-i18n";
+
 export interface RawRow {
   worker: string;
   dateISO: string; // YYYY-MM-DD
@@ -32,6 +42,7 @@ export interface Flag {
   dateISO: string;
   kind: "over_hours" | "double_entry" | "multi_job" | "single_high" | "off_roster";
   detail: string;
+  foremen?: string[]; // foremen whose entries are part of this flag
 }
 
 export interface ReportData {
@@ -42,24 +53,14 @@ export interface ReportData {
   noHours: string[]; // active roster names with zero hours this week
   flags: Flag[];
   overHoursThreshold: number;
+  lang: ReportLang;
+  foremanReport: boolean; // true when filtered to a single foreman
 }
 
 // A single readable line for one flag.
-export function flagLabel(f: Flag, overHoursThreshold: number): string {
-  switch (f.kind) {
-    case "over_hours":
-      return `${f.detail} (over ${overHoursThreshold}/day)`;
-    case "double_entry":
-      return `Possible double entry — ${f.detail}`;
-    case "multi_job":
-      return f.detail;
-    case "single_high":
-      return f.detail;
-    case "off_roster":
-      return f.detail;
-    default:
-      return f.detail;
-  }
+// The detail string is already a complete, localized line.
+export function flagLabel(f: Flag, _overHoursThreshold: number): string {
+  return f.detail;
 }
 
 export interface FlagGroup {
@@ -88,8 +89,6 @@ export function groupFlags(
   }
   return order.map((k) => map.get(k)!);
 }
-
-const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // A single timecard entry above this many hours is almost certainly a typo.
 const SINGLE_ENTRY_LIMIT = 13;
@@ -121,10 +120,10 @@ function dayIndex(weekStartISO: string, dateISO: string): number {
   return Math.round((b - a) / 86400000);
 }
 
-function fmtDayLabel(iso: string): string {
+function fmtDayLabel(iso: string, lang: ReportLang): string {
   const [y, m, d] = iso.split("-").map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
-  return `${DAY_NAMES[dow]} ${m}/${d}`;
+  return `${DAY_NAMES_I18N[lang][dow]} ${m}/${d}`;
 }
 
 function round2(n: number): number {
@@ -147,12 +146,14 @@ export function buildReport(
   activeRoster: string[],
   weekStartISO: string, // span start
   overHoursThreshold: number,
-  weekEndOverrideISO?: string // span end; defaults to start + 6 (a week)
+  weekEndOverrideISO?: string, // span end; defaults to start + 6 (a week)
+  foremanFilter?: string, // if set, grid shows only this foreman's entries
+  lang: ReportLang = "en"
 ): ReportData {
   const weekEndISO = weekEndOverrideISO || addDaysISO(weekStartISO, 6);
   const nDays = Math.max(1, spanDays(weekStartISO, weekEndISO));
   const dayLabels = Array.from({ length: nDays }, (_, i) =>
-    fmtDayLabel(addDaysISO(weekStartISO, i))
+    fmtDayLabel(addDaysISO(weekStartISO, i), lang)
   );
 
   // Group key: prefer clean project; else fall back to job text (unassigned).
@@ -182,6 +183,8 @@ export function buildReport(
     job: string;
   }[] = [];
 
+  const ff = foremanFilter ? foremanFilter.trim().toLowerCase() : "";
+
   for (const r of rows) {
     const idx = dayIndex(weekStartISO, r.dateISO);
     if (idx < 0 || idx >= nDays) continue; // outside the span
@@ -191,32 +194,37 @@ export function buildReport(
       ? `P:${r.projectName.trim().toLowerCase()}`
       : `J:${(r.jobText || "").trim().toLowerCase()}`;
     const title = assigned ? r.projectName.trim() : prettifyJob(r.jobText);
+    const rowForeman = (r.foreman || "").trim();
 
-    let g = groups.get(groupKey);
-    if (!g) {
-      g = {
-        title,
-        jobId: assigned ? r.jobId.trim() : "",
-        unassigned: !assigned,
-        byWorker: new Map(),
-      };
-      groups.set(groupKey, g);
+    // GRID: include the row only if no foreman filter, or it's this foreman's.
+    if (!ff || rowForeman.toLowerCase() === ff) {
+      let g = groups.get(groupKey);
+      if (!g) {
+        g = {
+          title,
+          jobId: assigned ? r.jobId.trim() : "",
+          unassigned: !assigned,
+          byWorker: new Map(),
+        };
+        groups.set(groupKey, g);
+      }
+      if (assigned && !g.jobId && r.jobId.trim()) g.jobId = r.jobId.trim();
+
+      let days = g.byWorker.get(r.worker);
+      if (!days) {
+        days = new Array(nDays).fill(0);
+        g.byWorker.set(r.worker, days);
+      }
+      days[idx] += r.hours;
     }
-    if (assigned && !g.jobId && r.jobId.trim()) g.jobId = r.jobId.trim();
 
-    let days = g.byWorker.get(r.worker);
-    if (!days) {
-      days = new Array(nDays).fill(0);
-      g.byWorker.set(r.worker, days);
-    }
-    days[idx] += r.hours;
-
+    // FLAGS: always track across ALL rows so cross-foreman issues are caught.
     const dtKey = `${r.worker}|${r.dateISO}`;
     dayTotal.set(dtKey, (dayTotal.get(dtKey) || 0) + r.hours);
 
     const entry: Entry = {
       hours: r.hours,
-      foreman: (r.foreman || "").trim(),
+      foreman: rowForeman,
       job: title,
     };
 
@@ -240,7 +248,7 @@ export function buildReport(
       fset = new Set();
       jmap.set(title, fset);
     }
-    if (r.foreman && r.foreman.trim()) fset.add(r.foreman.trim());
+    if (rowForeman) fset.add(rowForeman);
 
     // Single-entry-too-high tracking
     if (r.hours > SINGLE_ENTRY_LIMIT) {
@@ -248,7 +256,7 @@ export function buildReport(
         worker: r.worker,
         dateISO: r.dateISO,
         hours: r.hours,
-        foreman: (r.foreman || "").trim(),
+        foreman: rowForeman,
         job: title,
       });
     }
@@ -297,9 +305,11 @@ export function buildReport(
     const idx = dayIndex(weekStartISO, r.dateISO);
     if (idx >= 0 && idx < nDays) workedNames.add(r.worker);
   }
-  const noHours = activeRoster
-    .filter((n) => !workedNames.has(n))
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const noHours = ff
+    ? []
+    : activeRoster
+        .filter((n) => !workedNames.has(n))
+        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
   // Flags
   const flags: Flag[] = [];
@@ -309,15 +319,23 @@ export function buildReport(
     if (tot > overHoursThreshold) {
       const [worker, dateISO] = key.split("|");
       const entries = entriesByDay.get(key) || [];
-      const parts = entries.map((e) => {
-        const who = e.foreman ? ` by ${e.foreman}` : "";
-        return `${round2(e.hours)} hrs on ${e.job}${who}`;
-      });
       flags.push({
         worker,
         dateISO,
         kind: "over_hours",
-        detail: `${round2(tot)} hrs total — ${parts.join(" + ")}`,
+        detail: phraseOverHours(
+          lang,
+          round2(tot),
+          entries.map((e) => ({
+            hours: round2(e.hours),
+            job: e.job,
+            foreman: e.foreman,
+          })),
+          overHoursThreshold
+        ),
+        foremen: Array.from(
+          new Set(entries.map((e) => e.foreman).filter(Boolean))
+        ),
       });
     }
   }
@@ -327,15 +345,19 @@ export function buildReport(
     if (entries.length > 1) {
       const [worker, , dateISO] = key.split("|");
       const job = entries[0].job;
-      const parts = entries.map((e) => {
-        const who = e.foreman ? ` (${e.foreman})` : "";
-        return `${round2(e.hours)} hrs${who}`;
-      });
       flags.push({
         worker,
         dateISO,
         kind: "double_entry",
-        detail: `${entries.length} entries on ${job}: ${parts.join(" + ")}`,
+        detail: phraseDoubleEntry(
+          lang,
+          entries.length,
+          job,
+          entries.map((e) => ({ hours: round2(e.hours), foreman: e.foreman }))
+        ),
+        foremen: Array.from(
+          new Set(entries.map((e) => e.foreman).filter(Boolean))
+        ),
       });
     }
   }
@@ -349,23 +371,33 @@ export function buildReport(
         const fmn = Array.from(foremen).filter(Boolean);
         parts.push(fmn.length ? `${job} (${fmn.join(", ")})` : job);
       }
+      const allForemen = new Set<string>();
+      for (const fs2 of jmap.values())
+        for (const fm of fs2) if (fm) allForemen.add(fm);
       flags.push({
         worker,
         dateISO,
         kind: "multi_job",
-        detail: `On ${jmap.size} jobs same day: ${parts.join(" + ")}`,
+        detail: phraseMultiJob(lang, jmap.size, parts),
+        foremen: Array.from(allForemen),
       });
     }
   }
 
   // Single entry above the realistic daily limit (likely a typo).
   for (const s of singleHighs) {
-    const who = s.foreman ? ` by ${s.foreman}` : "";
     flags.push({
       worker: s.worker,
       dateISO: s.dateISO,
       kind: "single_high",
-      detail: `Single entry of ${round2(s.hours)} hrs on ${s.job}${who} (over ${SINGLE_ENTRY_LIMIT})`,
+      detail: phraseSingleHigh(
+        lang,
+        round2(s.hours),
+        s.job,
+        s.foreman,
+        SINGLE_ENTRY_LIMIT
+      ),
+      foremen: s.foreman ? [s.foreman] : [],
     });
   }
 
@@ -384,12 +416,20 @@ export function buildReport(
         worker: r.worker,
         dateISO: r.dateISO,
         kind: "off_roster",
-        detail: "Not on active roster — check name/spelling",
+        detail: phraseOffRoster(lang),
+        foremen: (r.foreman || "").trim() ? [(r.foreman || "").trim()] : [],
       });
     }
   }
 
-  flags.sort(
+  let outFlags = flags;
+  if (ff) {
+    outFlags = flags.filter((f) =>
+      (f.foremen || []).some((fm) => fm.trim().toLowerCase() === ff)
+    );
+  }
+
+  outFlags.sort(
     (a, b) => a.dateISO.localeCompare(b.dateISO) || a.worker.localeCompare(b.worker)
   );
 
@@ -399,8 +439,10 @@ export function buildReport(
     dayLabels,
     sections,
     noHours,
-    flags,
+    flags: outFlags,
     overHoursThreshold,
+    lang,
+    foremanReport: !!ff,
   };
 }
 

@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from "pdf-lib";
 import { ReportData, groupFlags } from "./report";
+import { RT } from "./report-i18n";
 
 // Builds a readable PDF of the weekly payroll report (landscape), mirroring
 // the Excel grid. Paginates automatically as sections fill the page.
@@ -25,6 +26,7 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
   const flaggedNames = new Set(
     rd.flags.map((f) => f.worker.trim().toLowerCase())
   );
+  const tr = RT[rd.lang];
 
   let page = pdf.addPage([PAGE_W, PAGE_H]);
   let y = PAGE_H - MARGIN;
@@ -56,7 +58,7 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     color: steel,
   });
   y -= 18;
-  page.drawText(`Weekly Payroll — ${rd.weekStartISO} to ${rd.weekEndISO}`, {
+  page.drawText(`${tr.payrollTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`, {
     x: MARGIN,
     y,
     size: 11,
@@ -73,11 +75,11 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
       height: rowH,
       color: lightBg,
     });
-    page.drawText("Worker", { x: MARGIN + 4, y: y - rowH + 9, size: 9, font: bold, color: steel });
+    page.drawText(tr.worker, { x: MARGIN + 4, y: y - rowH + 9, size: 9, font: bold, color: steel });
     rd.dayLabels.forEach((d, i) => {
       page.drawText(d, { x: colX(i) + 4, y: y - rowH + 9, size: 8, font: bold, color: steel });
     });
-    page.drawText("Total", { x: totalX + 4, y: y - rowH + 9, size: 9, font: bold, color: steel });
+    page.drawText(tr.total, { x: totalX + 4, y: y - rowH + 9, size: 9, font: bold, color: steel });
     y -= rowH;
   };
 
@@ -97,9 +99,9 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
 
     // Section header
     const secLabel = sec.unassigned
-      ? `UNASSIGNED — ${sec.title}`
+      ? `${tr.unassigned} — ${sec.title}`
       : sec.jobId
-      ? `${sec.title}   (Job ID: ${sec.jobId})`
+      ? `${sec.title}   (${tr.jobId}: ${sec.jobId})`
       : sec.title;
     page.drawText(secLabel, {
       x: MARGIN,
@@ -166,7 +168,7 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
       height: rowH,
       color: lightBg,
     });
-    drawCellText("Daily total", MARGIN + 4, y - rowH + 9, bold, 9);
+    drawCellText(tr.dailyTotal, MARGIN + 4, y - rowH + 9, bold, 9);
     sec.dailyTotals.forEach((tt, i) => {
       drawCellText(String(tt), colX(i) + 4, y - rowH + 9, bold, 9);
     });
@@ -174,12 +176,13 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     y -= rowH + 14;
   }
 
-  // No hours logged
-  ensure(40);
-  page.drawText("NO HOURS LOGGED THIS WEEK", { x: MARGIN, y: y - 12, size: 11, font: bold, color: steel });
+  // No hours logged (only meaningful for the full roster report)
+  if (!rd.foremanReport) {
+    ensure(40);
+    page.drawText(tr.noHoursHeader, { x: MARGIN, y: y - 12, size: 11, font: bold, color: steel });
   y -= 20;
   if (rd.noHours.length === 0) {
-    page.drawText("Everyone on the roster logged hours.", { x: MARGIN, y: y - 10, size: 9, font, color: gray });
+    page.drawText(tr.everyoneLogged, { x: MARGIN, y: y - 10, size: 9, font, color: gray });
     y -= 18;
   } else {
     // Lay names out in columns to save space
@@ -196,6 +199,7 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     y = startY - 10 - perCol * 14 - 6;
   }
   y -= 10;
+  }
 
   // Flags
   ensure(40);
@@ -206,10 +210,10 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     height: 20,
     color: flagBg,
   });
-  page.drawText("FLAGS TO REVIEW", { x: MARGIN + 4, y: y - 13, size: 11, font: bold, color: steel });
+  page.drawText(tr.flagsHeader, { x: MARGIN + 4, y: y - 13, size: 11, font: bold, color: steel });
   y -= 26;
   if (rd.flags.length === 0) {
-    page.drawText("None.", { x: MARGIN, y: y - 10, size: 9, font, color: gray });
+    page.drawText(tr.none, { x: MARGIN, y: y - 10, size: 9, font, color: gray });
   } else {
     const groups = groupFlags(rd.flags, rd.overHoursThreshold);
     for (const g of groups) {

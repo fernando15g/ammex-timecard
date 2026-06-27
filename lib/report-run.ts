@@ -81,6 +81,14 @@ export interface RunResult {
   noHours: number;
   flags: number;
   debug: any;
+  pdfBase64?: string; // present in "view" mode
+  filename?: string;
+}
+
+export interface RunOptions {
+  foreman?: string; // filter grid to this foreman
+  lang?: "en" | "es";
+  mode?: "email" | "view"; // email = send PDF+Excel; view = return PDF only
 }
 
 // The full pipeline: read Notion for the span, build the files, email them.
@@ -88,8 +96,12 @@ export interface RunResult {
 export async function runReport(
   startISO: string,
   endISO: string,
-  flagsOn: boolean
+  flagsOn: boolean,
+  opts: RunOptions = {}
 ): Promise<RunResult> {
+  const foreman = opts.foreman?.trim() || "";
+  const lang = opts.lang === "es" ? "es" : "en";
+  const mode = opts.mode === "view" ? "view" : "email";
   const notion = new Client({ auth: NOTION_TOKEN });
 
   // 1) Pull all timecard rows in the span
@@ -175,23 +187,51 @@ export async function runReport(
   } while (rc);
 
   // 5) Build report + files
-  const rd = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO);
+  const rd = buildReport(
+    rows,
+    activeRoster,
+    startISO,
+    THRESHOLD,
+    endISO,
+    foreman || undefined,
+    lang
+  );
   if (!flagsOn) rd.flags = [];
 
-  const xlsx = buildReportXlsx(rd);
   const pdfBytes = await buildReportPdf(rd);
-  const xlsxB64 = Buffer.from(xlsx).toString("base64");
   const pdfB64 = Buffer.from(pdfBytes).toString("base64");
-  const fnameBase = `Ammex_Payroll_${startISO}_to_${endISO}`;
+  const who = foreman ? `_${foreman.replace(/[^A-Za-z0-9]+/g, "")}` : "";
+  const fnameBase = `Ammex_Payroll_${startISO}_to_${endISO}${who}`;
 
-  // 6) Email both files
+  // 6a) View mode: return the PDF for on-screen viewing/sharing. No email.
+  if (mode === "view") {
+    return {
+      ok: true,
+      weekStart: startISO,
+      weekEnd: endISO,
+      jobs: rd.sections.filter((s) => !s.unassigned).length,
+      unassigned: rd.sections.filter((s) => s.unassigned).length,
+      noHours: rd.noHours.length,
+      flags: rd.flags.length,
+      debug: buildDebug(raw, rows),
+      pdfBase64: pdfB64,
+      filename: `${fnameBase}.pdf`,
+    };
+  }
+
+  // 6b) Email mode: send PDF + Excel as a record.
+  const xlsx = buildReportXlsx(rd);
+  const xlsxB64 = Buffer.from(xlsx).toString("base64");
+  const subjectWho = foreman ? ` (${foreman})` : "";
+
   const resend = new Resend(process.env.RESEND_API_KEY);
   await resend.emails.send({
     from: FROM,
     to: PAYROLL_RECIPIENT,
-    subject: `Weekly Payroll — ${startISO} to ${endISO}`,
+    subject: `Weekly Payroll — ${startISO} to ${endISO}${subjectWho}`,
     text:
       `Payroll report attached (Excel + PDF).\n\n` +
+      (foreman ? `Foreman: ${foreman}\n` : ``) +
       `Range: ${startISO} to ${endISO}\n` +
       `Jobs: ${rd.sections.filter((s) => !s.unassigned).length}\n` +
       `Unassigned groups: ${rd.sections.filter((s) => s.unassigned).length}\n` +
@@ -203,24 +243,6 @@ export async function runReport(
     ],
   });
 
-  // Diagnostic sample (helps pinpoint relation/rollup issues)
-  const sample =
-    raw.find((p: any) => {
-      const ph = p.properties?.[TIMECARD_PROPS.projectHelper];
-      return readText(ph) || relationIds(ph).length > 0;
-    }) || raw[0];
-  const allNames = sample ? Object.keys(sample.properties || {}) : [];
-  const debug = {
-    totalRows: raw.length,
-    rowsWithProjectName: rows.filter((r) => r.projectName).length,
-    rowsWithJobId: rows.filter((r) => r.jobId).length,
-    allPropertyNames: allNames,
-    projectHelperType:
-      sample?.properties?.[TIMECARD_PROPS.projectHelper]?.type || "NOT FOUND",
-    jobIdHelperType:
-      sample?.properties?.[TIMECARD_PROPS.jobIdHelper]?.type || "NOT FOUND",
-  };
-
   return {
     ok: true,
     weekStart: startISO,
@@ -229,6 +251,25 @@ export async function runReport(
     unassigned: rd.sections.filter((s) => s.unassigned).length,
     noHours: rd.noHours.length,
     flags: rd.flags.length,
-    debug,
+    debug: buildDebug(raw, rows),
+  };
+}
+
+function buildDebug(raw: any[], rows: RawRow[]): any {
+  const sample =
+    raw.find((p: any) => {
+      const ph = p.properties?.[TIMECARD_PROPS.projectHelper];
+      return readText(ph) || relationIds(ph).length > 0;
+    }) || raw[0];
+  const allNames = sample ? Object.keys(sample.properties || {}) : [];
+  return {
+    totalRows: raw.length,
+    rowsWithProjectName: rows.filter((r) => r.projectName).length,
+    rowsWithJobId: rows.filter((r) => r.jobId).length,
+    allPropertyNames: allNames,
+    projectHelperType:
+      sample?.properties?.[TIMECARD_PROPS.projectHelper]?.type || "NOT FOUND",
+    jobIdHelperType:
+      sample?.properties?.[TIMECARD_PROPS.jobIdHelper]?.type || "NOT FOUND",
   };
 }

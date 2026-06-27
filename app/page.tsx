@@ -966,6 +966,10 @@ function ReportsPanel({
   const [customStart, setCustomStart] = useState(thisWeekStart);
   const [customEnd, setCustomEnd] = useState(thisWeekEnd);
   const [flagsOn, setFlagsOn] = useState(true);
+  const [foremen, setForemen] = useState<string[]>([]);
+  const [foreman, setForeman] = useState(""); // "" = All
+  const [lang, setLang] = useState<"en" | "es">("en");
+  const [langTouched, setLangTouched] = useState(false);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
     "idle"
   );
@@ -973,6 +977,28 @@ function ReportsPanel({
   const [debugText, setDebugText] = useState("");
   const [debugOpen, setDebugOpen] = useState(false);
   const [debugCopied, setDebugCopied] = useState(false);
+
+  // Load the foreman list once the panel is unlocked.
+  useEffect(() => {
+    if (!pinOk) return;
+    let alive = true;
+    fetch("/api/roster")
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive && Array.isArray(d.foremen)) setForemen(d.foremen);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [pinOk]);
+
+  // Auto-suggest language: Spanish when a foreman is picked (it's for them),
+  // English for the master report — unless the user set it manually.
+  function onForemanChange(v: string) {
+    setForeman(v);
+    if (!langTouched) setLang(v ? "es" : "en");
+  }
 
   function onPinChange(v: string) {
     const digits = v.replace(/\D/g, "").slice(0, 4);
@@ -989,18 +1015,47 @@ function ReportsPanel({
     }
   }
 
-  async function generate() {
+  function reqBody(mode: "view" | "email") {
+    const base: any = { pin, flags: flagsOn, foreman, lang, mode };
+    if (weekStart === "custom") {
+      base.startISO = customStart;
+      base.endISO = customEnd;
+    } else {
+      base.weekStart = weekStart;
+    }
+    return base;
+  }
+
+  async function sharePdf(b64: string, filename: string) {
+    try {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const file = new File([blob], filename, { type: "application/pdf" });
+      const nav: any = navigator;
+      if (nav.canShare && nav.canShare({ files: [file] })) {
+        await nav.share({ files: [file], title: filename });
+        return;
+      }
+      // Fallback: open the PDF in a new tab (user can then save/share).
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch {
+      /* sharing/opening may be blocked; ignore */
+    }
+  }
+
+  async function generate(mode: "view" | "email") {
     setState("sending");
     setResultMsg("");
+    setDebugText("");
     try {
       const res = await fetch("/api/report", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(
-          weekStart === "custom"
-            ? { pin, startISO: customStart, endISO: customEnd, flags: flagsOn }
-            : { pin, weekStart, flags: flagsOn }
-        ),
+        body: JSON.stringify(reqBody(mode)),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(d.error || "fail");
@@ -1009,6 +1064,9 @@ function ReportsPanel({
         `${d.jobs} job(s), ${d.unassigned} unassigned, ${d.noHours} no-hours, ${d.flags} flag(s)`
       );
       if (d.debug) setDebugText(JSON.stringify(d.debug, null, 2));
+      if (mode === "view" && d.pdfBase64) {
+        await sharePdf(d.pdfBase64, d.filename || "Ammex_Payroll.pdf");
+      }
     } catch (e: any) {
       setState("error");
       setResultMsg(e?.message || "");
@@ -1116,6 +1174,49 @@ function ReportsPanel({
           </div>
         )}
 
+        <Field label={tr.foremanLabel}>
+          <select
+            value={foreman}
+            onChange={(e) => onForemanChange(e.target.value)}
+            className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+          >
+            <option value="">{tr.allForemen}</option>
+            {foremen.map((f) => (
+              <option key={f} value={f}>
+                {f}
+              </option>
+            ))}
+          </select>
+        </Field>
+
+        <div className="flex items-center justify-between bg-graphite rounded-xl px-4 py-3">
+          <span className="font-semibold">{tr.reportLanguage}</span>
+          <div className="flex bg-steel rounded-full p-1">
+            <button
+              onClick={() => {
+                setLang("en");
+                setLangTouched(true);
+              }}
+              className={`px-3 py-1 rounded-full text-sm font-bold ${
+                lang === "en" ? "bg-safety text-steel" : "text-rebar"
+              }`}
+            >
+              EN
+            </button>
+            <button
+              onClick={() => {
+                setLang("es");
+                setLangTouched(true);
+              }}
+              className={`px-3 py-1 rounded-full text-sm font-bold ${
+                lang === "es" ? "bg-safety text-steel" : "text-rebar"
+              }`}
+            >
+              ES
+            </button>
+          </div>
+        </div>
+
         <button
           onClick={() => setFlagsOn((f) => !f)}
           className="w-full flex items-center justify-between bg-graphite rounded-xl px-4 py-3"
@@ -1131,11 +1232,18 @@ function ReportsPanel({
         </button>
 
         <button
-          onClick={generate}
+          onClick={() => generate("view")}
           disabled={state === "sending"}
           className="w-full py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
         >
-          {state === "sending" ? tr.generating : tr.generateSend}
+          {state === "sending" ? tr.generating : tr.generateView}
+        </button>
+        <button
+          onClick={() => generate("email")}
+          disabled={state === "sending"}
+          className="w-full py-3.5 rounded-2xl bg-graphite text-concrete font-bold active:bg-steel disabled:opacity-60"
+        >
+          {tr.generateSend}
         </button>
 
         {state === "sent" && (

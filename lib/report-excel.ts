@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import { ReportData, groupFlags } from "./report";
+import { RT } from "./report-i18n";
 
 // Builds an .xlsx workbook (as a Buffer) from the report data.
 // Layout mirrors the payroll grid: names down the left, 7 days across,
@@ -7,10 +8,11 @@ import { ReportData, groupFlags } from "./report";
 
 export function buildReportXlsx(rd: ReportData): Buffer {
   const aoa: (string | number)[][] = [];
+  const tr = RT[rd.lang];
 
-  const header = ["Worker", ...rd.dayLabels, "Total"];
+  const header = [tr.worker, ...rd.dayLabels, tr.total];
 
-  aoa.push([`Ammex Weekly Payroll — ${rd.weekStartISO} to ${rd.weekEndISO}`]);
+  aoa.push([`Ammex ${tr.payrollTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
   aoa.push([]);
 
   const flaggedNames = new Set(
@@ -19,9 +21,9 @@ export function buildReportXlsx(rd: ReportData): Buffer {
 
   for (const sec of rd.sections) {
     const label = sec.unassigned
-      ? `UNASSIGNED — ${sec.title}`
+      ? `${tr.unassigned} — ${sec.title}`
       : sec.jobId
-      ? `${sec.title}  (Job ID: ${sec.jobId})`
+      ? `${sec.title}  (${tr.jobId}: ${sec.jobId})`
       : sec.title;
     aoa.push([label]);
     aoa.push(header);
@@ -33,25 +35,27 @@ export function buildReportXlsx(rd: ReportData): Buffer {
         p.total,
       ]);
     }
-    aoa.push(["Daily total", ...sec.dailyTotals, sec.grandTotal]);
+    aoa.push([tr.dailyTotal, ...sec.dailyTotals, sec.grandTotal]);
     aoa.push([]);
   }
 
-  // No hours logged
-  aoa.push(["NO HOURS LOGGED THIS WEEK"]);
-  if (rd.noHours.length === 0) {
-    aoa.push(["(everyone on the roster logged hours)"]);
-  } else {
-    for (const n of rd.noHours) aoa.push([n]);
+  // No hours logged (only for the full roster report)
+  if (!rd.foremanReport) {
+    aoa.push([tr.noHoursHeader]);
+    if (rd.noHours.length === 0) {
+      aoa.push([tr.everyoneLogged]);
+    } else {
+      for (const n of rd.noHours) aoa.push([n]);
+    }
+    aoa.push([]);
   }
-  aoa.push([]);
 
   // Flags
-  aoa.push(["FLAGS TO REVIEW"]);
+  aoa.push([tr.flagsHeader]);
   if (rd.flags.length === 0) {
-    aoa.push(["(none)"]);
+    aoa.push([tr.none]);
   } else {
-    aoa.push(["Worker", "Date", "Issue"]);
+    aoa.push([tr.worker, "Date", "Issue"]);
     const groups = groupFlags(rd.flags, rd.overHoursThreshold);
     for (const g of groups) {
       g.lines.forEach((line, i) => {

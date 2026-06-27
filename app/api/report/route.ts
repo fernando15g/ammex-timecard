@@ -42,6 +42,9 @@ export async function POST(req: Request) {
   }
 
   const flagsOn = body.flags !== false; // default on
+  const foreman = typeof body.foreman === "string" ? body.foreman : "";
+  const lang = body.lang === "es" ? "es" : "en";
+  const mode = body.mode === "view" ? "view" : "email";
 
   // Determine the span. Custom range takes priority if both dates are valid.
   let startISO: string;
@@ -69,7 +72,11 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result = await runReport(startISO, endISO, flagsOn);
+    const result = await runReport(startISO, endISO, flagsOn, {
+      foreman,
+      lang,
+      mode,
+    });
     return NextResponse.json(result);
   } catch (err: any) {
     console.error("Report failed:", err?.message || err);

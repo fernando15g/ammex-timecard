@@ -67,6 +67,10 @@ export const strings = {
     customRange: "Rango personalizado…",
     fromLabel: "Desde",
     toLabel: "Hasta",
+    foremanLabel: "Mayordomo",
+    allForemen: "Todos",
+    reportLanguage: "Idioma del reporte",
+    generateView: "Generar y ver",
   },
   en: {
     appTitle: "Timecard",
@@ -133,6 +137,10 @@ export const strings = {
     customRange: "Custom range…",
     fromLabel: "From",
     toLabel: "To",
+    foremanLabel: "Foreman",
+    allForemen: "All foremen",
+    reportLanguage: "Report language",
+    generateView: "Generate & view",
   },
 } as const;
 

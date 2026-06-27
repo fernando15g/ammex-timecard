@@ -51,7 +51,15 @@ export function buildReportXlsx(rd: ReportData): Buffer {
       const kind =
         f.kind === "over_hours"
           ? `Over ${rd.overHoursThreshold} hrs/day`
-          : "Possible double entry";
+          : f.kind === "double_entry"
+          ? "Possible double entry"
+          : f.kind === "multi_job"
+          ? "On multiple jobs same day"
+          : f.kind === "single_high"
+          ? "Single entry too high"
+          : f.kind === "off_roster"
+          ? "Not on active roster"
+          : "Review";
       aoa.push([f.worker, f.dateISO, kind, f.detail]);
     }
   }

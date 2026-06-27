@@ -9,6 +9,7 @@ export interface RawRow {
   jobText: string; // foreman's typed "Job"
   projectName: string; // clean "Project Helper" (may be empty)
   jobId: string; // clean "Job ID Helper" (may be empty)
+  foreman: string; // who logged this card
 }
 
 export interface PersonRow {
@@ -29,7 +30,7 @@ export interface JobSection {
 export interface Flag {
   worker: string;
   dateISO: string;
-  kind: "over_hours" | "double_entry";
+  kind: "over_hours" | "double_entry" | "multi_job" | "single_high" | "off_roster";
   detail: string;
 }
 
@@ -44,6 +45,9 @@ export interface ReportData {
 }
 
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// A single timecard entry above this many hours is almost certainly a typo.
+const SINGLE_ENTRY_LIMIT = 13;
 
 // Tidy a free-text job name for display: collapse whitespace, Title Case.
 export function prettifyJob(s: string): string {
@@ -120,6 +124,10 @@ export function buildReport(
   // and per-worker-per-job-per-day counts for the double-entry flag.
   const dayTotal = new Map<string, number>(); // key: worker|date
   const entryCount = new Map<string, number>(); // key: worker|job|date
+  // For the multi-job flag: worker|date -> map of jobTitle -> set of foremen.
+  const jobsPerDay = new Map<string, Map<string, Set<string>>>();
+  // For the single-entry flag: the individual entries themselves.
+  const singleHighs: { worker: string; dateISO: string; hours: number }[] = [];
 
   for (const r of rows) {
     const idx = dayIndex(weekStartISO, r.dateISO);
@@ -155,6 +163,24 @@ export function buildReport(
 
     const ecKey = `${r.worker}|${title.toLowerCase()}|${r.dateISO}`;
     entryCount.set(ecKey, (entryCount.get(ecKey) || 0) + 1);
+
+    // Multi-job tracking (keyed by clean job title)
+    let jmap = jobsPerDay.get(dtKey);
+    if (!jmap) {
+      jmap = new Map();
+      jobsPerDay.set(dtKey, jmap);
+    }
+    let fset = jmap.get(title);
+    if (!fset) {
+      fset = new Set();
+      jmap.set(title, fset);
+    }
+    if (r.foreman && r.foreman.trim()) fset.add(r.foreman.trim());
+
+    // Single-entry-too-high tracking
+    if (r.hours > SINGLE_ENTRY_LIMIT) {
+      singleHighs.push({ worker: r.worker, dateISO: r.dateISO, hours: r.hours });
+    }
   }
 
   // Assemble sections: assigned first (alphabetical), then unassigned last.
@@ -228,6 +254,55 @@ export function buildReport(
       });
     }
   }
+
+  // Same worker on 2+ different jobs the same day (the two-foremen catch).
+  for (const [key, jmap] of jobsPerDay) {
+    if (jmap.size >= 2) {
+      const [worker, dateISO] = key.split("|");
+      const parts: string[] = [];
+      for (const [job, foremen] of jmap) {
+        const fmn = Array.from(foremen).filter(Boolean);
+        parts.push(fmn.length ? `${job} (${fmn.join(", ")})` : job);
+      }
+      flags.push({
+        worker,
+        dateISO,
+        kind: "multi_job",
+        detail: `On ${jmap.size} jobs same day: ${parts.join(" + ")}`,
+      });
+    }
+  }
+
+  // Single entry above the realistic daily limit (likely a typo).
+  for (const s of singleHighs) {
+    flags.push({
+      worker: s.worker,
+      dateISO: s.dateISO,
+      kind: "single_high",
+      detail: `Single entry of ${round2(s.hours)} hrs (over ${SINGLE_ENTRY_LIMIT})`,
+    });
+  }
+
+  // Worker not on the active roster (misspelled name or unconfirmed add).
+  const rosterSet = new Set(
+    activeRoster.map((n) => n.trim().toLowerCase())
+  );
+  const offRosterSeen = new Set<string>();
+  for (const r of rows) {
+    const idx = dayIndex(weekStartISO, r.dateISO);
+    if (idx < 0 || idx >= nDays) continue;
+    const norm = r.worker.trim().toLowerCase();
+    if (!rosterSet.has(norm) && !offRosterSeen.has(norm)) {
+      offRosterSeen.add(norm);
+      flags.push({
+        worker: r.worker,
+        dateISO: r.dateISO,
+        kind: "off_roster",
+        detail: "Not on active roster — check name/spelling",
+      });
+    }
+  }
+
   flags.sort(
     (a, b) => a.dateISO.localeCompare(b.dateISO) || a.worker.localeCompare(b.worker)
   );

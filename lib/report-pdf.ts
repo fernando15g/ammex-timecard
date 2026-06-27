@@ -187,7 +187,15 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
       const kind =
         f.kind === "over_hours"
           ? `Over ${rd.overHoursThreshold} hrs/day`
-          : "Possible double entry";
+          : f.kind === "double_entry"
+          ? "Possible double entry"
+          : f.kind === "multi_job"
+          ? "On multiple jobs same day"
+          : f.kind === "single_high"
+          ? "Single entry too high"
+          : f.kind === "off_roster"
+          ? "Not on active roster"
+          : "Review";
       page.drawText(`${f.worker} — ${f.dateISO} — ${kind} (${f.detail})`, {
         x: MARGIN,
         y: y - 10,

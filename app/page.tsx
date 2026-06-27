@@ -914,6 +914,13 @@ function Field({
   );
 }
 
+function fmtShort(iso: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const [y, m, d] = iso.split("-").map(Number);
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${months[m - 1]} ${d}`;
+}
+
 function weekOptions(): { iso: string; label: string }[] {
   const now = new Date();
   const off = now.getTimezoneOffset();
@@ -964,6 +971,8 @@ function ReportsPanel({
   );
   const [resultMsg, setResultMsg] = useState("");
   const [debugText, setDebugText] = useState("");
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugCopied, setDebugCopied] = useState(false);
 
   function onPinChange(v: string) {
     const digits = v.replace(/\D/g, "").slice(0, 4);
@@ -1082,23 +1091,36 @@ function ReportsPanel({
         </Field>
 
         {weekStart === "custom" && (
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={tr.fromLabel}>
-              <input
-                type="date"
-                value={customStart}
-                onChange={(e) => setCustomStart(e.target.value)}
-                className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
-              />
-            </Field>
-            <Field label={tr.toLabel}>
-              <input
-                type="date"
-                value={customEnd}
-                onChange={(e) => setCustomEnd(e.target.value)}
-                className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
-              />
-            </Field>
+          <div>
+            <div className="flex gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
+                  {tr.fromLabel.toUpperCase()}
+                </div>
+                <input
+                  type="date"
+                  value={customStart}
+                  onChange={(e) => setCustomStart(e.target.value)}
+                  className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete"
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
+                  {tr.toLabel.toUpperCase()}
+                </div>
+                <input
+                  type="date"
+                  value={customEnd}
+                  onChange={(e) => setCustomEnd(e.target.value)}
+                  className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete ring-1 ring-safety/40"
+                />
+              </div>
+            </div>
+            {customStart && (
+              <div className="text-[11px] text-rebar mt-2 text-right">
+                {tr.fromLabel} {fmtShort(customStart)}
+              </div>
+            )}
           </div>
         )}
 
@@ -1131,16 +1153,50 @@ function ReportsPanel({
           </div>
         )}
         {debugText && (
-          <div className="bg-graphite rounded-2xl p-3">
-            <div className="text-[11px] font-bold text-rebar tracking-wide mb-2">
-              DIAGNOSTIC (copy &amp; send to support)
+          <div className="bg-graphite rounded-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2.5">
+              <button
+                onClick={() => setDebugOpen((o) => !o)}
+                className="flex items-center gap-2 text-[11px] font-bold text-rebar tracking-wide"
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className={`transition-transform ${debugOpen ? "rotate-90" : ""}`}
+                >
+                  <path d="M9 6l6 6-6 6" />
+                </svg>
+                DIAGNOSTIC
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(debugText);
+                  } catch {
+                    /* clipboard may be blocked; the expanded box is selectable */
+                  }
+                  setDebugCopied(true);
+                  setTimeout(() => setDebugCopied(false), 1500);
+                }}
+                className="text-[11px] font-bold bg-steel text-concrete px-3 py-1.5 rounded-full"
+              >
+                {debugCopied ? "✓ Copied" : "Copy"}
+              </button>
             </div>
-            <textarea
-              readOnly
-              value={debugText}
-              onFocus={(e) => e.currentTarget.select()}
-              className="w-full h-56 bg-steel rounded-xl p-3 text-[11px] text-concrete font-mono"
-            />
+            {debugOpen && (
+              <textarea
+                readOnly
+                value={debugText}
+                onFocus={(e) => e.currentTarget.select()}
+                className="w-full h-56 bg-steel rounded-b-xl p-3 text-[11px] text-concrete font-mono"
+              />
+            )}
           </div>
         )}
         {state === "error" && (

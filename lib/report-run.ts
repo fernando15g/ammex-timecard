@@ -151,9 +151,10 @@ export async function runReport(
       projectName = ids.map((id) => relTitle.get(id) || "").filter(Boolean).join(", ");
     }
     const jobId = readText(props[TIMECARD_PROPS.jobIdHelper]);
+    const foreman = readText(props[TIMECARD_PROPS.foreman]);
 
     if (!worker || !dateISO) continue;
-    rows.push({ worker, dateISO, hours, jobText, projectName, jobId });
+    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman });
   }
 
   // 4) Active roster

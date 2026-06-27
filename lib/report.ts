@@ -55,6 +55,7 @@ export interface ReportData {
   overHoursThreshold: number;
   lang: ReportLang;
   foremanReport: boolean; // true when filtered to a single foreman
+  foremanName: string; // the foreman's display name (empty for master report)
 }
 
 // A single readable line for one flag.
@@ -433,16 +434,38 @@ export function buildReport(
     (a, b) => a.dateISO.localeCompare(b.dateISO) || a.worker.localeCompare(b.worker)
   );
 
+  // Hide the leading Sunday column when nobody logged Sunday hours. Only applies
+  // when the span actually starts on a Sunday (the weekly presets always do);
+  // if someone did work Sunday, the column stays so no hours are lost.
+  let finalDayLabels = dayLabels;
+  let finalSections = sections;
+  const [sy, sm, sd] = weekStartISO.split("-").map(Number);
+  const startsSunday = new Date(Date.UTC(sy, sm - 1, sd)).getUTCDay() === 0;
+  if (startsSunday && nDays > 1) {
+    const sundayWorked = sections.some((sec) =>
+      sec.people.some((p) => p.perDay[0] != null)
+    );
+    if (!sundayWorked) {
+      finalDayLabels = dayLabels.slice(1);
+      finalSections = sections.map((sec) => ({
+        ...sec,
+        people: sec.people.map((p) => ({ ...p, perDay: p.perDay.slice(1) })),
+        dailyTotals: sec.dailyTotals.slice(1),
+      }));
+    }
+  }
+
   return {
     weekStartISO,
     weekEndISO,
-    dayLabels,
-    sections,
+    dayLabels: finalDayLabels,
+    sections: finalSections,
     noHours,
     flags: outFlags,
     overHoursThreshold,
     lang,
     foremanReport: !!ff,
+    foremanName: foremanFilter ? foremanFilter.trim() : "",
   };
 }
 

@@ -13,6 +13,9 @@ export function buildReportXlsx(rd: ReportData): Buffer {
   const header = [tr.worker, ...rd.dayLabels, tr.total];
 
   aoa.push([`Ammex ${tr.payrollTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
+  if (rd.foremanReport && rd.foremanName) {
+    aoa.push([`${tr.foremanLabel}: ${rd.foremanName}`]);
+  }
   aoa.push([]);
 
   const flaggedNames = new Set(

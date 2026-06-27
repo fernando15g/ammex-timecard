@@ -65,7 +65,18 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     font,
     color: gray,
   });
-  y -= 24;
+  y -= 18;
+  if (rd.foremanReport && rd.foremanName) {
+    page.drawText(`${tr.foremanLabel}: ${rd.foremanName}`, {
+      x: MARGIN,
+      y,
+      size: 12,
+      font: bold,
+      color: safety,
+    });
+    y -= 18;
+  }
+  y -= 6;
 
   const drawHeaderRow = () => {
     page.drawRectangle({

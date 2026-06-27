@@ -14,11 +14,17 @@ const gray = rgb(0.45, 0.48, 0.52);
 const line = rgb(0.8, 0.8, 0.8);
 const lightBg = rgb(0.96, 0.96, 0.94);
 const flagBg = rgb(1, 0.93, 0.85);
+const flagRowBg = rgb(1, 0.95, 0.88);
 
 export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  // Names that have any flag — used to mark/shade their rows in the grid.
+  const flaggedNames = new Set(
+    rd.flags.map((f) => f.worker.trim().toLowerCase())
+  );
 
   let page = pdf.addPage([PAGE_W, PAGE_H]);
   let y = PAGE_H - MARGIN;
@@ -108,10 +114,33 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
 
     for (const p of sec.people) {
       ensure(rowH + 4);
-      if (y !== PAGE_H - MARGIN && y < MARGIN + rowH) {
-        // safety
+      const flagged = flaggedNames.has(p.name.trim().toLowerCase());
+      if (flagged) {
+        // Shade the flagged person's row.
+        page.drawRectangle({
+          x: MARGIN,
+          y: y - rowH + 3,
+          width: PAGE_W - MARGIN * 2,
+          height: rowH,
+          color: flagRowBg,
+        });
+        // Small flag icon at the left of the row.
+        const fx = MARGIN + 4;
+        const fy = y - rowH + 6; // baseline-ish
+        try {
+          page.drawRectangle({ x: fx, y: fy, width: 1.1, height: 9, color: safety });
+          page.drawSvgPath("M0,0 L6,2 L0,4 Z", {
+            x: fx + 1,
+            y: y - rowH + 17,
+            color: safety,
+            scale: 1,
+          });
+        } catch {
+          /* icon is decorative; ignore if it can't draw */
+        }
       }
-      drawCellText(clip(p.name, font, 9, nameW - 8), MARGIN + 4, y - rowH + 9, font, 9);
+      const nameX = flagged ? MARGIN + 14 : MARGIN + 4;
+      drawCellText(clip(p.name, font, 9, nameW - (flagged ? 18 : 8)), nameX, y - rowH + 9, font, 9);
       p.perDay.forEach((h, i) => {
         const txt = h == null ? "X" : String(h);
         const c = h == null ? gray : steel;

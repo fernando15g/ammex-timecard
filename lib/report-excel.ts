@@ -13,6 +13,10 @@ export function buildReportXlsx(rd: ReportData): Buffer {
   aoa.push([`Ammex Weekly Payroll — ${rd.weekStartISO} to ${rd.weekEndISO}`]);
   aoa.push([]);
 
+  const flaggedNames = new Set(
+    rd.flags.map((f) => f.worker.trim().toLowerCase())
+  );
+
   for (const sec of rd.sections) {
     const label = sec.unassigned
       ? `UNASSIGNED — ${sec.title}`
@@ -22,8 +26,9 @@ export function buildReportXlsx(rd: ReportData): Buffer {
     aoa.push([label]);
     aoa.push(header);
     for (const p of sec.people) {
+      const flagged = flaggedNames.has(p.name.trim().toLowerCase());
       aoa.push([
-        p.name,
+        flagged ? `⚑ ${p.name}` : p.name,
         ...p.perDay.map((h) => (h == null ? "X" : h)),
         p.total,
       ]);

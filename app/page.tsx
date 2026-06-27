@@ -1097,7 +1097,7 @@ function ReportsPanel({
                 type="date"
                 value={customStart}
                 onChange={(e) => setCustomStart(e.target.value)}
-                className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete"
+                className="appearance-none block w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete text-left"
               />
             </Field>
             <Field label={tr.toLabel}>
@@ -1105,7 +1105,7 @@ function ReportsPanel({
                 type="date"
                 value={customEnd}
                 onChange={(e) => setCustomEnd(e.target.value)}
-                className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete"
+                className="appearance-none block w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete text-left"
               />
               {customStart && (
                 <div className="text-[11px] text-rebar mt-1">

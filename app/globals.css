@@ -30,6 +30,21 @@ input[type="number"]::-webkit-inner-spin-button {
   margin: 0;
 }
 
+/* Make native date inputs match the dropdowns: full width, left-aligned value,
+   no oversized native sizing on iOS/Safari. */
+input[type="date"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+}
+input[type="date"]::-webkit-date-and-time-value {
+  text-align: left;
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  margin-left: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation-duration: 0.01ms !important;

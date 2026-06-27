@@ -224,7 +224,8 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
       y -= 15;
       for (const line of g.lines) {
         ensure(14);
-        page.drawText(`•  ${line}`, {
+        const maxW = PAGE_W - MARGIN * 2 - 16;
+        page.drawText(`•  ${clip(line, font, 9, maxW)}`, {
           x: MARGIN + 12,
           y: y - 10,
           size: 9,

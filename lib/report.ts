@@ -50,7 +50,7 @@ export function flagLabel(f: Flag, overHoursThreshold: number): string {
     case "over_hours":
       return `${f.detail} (over ${overHoursThreshold}/day)`;
     case "double_entry":
-      return `Possible double entry (${f.detail})`;
+      return `Possible double entry — ${f.detail}`;
     case "multi_job":
       return f.detail;
     case "single_high":
@@ -166,13 +166,21 @@ export function buildReport(
   const groups = new Map<string, Group>();
 
   // Track per-worker-per-day totals (across all jobs) for the over-hours flag,
-  // and per-worker-per-job-per-day counts for the double-entry flag.
+  // and detailed entries per worker-per-job-per-day for the double-entry flag.
   const dayTotal = new Map<string, number>(); // key: worker|date
-  const entryCount = new Map<string, number>(); // key: worker|job|date
+  type Entry = { hours: number; foreman: string; job: string };
+  const entriesByJobDay = new Map<string, Entry[]>(); // key: worker|jobTitle|date
+  const entriesByDay = new Map<string, Entry[]>(); // key: worker|date
   // For the multi-job flag: worker|date -> map of jobTitle -> set of foremen.
   const jobsPerDay = new Map<string, Map<string, Set<string>>>();
   // For the single-entry flag: the individual entries themselves.
-  const singleHighs: { worker: string; dateISO: string; hours: number }[] = [];
+  const singleHighs: {
+    worker: string;
+    dateISO: string;
+    hours: number;
+    foreman: string;
+    job: string;
+  }[] = [];
 
   for (const r of rows) {
     const idx = dayIndex(weekStartISO, r.dateISO);
@@ -206,8 +214,20 @@ export function buildReport(
     const dtKey = `${r.worker}|${r.dateISO}`;
     dayTotal.set(dtKey, (dayTotal.get(dtKey) || 0) + r.hours);
 
+    const entry: Entry = {
+      hours: r.hours,
+      foreman: (r.foreman || "").trim(),
+      job: title,
+    };
+
     const ecKey = `${r.worker}|${title.toLowerCase()}|${r.dateISO}`;
-    entryCount.set(ecKey, (entryCount.get(ecKey) || 0) + 1);
+    const elist = entriesByJobDay.get(ecKey);
+    if (elist) elist.push(entry);
+    else entriesByJobDay.set(ecKey, [entry]);
+
+    const dlist = entriesByDay.get(dtKey);
+    if (dlist) dlist.push(entry);
+    else entriesByDay.set(dtKey, [entry]);
 
     // Multi-job tracking (keyed by clean job title)
     let jmap = jobsPerDay.get(dtKey);
@@ -224,7 +244,13 @@ export function buildReport(
 
     // Single-entry-too-high tracking
     if (r.hours > SINGLE_ENTRY_LIMIT) {
-      singleHighs.push({ worker: r.worker, dateISO: r.dateISO, hours: r.hours });
+      singleHighs.push({
+        worker: r.worker,
+        dateISO: r.dateISO,
+        hours: r.hours,
+        foreman: (r.foreman || "").trim(),
+        job: title,
+      });
     }
   }
 
@@ -277,25 +303,39 @@ export function buildReport(
 
   // Flags
   const flags: Flag[] = [];
+
+  // Over-hours: show the breakdown of what made up the day.
   for (const [key, tot] of dayTotal) {
     if (tot > overHoursThreshold) {
       const [worker, dateISO] = key.split("|");
+      const entries = entriesByDay.get(key) || [];
+      const parts = entries.map((e) => {
+        const who = e.foreman ? ` by ${e.foreman}` : "";
+        return `${round2(e.hours)} hrs on ${e.job}${who}`;
+      });
       flags.push({
         worker,
         dateISO,
         kind: "over_hours",
-        detail: `${round2(tot)} hrs in one day`,
+        detail: `${round2(tot)} hrs total — ${parts.join(" + ")}`,
       });
     }
   }
-  for (const [key, count] of entryCount) {
-    if (count > 1) {
+
+  // Double entry: same worker, same job, same day, more than one card.
+  for (const [key, entries] of entriesByJobDay) {
+    if (entries.length > 1) {
       const [worker, , dateISO] = key.split("|");
+      const job = entries[0].job;
+      const parts = entries.map((e) => {
+        const who = e.foreman ? ` (${e.foreman})` : "";
+        return `${round2(e.hours)} hrs${who}`;
+      });
       flags.push({
         worker,
         dateISO,
         kind: "double_entry",
-        detail: `${count} entries, same job same day`,
+        detail: `${entries.length} entries on ${job}: ${parts.join(" + ")}`,
       });
     }
   }
@@ -320,11 +360,12 @@ export function buildReport(
 
   // Single entry above the realistic daily limit (likely a typo).
   for (const s of singleHighs) {
+    const who = s.foreman ? ` by ${s.foreman}` : "";
     flags.push({
       worker: s.worker,
       dateISO: s.dateISO,
       kind: "single_high",
-      detail: `Single entry of ${round2(s.hours)} hrs (over ${SINGLE_ENTRY_LIMIT})`,
+      detail: `Single entry of ${round2(s.hours)} hrs on ${s.job}${who} (over ${SINGLE_ENTRY_LIMIT})`,
     });
   }
 

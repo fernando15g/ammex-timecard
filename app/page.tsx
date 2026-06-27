@@ -1091,36 +1091,28 @@ function ReportsPanel({
         </Field>
 
         {weekStart === "custom" && (
-          <div>
-            <div className="flex gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
-                  {tr.fromLabel.toUpperCase()}
+          <div className="space-y-4">
+            <Field label={tr.fromLabel}>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete"
+              />
+            </Field>
+            <Field label={tr.toLabel}>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete"
+              />
+              {customStart && (
+                <div className="text-[11px] text-rebar mt-1">
+                  {tr.fromLabel} {fmtShort(customStart)}
                 </div>
-                <input
-                  type="date"
-                  value={customStart}
-                  onChange={(e) => setCustomStart(e.target.value)}
-                  className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete"
-                />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
-                  {tr.toLabel.toUpperCase()}
-                </div>
-                <input
-                  type="date"
-                  value={customEnd}
-                  onChange={(e) => setCustomEnd(e.target.value)}
-                  className="w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete ring-1 ring-safety/40"
-                />
-              </div>
-            </div>
-            {customStart && (
-              <div className="text-[11px] text-rebar mt-2 text-right">
-                {tr.fromLabel} {fmtShort(customStart)}
-              </div>
-            )}
+              )}
+            </Field>
           </div>
         )}
 

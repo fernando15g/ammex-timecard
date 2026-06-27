@@ -44,6 +44,51 @@ export interface ReportData {
   overHoursThreshold: number;
 }
 
+// A single readable line for one flag.
+export function flagLabel(f: Flag, overHoursThreshold: number): string {
+  switch (f.kind) {
+    case "over_hours":
+      return `${f.detail} (over ${overHoursThreshold}/day)`;
+    case "double_entry":
+      return `Possible double entry (${f.detail})`;
+    case "multi_job":
+      return f.detail;
+    case "single_high":
+      return f.detail;
+    case "off_roster":
+      return f.detail;
+    default:
+      return f.detail;
+  }
+}
+
+export interface FlagGroup {
+  worker: string;
+  dateISO: string;
+  lines: string[];
+}
+
+// Group all flags by person + day so one person/day shows once with its issues
+// listed underneath, rather than repeating the name per flag.
+export function groupFlags(
+  flags: Flag[],
+  overHoursThreshold: number
+): FlagGroup[] {
+  const map = new Map<string, FlagGroup>();
+  const order: string[] = [];
+  for (const f of flags) {
+    const key = `${f.dateISO}|${f.worker}`;
+    let g = map.get(key);
+    if (!g) {
+      g = { worker: f.worker, dateISO: f.dateISO, lines: [] };
+      map.set(key, g);
+      order.push(key);
+    }
+    g.lines.push(flagLabel(f, overHoursThreshold));
+  }
+  return order.map((k) => map.get(k)!);
+}
+
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // A single timecard entry above this many hours is almost certainly a typo.

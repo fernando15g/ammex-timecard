@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from "pdf-lib";
-import { ReportData } from "./report";
+import { ReportData, groupFlags } from "./report";
 
 // Builds a readable PDF of the weekly payroll report (landscape), mirroring
 // the Excel grid. Paginates automatically as sections fill the page.
@@ -182,28 +182,29 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
   if (rd.flags.length === 0) {
     page.drawText("None.", { x: MARGIN, y: y - 10, size: 9, font, color: gray });
   } else {
-    for (const f of rd.flags) {
-      ensure(16);
-      const kind =
-        f.kind === "over_hours"
-          ? `Over ${rd.overHoursThreshold} hrs/day`
-          : f.kind === "double_entry"
-          ? "Possible double entry"
-          : f.kind === "multi_job"
-          ? "On multiple jobs same day"
-          : f.kind === "single_high"
-          ? "Single entry too high"
-          : f.kind === "off_roster"
-          ? "Not on active roster"
-          : "Review";
-      page.drawText(`${f.worker} — ${f.dateISO} — ${kind} (${f.detail})`, {
+    const groups = groupFlags(rd.flags, rd.overHoursThreshold);
+    for (const g of groups) {
+      ensure(16 + g.lines.length * 14 + 6);
+      page.drawText(`${g.worker} — ${g.dateISO}`, {
         x: MARGIN,
         y: y - 10,
-        size: 9,
-        font,
+        size: 9.5,
+        font: bold,
         color: steel,
       });
       y -= 15;
+      for (const line of g.lines) {
+        ensure(14);
+        page.drawText(`•  ${line}`, {
+          x: MARGIN + 12,
+          y: y - 10,
+          size: 9,
+          font,
+          color: steel,
+        });
+        y -= 13;
+      }
+      y -= 4;
     }
   }
 

@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import { ReportData } from "./report";
+import { ReportData, groupFlags } from "./report";
 
 // Builds an .xlsx workbook (as a Buffer) from the report data.
 // Layout mirrors the payroll grid: names down the left, 7 days across,
@@ -46,21 +46,16 @@ export function buildReportXlsx(rd: ReportData): Buffer {
   if (rd.flags.length === 0) {
     aoa.push(["(none)"]);
   } else {
-    aoa.push(["Worker", "Date", "Issue", "Detail"]);
-    for (const f of rd.flags) {
-      const kind =
-        f.kind === "over_hours"
-          ? `Over ${rd.overHoursThreshold} hrs/day`
-          : f.kind === "double_entry"
-          ? "Possible double entry"
-          : f.kind === "multi_job"
-          ? "On multiple jobs same day"
-          : f.kind === "single_high"
-          ? "Single entry too high"
-          : f.kind === "off_roster"
-          ? "Not on active roster"
-          : "Review";
-      aoa.push([f.worker, f.dateISO, kind, f.detail]);
+    aoa.push(["Worker", "Date", "Issue"]);
+    const groups = groupFlags(rd.flags, rd.overHoursThreshold);
+    for (const g of groups) {
+      g.lines.forEach((line, i) => {
+        if (i === 0) {
+          aoa.push([g.worker, g.dateISO, line]);
+        } else {
+          aoa.push(["", "", line]);
+        }
+      });
     }
   }
 

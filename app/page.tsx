@@ -739,6 +739,11 @@ export default function Page() {
           )}
           <div className="flex items-center justify-between">
             <div className="text-rebar text-sm">
+              {tr.crewLabel}:{" "}
+              <span className="text-concrete font-bold tabular-nums">
+                {workers.length}
+              </span>
+              <span className="text-rebar/50 mx-2">|</span>
               {tr.total}:{" "}
               <span className="text-concrete font-bold tabular-nums">
                 {round2(total)}
@@ -1396,37 +1401,58 @@ function ApplyAll({
 }) {
   const [open, setOpen] = useState(false);
   const [raw, setRaw] = useState("8");
+
+  function confirm() {
+    const n = parseFloat(raw);
+    if (!isNaN(n)) onApply(n);
+    setOpen(false);
+  }
+
   return (
-    <div className="relative">
+    <>
       <button
-        onClick={() => setOpen((o) => !o)}
-        className="text-safety text-xs font-bold"
+        onClick={() => {
+          setRaw("8");
+          setOpen(true);
+        }}
+        className="text-safety text-xs font-bold px-3 py-1.5 rounded-full border border-safety/60 active:bg-safety/10"
       >
         {tr.applyAll}
       </button>
+
       {open && (
-        <div className="absolute right-0 top-7 z-20 bg-graphite rounded-2xl p-3 shadow-xl flex items-center gap-2 border border-line">
-          <input
-            type="number"
-            inputMode="decimal"
-            step="0.25"
-            value={raw}
-            onChange={(e) => setRaw(e.target.value)}
-            className="w-16 text-center bg-steel rounded-lg py-2 font-bold text-concrete"
-          />
-          <button
-            onClick={() => {
-              const n = parseFloat(raw);
-              if (!isNaN(n)) onApply(n);
-              setOpen(false);
-            }}
-            className="bg-safety text-steel font-bold px-3 py-2 rounded-lg text-sm"
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-8"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="w-full max-w-xs bg-graphite rounded-3xl p-5 shadow-2xl border border-safety/40"
+            onClick={(e) => e.stopPropagation()}
           >
-            {tr.done}
-          </button>
+            <div className="text-center text-sm font-bold text-concrete mb-4">
+              {tr.applyAllTitle}
+            </div>
+            <div className="flex items-center justify-center gap-3">
+              <input
+                type="number"
+                inputMode="decimal"
+                step="0.25"
+                value={raw}
+                onChange={(e) => setRaw(e.target.value)}
+                autoFocus
+                className="w-20 text-center text-2xl bg-steel rounded-xl py-3 font-extrabold text-concrete"
+              />
+              <button
+                onClick={confirm}
+                className="bg-safety text-steel font-extrabold px-5 py-3 rounded-xl"
+              >
+                {tr.done}
+              </button>
+            </div>
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 

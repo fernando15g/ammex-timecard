@@ -491,11 +491,23 @@ export default function Page() {
                 <span className="font-semibold tabular-nums">{w.hours}</span>
               </button>
             ))}
-            <div className="flex justify-between items-center pt-3 mt-1">
-              <span className="font-bold">{tr.total}</span>
-              <span className="text-2xl font-extrabold text-safetyDark tabular-nums">
-                {round2(total)}
-              </span>
+            <div className="flex justify-between items-center pt-3 mt-1 border-t border-graphite/20">
+              <div>
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.workersCount.toUpperCase()}
+                </div>
+                <div className="text-2xl font-extrabold text-steel tabular-nums">
+                  {workers.length}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.total.toUpperCase()}
+                </div>
+                <div className="text-2xl font-extrabold text-safetyDark tabular-nums">
+                  {round2(total)}
+                </div>
+              </div>
             </div>
             {workDone.trim() && (
               <div className="mt-4 text-sm">
@@ -1519,6 +1531,14 @@ function prettyDate(iso: string, lang: Lang) {
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
   ];
+  const daysEs = [
+    "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado",
+  ];
+  const daysEn = [
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+  ];
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const day = (lang === "es" ? daysEs : daysEn)[dow];
   const mo = (lang === "es" ? monthsEs : monthsEn)[m - 1];
-  return `${d} ${mo} ${y}`;
+  return `${day}, ${d} ${mo} ${y}`;
 }

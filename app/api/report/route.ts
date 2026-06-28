@@ -45,6 +45,7 @@ export async function POST(req: Request) {
   const foreman = typeof body.foreman === "string" ? body.foreman : "";
   const lang = body.lang === "es" ? "es" : "en";
   const mode = body.mode === "view" ? "view" : "email";
+  const reportView = body.reportView === "worker" ? "worker" : "job";
 
   // Determine the span. Custom range takes priority if both dates are valid.
   let startISO: string;
@@ -76,6 +77,7 @@ export async function POST(req: Request) {
       foreman,
       lang,
       mode,
+      reportView,
     });
     return NextResponse.json(result);
   } catch (err: any) {

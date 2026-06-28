@@ -187,6 +187,19 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     y -= rowH + 14;
   }
 
+  // Week grand total (reconciliation line) — full report only.
+  if (!rd.foremanReport) {
+    ensure(28);
+    page.drawText(`${tr.weekTotal}: ${rd.grandTotal} ${tr.hrs}`, {
+      x: MARGIN,
+      y: y - 12,
+      size: 12,
+      font: bold,
+      color: safety,
+    });
+    y -= 30;
+  }
+
   // No hours logged (only meaningful for the full roster report)
   if (!rd.foremanReport) {
     ensure(40);
@@ -263,4 +276,87 @@ function clip(s: string, font: PDFFont, size: number, maxW: number): string {
     t = t.slice(0, -1);
   }
   return t + "…";
+}
+
+// Worker-grouped view: each worker, the jobs they worked (ordered by earliest
+// day) with hours, and a weekly total. Portrait, paginates automatically.
+export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const tr = RT[rd.lang];
+
+  const PW = 612; // portrait Letter
+  const PH = 792;
+  let page = pdf.addPage([PW, PH]);
+  let y = PH - MARGIN;
+
+  function ensure(h: number) {
+    if (y - h < MARGIN) {
+      page = pdf.addPage([PW, PH]);
+      y = PH - MARGIN;
+    }
+  }
+
+  page.drawText("AMMEX REBAR PLACERS", {
+    x: MARGIN, y, size: 15, font: bold, color: steel,
+  });
+  y -= 18;
+  page.drawText(`${tr.workerReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`, {
+    x: MARGIN, y, size: 11, font, color: gray,
+  });
+  y -= 18;
+  if (rd.foremanReport && rd.foremanName) {
+    page.drawText(`${tr.foremanLabel}: ${rd.foremanName}`, {
+      x: MARGIN, y, size: 12, font: bold, color: safety,
+    });
+    y -= 18;
+  }
+  y -= 10;
+
+  const rightX = PW - MARGIN;
+  for (const w of rd.workerSummaries) {
+    ensure(20 + w.jobs.length * 15 + 10);
+    // Worker name + total on one line
+    page.drawText(w.name, { x: MARGIN, y, size: 12, font: bold, color: steel });
+    const totalStr = `${w.total} ${tr.hrs}`;
+    page.drawText(totalStr, {
+      x: rightX - bold.widthOfTextAtSize(totalStr, 12),
+      y, size: 12, font: bold, color: safety,
+    });
+    y -= 6;
+    page.drawLine({
+      start: { x: MARGIN, y: y },
+      end: { x: rightX, y: y },
+      thickness: 0.5,
+      color: line,
+    });
+    y -= 13;
+    // Job lines
+    for (const j of w.jobs) {
+      const left = j.jobId
+        ? `${j.firstDayLabel}  ·  ${j.title} (${j.jobId})`
+        : `${j.firstDayLabel}  ·  ${j.title}`;
+      page.drawText(clip(left, font, 10, PW - MARGIN * 2 - 60), {
+        x: MARGIN + 6, y, size: 10, font, color: steel,
+      });
+      const hrs = `${j.hours}`;
+      page.drawText(hrs, {
+        x: rightX - font.widthOfTextAtSize(hrs, 10),
+        y, size: 10, font, color: steel,
+      });
+      y -= 15;
+    }
+    y -= 8;
+  }
+
+  // Week grand total
+  if (!rd.foremanReport) {
+    ensure(24);
+    page.drawText(`${tr.weekTotal}: ${rd.grandTotal} ${tr.hrs}`, {
+      x: MARGIN, y: y - 4, size: 12, font: bold, color: safety,
+    });
+  }
+
+  return pdf.save();
 }

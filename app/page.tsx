@@ -990,6 +990,9 @@ function ReportsPanel({
   const [flagsOn, setFlagsOn] = useState(true);
   const [foremen, setForemen] = useState<string[]>([]);
   const [foreman, setForeman] = useState(""); // "" = All
+  const [reportType, setReportType] = useState<"job" | "worker" | "foreman">(
+    "job"
+  );
   const [lang, setLang] = useState<"en" | "es">("en");
   const [langTouched, setLangTouched] = useState(false);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
@@ -1015,11 +1018,15 @@ function ReportsPanel({
     };
   }, [pinOk]);
 
-  // Auto-suggest language: Spanish when a foreman is picked (it's for them),
-  // English for the master report — unless the user set it manually.
+  // Auto-suggest language: Spanish for a foreman report (it's for them),
+  // English for the master/worker reports — unless the user set it manually.
+  function onReportTypeChange(v: "job" | "worker" | "foreman") {
+    setReportType(v);
+    if (!langTouched) setLang(v === "foreman" ? "es" : "en");
+  }
+
   function onForemanChange(v: string) {
     setForeman(v);
-    if (!langTouched) setLang(v ? "es" : "en");
   }
 
   function onPinChange(v: string) {
@@ -1038,7 +1045,15 @@ function ReportsPanel({
   }
 
   function reqBody(mode: "view" | "email") {
-    const base: any = { pin, flags: flagsOn, foreman, lang, mode };
+    const base: any = {
+      pin,
+      flags: flagsOn,
+      lang,
+      mode,
+      // Map the report type to the backend's foreman + reportView params.
+      foreman: reportType === "foreman" ? foreman : "",
+      reportView: reportType === "worker" ? "worker" : "job",
+    };
     if (weekStart === "custom") {
       base.startISO = customStart;
       base.endISO = customEnd;
@@ -1196,20 +1211,36 @@ function ReportsPanel({
           </div>
         )}
 
-        <Field label={tr.foremanLabel}>
+        <Field label={tr.reportTypeLabel}>
           <select
-            value={foreman}
-            onChange={(e) => onForemanChange(e.target.value)}
+            value={reportType}
+            onChange={(e) =>
+              onReportTypeChange(e.target.value as "job" | "worker" | "foreman")
+            }
             className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
           >
-            <option value="">{tr.allForemen}</option>
-            {foremen.map((f) => (
-              <option key={f} value={f}>
-                {f}
-              </option>
-            ))}
+            <option value="job">{tr.reportTypeJob}</option>
+            <option value="worker">{tr.reportTypeWorker}</option>
+            <option value="foreman">{tr.reportTypeForeman}</option>
           </select>
         </Field>
+
+        {reportType === "foreman" && (
+          <Field label={tr.foremanLabel}>
+            <select
+              value={foreman}
+              onChange={(e) => onForemanChange(e.target.value)}
+              className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+            >
+              <option value="">{tr.allForemen}</option>
+              {foremen.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
 
         <div className="flex items-center justify-between bg-graphite rounded-xl px-4 py-3">
           <span className="font-semibold">{tr.reportLanguage}</span>

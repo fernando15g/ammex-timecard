@@ -45,6 +45,20 @@ export interface Flag {
   foremen?: string[]; // foremen whose entries are part of this flag
 }
 
+export interface WorkerJobLine {
+  title: string;
+  jobId: string;
+  hours: number;
+  firstDayIdx: number; // index into dayLabels (chronological)
+  firstDayLabel: string; // e.g., "Mon 6/22"
+}
+
+export interface WorkerSummary {
+  name: string;
+  jobs: WorkerJobLine[]; // sorted by earliest day worked
+  total: number;
+}
+
 export interface ReportData {
   weekStartISO: string; // Sunday
   weekEndISO: string; // Saturday
@@ -56,6 +70,8 @@ export interface ReportData {
   lang: ReportLang;
   foremanReport: boolean; // true when filtered to a single foreman
   foremanName: string; // the foreman's display name (empty for master report)
+  workerSummaries: WorkerSummary[]; // per-worker, jobs broken out (worker view)
+  grandTotal: number; // total labor hours across all jobs for the week
 }
 
 // A single readable line for one flag.
@@ -455,6 +471,46 @@ export function buildReport(
     }
   }
 
+  // Pivot the per-job grid into a per-worker summary: each worker, the jobs
+  // they were on (ordered by the earliest day they worked that job), and a
+  // weekly total. Reuses the data already in finalSections.
+  const wsMap = new Map<string, WorkerJobLine[]>();
+  for (const sec of finalSections) {
+    const label = sec.unassigned ? sec.title : sec.title;
+    for (const p of sec.people) {
+      let firstIdx = p.perDay.findIndex((v) => v != null);
+      if (firstIdx < 0) firstIdx = 0;
+      const line: WorkerJobLine = {
+        title: label,
+        jobId: sec.jobId,
+        hours: p.total,
+        firstDayIdx: firstIdx,
+        firstDayLabel: finalDayLabels[firstIdx] || "",
+      };
+      const arr = wsMap.get(p.name);
+      if (arr) arr.push(line);
+      else wsMap.set(p.name, [line]);
+    }
+  }
+  const workerSummaries: WorkerSummary[] = Array.from(wsMap.entries())
+    .map(([name, jobs]) => {
+      jobs.sort(
+        (a, b) =>
+          a.firstDayIdx - b.firstDayIdx ||
+          a.title.localeCompare(b.title, undefined, { sensitivity: "base" })
+      );
+      return {
+        name,
+        jobs,
+        total: jobs.reduce((s, j) => s + j.hours, 0),
+      };
+    })
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    );
+
+  const grandTotal = finalSections.reduce((s, sec) => s + sec.grandTotal, 0);
+
   return {
     weekStartISO,
     weekEndISO,
@@ -466,6 +522,8 @@ export function buildReport(
     lang,
     foremanReport: !!ff,
     foremanName: foremanFilter ? foremanFilter.trim() : "",
+    workerSummaries,
+    grandTotal,
   };
 }
 

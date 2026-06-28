@@ -42,6 +42,12 @@ export function buildReportXlsx(rd: ReportData): Buffer {
     aoa.push([]);
   }
 
+  // Week grand total (reconciliation line) — full report only.
+  if (!rd.foremanReport) {
+    aoa.push([`${tr.weekTotal}: ${rd.grandTotal} ${tr.hrs}`]);
+    aoa.push([]);
+  }
+
   // No hours logged (only for the full roster report)
   if (!rd.foremanReport) {
     aoa.push([tr.noHoursHeader]);
@@ -83,6 +89,45 @@ export function buildReportXlsx(rd: ReportData): Buffer {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Payroll");
 
+  const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  return out as Buffer;
+}
+
+// Worker-grouped view: one row per worker-job line (Worker, Date, Job, Job ID,
+// Hours), with a worker total row after each worker. Easy to sort/key from.
+export function buildWorkerXlsx(rd: ReportData): Buffer {
+  const aoa: (string | number)[][] = [];
+  const tr = RT[rd.lang];
+
+  aoa.push([`Ammex ${tr.workerReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
+  if (rd.foremanReport && rd.foremanName) {
+    aoa.push([`${tr.foremanLabel}: ${rd.foremanName}`]);
+  }
+  aoa.push([]);
+  aoa.push([tr.worker, "Date", "Job", tr.jobId, tr.total]);
+
+  for (const w of rd.workerSummaries) {
+    for (const j of w.jobs) {
+      aoa.push([w.name, j.firstDayLabel, j.title, j.jobId, j.hours]);
+    }
+    aoa.push([`${w.name} — ${tr.total}`, "", "", "", w.total]);
+    aoa.push([]);
+  }
+
+  if (!rd.foremanReport) {
+    aoa.push([`${tr.weekTotal}`, "", "", "", rd.grandTotal]);
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!cols"] = [
+    { wch: 24 },
+    { wch: 12 },
+    { wch: 26 },
+    { wch: 10 },
+    { wch: 10 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Payroll by Worker");
   const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   return out as Buffer;
 }

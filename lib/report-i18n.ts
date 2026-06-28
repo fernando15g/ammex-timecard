@@ -22,6 +22,9 @@ export const RT: Record<ReportLang, Record<string, string>> = {
     flagsHeader: "FLAGS TO REVIEW",
     none: "None.",
     foremanLabel: "Foreman",
+    workerReportTitle: "Weekly Payroll — by Worker",
+    weekTotal: "Week total",
+    hrs: "hrs",
   },
   es: {
     payrollTitle: "Nómina Semanal",
@@ -36,6 +39,9 @@ export const RT: Record<ReportLang, Record<string, string>> = {
     flagsHeader: "ALERTAS PARA REVISAR",
     none: "Ninguna.",
     foremanLabel: "Mayordomo",
+    workerReportTitle: "Nómina Semanal — por Trabajador",
+    weekTotal: "Total de la semana",
+    hrs: "hrs",
   },
 };
 

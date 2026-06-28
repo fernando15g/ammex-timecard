@@ -74,6 +74,10 @@ export const strings = {
     allForemen: "Todos",
     reportLanguage: "Idioma del reporte",
     generateView: "Generar y ver",
+    reportTypeLabel: "Tipo de reporte",
+    reportTypeJob: "Semanal (por obra)",
+    reportTypeWorker: "Semanal (por trabajador)",
+    reportTypeForeman: "Reporte de mayordomo",
   },
   en: {
     appTitle: "Timecard",
@@ -147,6 +151,10 @@ export const strings = {
     allForemen: "All foremen",
     reportLanguage: "Report language",
     generateView: "Generate & view",
+    reportTypeLabel: "Report type",
+    reportTypeJob: "Weekly (by job)",
+    reportTypeWorker: "Weekly (by worker)",
+    reportTypeForeman: "Foreman report",
   },
 } as const;
 

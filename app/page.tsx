@@ -248,6 +248,11 @@ export default function Page() {
     }
     setWorkers((prev) => [...prev, { name: clean, hours: null, isNew }]);
     setQuery("");
+    // Keep the add-worker box in view so several names can be tapped in a row
+    // without manually scrolling (the list grows above and pushes it down).
+    requestAnimationFrame(() =>
+      addBoxRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })
+    );
   }
 
   function removeWorker(name: string) {
@@ -1429,8 +1434,17 @@ function ApplyAll({
             className="w-full max-w-xs bg-graphite rounded-3xl p-5 shadow-2xl border border-safety/40"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="text-center text-sm font-bold text-concrete mb-4">
-              {tr.applyAllTitle}
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-sm font-bold text-concrete">
+                {tr.applyAllTitle}
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+                className="w-8 h-8 -mr-1 flex items-center justify-center rounded-full bg-steel/70 text-rebar text-lg active:bg-steel"
+              >
+                ✕
+              </button>
             </div>
             <div className="flex items-center justify-center gap-3">
               <input

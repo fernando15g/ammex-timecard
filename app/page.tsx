@@ -990,9 +990,9 @@ function ReportsPanel({
   const [flagsOn, setFlagsOn] = useState(true);
   const [foremen, setForemen] = useState<string[]>([]);
   const [foreman, setForeman] = useState(""); // "" = All
-  const [reportType, setReportType] = useState<"job" | "worker" | "foreman">(
-    "job"
-  );
+  const [reportType, setReportType] = useState<
+    "job" | "worker" | "daily" | "foreman"
+  >("job");
   const [lang, setLang] = useState<"en" | "es">("en");
   const [langTouched, setLangTouched] = useState(false);
   const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
@@ -1020,7 +1020,7 @@ function ReportsPanel({
 
   // Auto-suggest language: Spanish for a foreman report (it's for them),
   // English for the master/worker reports — unless the user set it manually.
-  function onReportTypeChange(v: "job" | "worker" | "foreman") {
+  function onReportTypeChange(v: "job" | "worker" | "daily" | "foreman") {
     setReportType(v);
     if (!langTouched) setLang(v === "foreman" ? "es" : "en");
   }
@@ -1052,7 +1052,12 @@ function ReportsPanel({
       mode,
       // Map the report type to the backend's foreman + reportView params.
       foreman: reportType === "foreman" ? foreman : "",
-      reportView: reportType === "worker" ? "worker" : "job",
+      reportView:
+        reportType === "worker"
+          ? "worker"
+          : reportType === "daily"
+          ? "daily"
+          : "job",
     };
     if (weekStart === "custom") {
       base.startISO = customStart;
@@ -1215,12 +1220,15 @@ function ReportsPanel({
           <select
             value={reportType}
             onChange={(e) =>
-              onReportTypeChange(e.target.value as "job" | "worker" | "foreman")
+              onReportTypeChange(
+                e.target.value as "job" | "worker" | "daily" | "foreman"
+              )
             }
             className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
           >
             <option value="job">{tr.reportTypeJob}</option>
             <option value="worker">{tr.reportTypeWorker}</option>
+            <option value="daily">{tr.reportTypeDaily}</option>
             <option value="foreman">{tr.reportTypeForeman}</option>
           </select>
         </Field>

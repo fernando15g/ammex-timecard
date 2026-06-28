@@ -77,6 +77,7 @@ export const strings = {
     reportTypeLabel: "Tipo de reporte",
     reportTypeJob: "Semanal (por obra)",
     reportTypeWorker: "Semanal (por trabajador)",
+    reportTypeDaily: "Revisión del dueño — diario",
     reportTypeForeman: "Reporte de mayordomo",
   },
   en: {
@@ -154,6 +155,7 @@ export const strings = {
     reportTypeLabel: "Report type",
     reportTypeJob: "Weekly (by job)",
     reportTypeWorker: "Weekly (by worker)",
+    reportTypeDaily: "Owner Review — Daily",
     reportTypeForeman: "Foreman report",
   },
 } as const;

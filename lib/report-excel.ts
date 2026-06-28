@@ -1,6 +1,7 @@
 import * as XLSX from "xlsx";
 import { ReportData, groupFlags } from "./report";
 import { RT } from "./report-i18n";
+import { DailyReport } from "./report-daily";
 
 // Builds an .xlsx workbook (as a Buffer) from the report data.
 // Layout mirrors the payroll grid: names down the left, 7 days across,
@@ -128,6 +129,43 @@ export function buildWorkerXlsx(rd: ReportData): Buffer {
   ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Payroll by Worker");
+  const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  return out as Buffer;
+}
+
+// Owner Review — Daily Excel: a flat, sortable table
+// (Date / Job / Job ID / Foreman / Worker / Hours).
+export function buildDailyXlsx(rd: DailyReport): Buffer {
+  const aoa: (string | number)[][] = [];
+  const tr = RT[rd.lang];
+
+  aoa.push([`Ammex ${tr.dailyReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
+  if (rd.foremanReport && rd.foremanName) {
+    aoa.push([`${tr.foremanLabel}: ${rd.foremanName}`]);
+  }
+  aoa.push([]);
+  aoa.push(["Date", "Job", tr.jobId, tr.foremanLabel, tr.worker, tr.total]);
+
+  for (const day of rd.days) {
+    for (const job of day.jobs) {
+      for (const fg of job.foremen) {
+        for (const c of fg.crew) {
+          aoa.push([day.dateLabel, job.title, job.jobId, fg.foreman, c.name, c.hours]);
+        }
+      }
+    }
+  }
+  aoa.push([]);
+  if (!rd.foremanReport) {
+    aoa.push([`${tr.weekTotal}`, "", "", "", "", rd.grandTotal]);
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws["!cols"] = [
+    { wch: 22 }, { wch: 26 }, { wch: 10 }, { wch: 20 }, { wch: 22 }, { wch: 8 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Daily Review");
   const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   return out as Buffer;
 }

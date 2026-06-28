@@ -9,8 +9,9 @@ import {
   PAYROLL_RECIPIENT,
 } from "./notion";
 import { buildReport, RawRow } from "./report";
-import { buildReportXlsx, buildWorkerXlsx } from "./report-excel";
-import { buildReportPdf, buildWorkerPdf } from "./report-pdf";
+import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
+import { buildReportPdf, buildWorkerPdf, buildDailyPdf } from "./report-pdf";
+import { buildDailyReport } from "./report-daily";
 
 const FROM = "Ammex Timecard <timecards@send.ammexrebar.com>";
 const THRESHOLD = 11;
@@ -89,7 +90,7 @@ export interface RunOptions {
   foreman?: string; // filter grid to this foreman
   lang?: "en" | "es";
   mode?: "email" | "view"; // email = send PDF+Excel; view = return PDF only
-  reportView?: "job" | "worker"; // job-grouped grid (default) or worker summary
+  reportView?: "job" | "worker" | "daily"; // job grid, worker summary, or daily log
 }
 
 // The full pipeline: read Notion for the span, build the files, email them.
@@ -103,7 +104,12 @@ export async function runReport(
   const foreman = opts.foreman?.trim() || "";
   const lang = opts.lang === "es" ? "es" : "en";
   const mode = opts.mode === "view" ? "view" : "email";
-  const reportView = opts.reportView === "worker" ? "worker" : "job";
+  const reportView =
+    opts.reportView === "worker"
+      ? "worker"
+      : opts.reportView === "daily"
+      ? "daily"
+      : "job";
   const notion = new Client({ auth: NOTION_TOKEN });
 
   // 1) Pull all timecard rows in the span
@@ -201,10 +207,19 @@ export async function runReport(
   if (!flagsOn) rd.flags = [];
 
   const isWorker = reportView === "worker";
-  const pdfBytes = isWorker ? await buildWorkerPdf(rd) : await buildReportPdf(rd);
+  const isDaily = reportView === "daily";
+  const dailyRd = isDaily
+    ? buildDailyReport(rows, startISO, endISO, lang, foreman || undefined)
+    : null;
+
+  const pdfBytes = isDaily
+    ? await buildDailyPdf(dailyRd!)
+    : isWorker
+    ? await buildWorkerPdf(rd)
+    : await buildReportPdf(rd);
   const pdfB64 = Buffer.from(pdfBytes).toString("base64");
   const who = foreman ? `_${foreman.replace(/[^A-Za-z0-9]+/g, "")}` : "";
-  const viewSuffix = isWorker ? "_byWorker" : "";
+  const viewSuffix = isDaily ? "_daily" : isWorker ? "_byWorker" : "";
   const fnameBase = `Ammex_Payroll_${startISO}_to_${endISO}${who}${viewSuffix}`;
 
   // 6a) View mode: return the PDF for on-screen viewing/sharing. No email.
@@ -224,10 +239,14 @@ export async function runReport(
   }
 
   // 6b) Email mode: send PDF + Excel as a record.
-  const xlsx = isWorker ? buildWorkerXlsx(rd) : buildReportXlsx(rd);
+  const xlsx = isDaily
+    ? buildDailyXlsx(dailyRd!)
+    : isWorker
+    ? buildWorkerXlsx(rd)
+    : buildReportXlsx(rd);
   const xlsxB64 = Buffer.from(xlsx).toString("base64");
   const subjectWho = foreman ? ` (${foreman})` : "";
-  const subjectView = isWorker ? " by Worker" : "";
+  const subjectView = isDaily ? " Daily Review" : isWorker ? " by Worker" : "";
 
   const resend = new Resend(process.env.RESEND_API_KEY);
   await resend.emails.send({

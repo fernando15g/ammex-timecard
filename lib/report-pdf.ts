@@ -1,6 +1,7 @@
 import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from "pdf-lib";
 import { ReportData, groupFlags } from "./report";
 import { RT } from "./report-i18n";
+import { DailyReport } from "./report-daily";
 
 // Builds a readable PDF of the weekly payroll report (landscape), mirroring
 // the Excel grid. Paginates automatically as sections fill the page.
@@ -351,6 +352,97 @@ export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
   }
 
   // Week grand total
+  if (!rd.foremanReport) {
+    ensure(24);
+    page.drawText(`${tr.weekTotal}: ${rd.grandTotal} ${tr.hrs}`, {
+      x: MARGIN, y: y - 4, size: 12, font: bold, color: safety,
+    });
+  }
+
+  return pdf.save();
+}
+
+// Owner Review — Daily PDF: a readable daily log (day → job → foreman → crew).
+// Portrait, generous-but-not-airy spacing, paginates automatically.
+export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const tr = RT[rd.lang];
+
+  const PW = 612;
+  const PH = 792;
+  let page = pdf.addPage([PW, PH]);
+  let y = PH - MARGIN;
+  const rightX = PW - MARGIN;
+
+  function ensure(h: number) {
+    if (y - h < MARGIN) {
+      page = pdf.addPage([PW, PH]);
+      y = PH - MARGIN;
+    }
+  }
+
+  page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y, size: 15, font: bold, color: steel });
+  y -= 18;
+  page.drawText(`${tr.dailyReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`, {
+    x: MARGIN, y, size: 11, font, color: gray,
+  });
+  y -= 18;
+  if (rd.foremanReport && rd.foremanName) {
+    page.drawText(`${tr.foremanLabel}: ${rd.foremanName}`, {
+      x: MARGIN, y, size: 12, font: bold, color: safety,
+    });
+    y -= 18;
+  }
+  y -= 8;
+
+  for (const day of rd.days) {
+    ensure(40);
+    // Day header with a filled band
+    page.drawRectangle({
+      x: MARGIN - 4, y: y - 16, width: PW - MARGIN * 2 + 8, height: 22, color: flagBg,
+    });
+    page.drawText(day.dateLabel, { x: MARGIN, y: y - 11, size: 13, font: bold, color: steel });
+    const dtot = `${day.total} ${tr.hrs}`;
+    page.drawText(dtot, {
+      x: rightX - bold.widthOfTextAtSize(dtot, 12), y: y - 11, size: 12, font: bold, color: steel,
+    });
+    y -= 30;
+
+    for (const job of day.jobs) {
+      for (const fg of job.foremen) {
+        ensure(20 + fg.crew.length * 13 + 16);
+        // Job + foreman header
+        const jobLine = job.jobId ? `${job.title} (${job.jobId})` : job.title;
+        page.drawText(jobLine, { x: MARGIN + 6, y, size: 11, font: bold, color: steel });
+        y -= 14;
+        if (fg.foreman) {
+          page.drawText(`${tr.foremanLabel}: ${fg.foreman}`, {
+            x: MARGIN + 6, y, size: 9.5, font, color: safety,
+          });
+          y -= 13;
+        }
+        // Crew lines
+        for (const c of fg.crew) {
+          page.drawText(`•  ${clip(c.name, font, 10, PW - MARGIN * 2 - 80)}`, {
+            x: MARGIN + 12, y, size: 10, font, color: steel,
+          });
+          const h = `${c.hours}`;
+          page.drawText(h, {
+            x: rightX - font.widthOfTextAtSize(h, 10), y, size: 10, font, color: steel,
+          });
+          y -= 13;
+        }
+        // Job/foreman subtotal
+        const jt = `${tr.jobTotal}: ${fg.total} ${tr.hrs}`;
+        page.drawText(jt, { x: MARGIN + 12, y, size: 9, font: bold, color: gray });
+        y -= 18;
+      }
+    }
+    y -= 6;
+  }
+
   if (!rd.foremanReport) {
     ensure(24);
     page.drawText(`${tr.weekTotal}: ${rd.grandTotal} ${tr.hrs}`, {

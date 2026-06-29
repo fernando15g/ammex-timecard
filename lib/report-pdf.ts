@@ -17,6 +17,8 @@ const line = rgb(0.8, 0.8, 0.8);
 const lightBg = rgb(0.96, 0.96, 0.94);
 const flagBg = rgb(1, 0.93, 0.85);
 const flagRowBg = rgb(1, 0.95, 0.88);
+const zebraBg = rgb(0.965, 0.965, 0.955);
+const faintDot = rgb(0.72, 0.72, 0.72);
 
 export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
@@ -126,11 +128,11 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
 
     drawHeaderRow();
 
-    for (const p of sec.people) {
+    sec.people.forEach((p, ri) => {
       ensure(rowH + 4);
       const flagged = flaggedNames.has(p.name.trim().toLowerCase());
       if (flagged) {
-        // Shade the flagged person's row.
+        // Shade the flagged person's row (takes priority over zebra).
         page.drawRectangle({
           x: MARGIN,
           y: y - rowH + 3,
@@ -152,24 +154,29 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
         } catch {
           /* icon is decorative; ignore if it can't draw */
         }
+      } else if (ri % 2 === 1) {
+        // Zebra striping on alternating non-flagged rows.
+        page.drawRectangle({
+          x: MARGIN,
+          y: y - rowH + 3,
+          width: PAGE_W - MARGIN * 2,
+          height: rowH,
+          color: zebraBg,
+        });
       }
       const nameX = flagged ? MARGIN + 14 : MARGIN + 4;
       drawCellText(clip(p.name, font, 9, nameW - (flagged ? 18 : 8)), nameX, y - rowH + 9, font, 9);
       p.perDay.forEach((h, i) => {
-        const txt = h == null ? "X" : String(h);
-        const c = h == null ? gray : steel;
-        drawCellText(txt, colX(i) + 4, y - rowH + 9, font, 9, c);
+        if (h == null) {
+          // Faint dot marks a non-worked day (quiet, keeps a column anchor).
+          drawCellText("·", colX(i) + 6, y - rowH + 10, font, 12, faintDot);
+        } else {
+          drawCellText(String(h), colX(i) + 4, y - rowH + 9, font, 9, steel);
+        }
       });
       drawCellText(String(p.total), totalX + 4, y - rowH + 9, bold, 9);
-      // row separator
-      page.drawLine({
-        start: { x: MARGIN, y: y - rowH + 2 },
-        end: { x: PAGE_W - MARGIN, y: y - rowH + 2 },
-        thickness: 0.3,
-        color: line,
-      });
       y -= rowH;
-    }
+    });
 
     // Daily totals row
     ensure(rowH + 4);

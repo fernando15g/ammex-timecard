@@ -35,7 +35,7 @@ export function buildReportXlsx(rd: ReportData): Buffer {
       const flagged = flaggedNames.has(p.name.trim().toLowerCase());
       aoa.push([
         flagged ? `⚑ ${p.name}` : p.name,
-        ...p.perDay.map((h) => (h == null ? "X" : h)),
+        ...p.perDay.map((h) => (h == null ? "" : h)),
         p.total,
       ]);
     }

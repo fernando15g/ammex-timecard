@@ -1057,6 +1057,8 @@ function ReportsPanel({
           ? "worker"
           : reportType === "daily"
           ? "daily"
+          : reportType === "foreman" && !foreman
+          ? "foremanAll" // foreman report with "All" → per-foreman breakout
           : "job",
     };
     if (weekStart === "custom") {

@@ -50,6 +50,8 @@ export async function POST(req: Request) {
       ? "worker"
       : body.reportView === "daily"
       ? "daily"
+      : body.reportView === "foremanAll"
+      ? "foremanAll"
       : "job";
 
   // Determine the span. Custom range takes priority if both dates are valid.

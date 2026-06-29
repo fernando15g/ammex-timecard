@@ -12,6 +12,28 @@ import { buildReport, RawRow } from "./report";
 import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
 import { buildReportPdf, buildWorkerPdf, buildDailyPdf } from "./report-pdf";
 import { buildDailyReport } from "./report-daily";
+import { PDFDocument } from "pdf-lib";
+import * as XLSX from "xlsx";
+
+// Merge several finished PDFs into one (each part starts on its own page).
+async function mergePdfs(parts: Uint8Array[]): Promise<Uint8Array> {
+  const out = await PDFDocument.create();
+  for (const p of parts) {
+    const src = await PDFDocument.load(p);
+    const pages = await out.copyPages(src, src.getPageIndices());
+    pages.forEach((pg) => out.addPage(pg));
+  }
+  return out.save();
+}
+
+function safeSheetName(name: string, used: Set<string>): string {
+  let base = name.replace(/[\\/?*\[\]:]/g, "").slice(0, 28) || "Foreman";
+  let n = base;
+  let i = 2;
+  while (used.has(n)) n = `${base} ${i++}`.slice(0, 31);
+  used.add(n);
+  return n;
+}
 
 const FROM = "Ammex Timecard <timecards@send.ammexrebar.com>";
 const THRESHOLD = 11;
@@ -90,7 +112,7 @@ export interface RunOptions {
   foreman?: string; // filter grid to this foreman
   lang?: "en" | "es";
   mode?: "email" | "view"; // email = send PDF+Excel; view = return PDF only
-  reportView?: "job" | "worker" | "daily"; // job grid, worker summary, or daily log
+  reportView?: "job" | "worker" | "daily" | "foremanAll"; // grid, worker, daily, or all-foremen breakout
 }
 
 // The full pipeline: read Notion for the span, build the files, email them.
@@ -109,6 +131,8 @@ export async function runReport(
       ? "worker"
       : opts.reportView === "daily"
       ? "daily"
+      : opts.reportView === "foremanAll"
+      ? "foremanAll"
       : "job";
   const notion = new Client({ auth: NOTION_TOKEN });
 
@@ -195,6 +219,85 @@ export async function runReport(
   } while (rc);
 
   // 5) Build report + files
+
+  // 5-ALL) Foreman breakout: one document with a section per foreman.
+  if (reportView === "foremanAll") {
+    const foremen = Array.from(
+      new Set(rows.map((r) => (r.foreman || "").trim()).filter(Boolean))
+    ).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+
+    const pdfParts: Uint8Array[] = [];
+    const wbCombined = XLSX.utils.book_new();
+    const usedNames = new Set<string>();
+
+    for (const fm of foremen) {
+      const rdf = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, fm, lang);
+      if (!flagsOn) rdf.flags = [];
+      pdfParts.push(await buildReportPdf(rdf));
+      if (mode === "email") {
+        const wbBuf = buildReportXlsx(rdf);
+        const wb = XLSX.read(wbBuf, { type: "buffer" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        XLSX.utils.book_append_sheet(wbCombined, sheet, safeSheetName(fm, usedNames));
+      }
+    }
+
+    const mergedPdf =
+      pdfParts.length > 0
+        ? await mergePdfs(pdfParts)
+        : await buildReportPdf(
+            buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, lang)
+          );
+    const pdfB64All = Buffer.from(mergedPdf).toString("base64");
+    const fnameAll = `Ammex_Payroll_${startISO}_to_${endISO}_allForemen`;
+
+    if (mode === "view") {
+      return {
+        ok: true,
+        weekStart: startISO,
+        weekEnd: endISO,
+        jobs: foremen.length,
+        unassigned: 0,
+        noHours: 0,
+        flags: 0,
+        debug: { foremen },
+        pdfBase64: pdfB64All,
+        filename: `${fnameAll}.pdf`,
+      };
+    }
+
+    const xlsxAll =
+      foremen.length > 0
+        ? (XLSX.write(wbCombined, { type: "buffer", bookType: "xlsx" }) as Buffer)
+        : buildReportXlsx(
+            buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, lang)
+          );
+    const resendAll = new Resend(process.env.RESEND_API_KEY);
+    await resendAll.emails.send({
+      from: FROM,
+      to: PAYROLL_RECIPIENT,
+      subject: `Weekly Payroll — All Foremen — ${startISO} to ${endISO}`,
+      text:
+        `Per-foreman payroll breakout attached (PDF + Excel).\n\n` +
+        `Range: ${startISO} to ${endISO}\n` +
+        `Foremen: ${foremen.length} (${foremen.join(", ")})`,
+      attachments: [
+        { filename: `${fnameAll}.xlsx`, content: Buffer.from(xlsxAll).toString("base64") },
+        { filename: `${fnameAll}.pdf`, content: pdfB64All },
+      ],
+    });
+    return {
+      ok: true,
+      weekStart: startISO,
+      weekEnd: endISO,
+      jobs: foremen.length,
+      unassigned: 0,
+      noHours: 0,
+      flags: 0,
+      debug: { foremen },
+    };
+  }
+
   const rd = buildReport(
     rows,
     activeRoster,

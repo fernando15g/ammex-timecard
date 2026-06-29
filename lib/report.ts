@@ -471,25 +471,26 @@ export function buildReport(
     }
   }
 
-  // Pivot the per-job grid into a per-worker summary: each worker, the jobs
-  // they were on (ordered by the earliest day they worked that job), and a
-  // weekly total. Reuses the data already in finalSections.
+  // Pivot into a per-worker summary: each worker, one line per DAY they worked
+  // (date · job · that day's hours), ordered earliest day first, with a weekly
+  // total. A worker on a job across multiple days gets one line per day.
   const wsMap = new Map<string, WorkerJobLine[]>();
   for (const sec of finalSections) {
-    const label = sec.unassigned ? sec.title : sec.title;
+    const label = sec.title;
     for (const p of sec.people) {
-      let firstIdx = p.perDay.findIndex((v) => v != null);
-      if (firstIdx < 0) firstIdx = 0;
-      const line: WorkerJobLine = {
-        title: label,
-        jobId: sec.jobId,
-        hours: p.total,
-        firstDayIdx: firstIdx,
-        firstDayLabel: finalDayLabels[firstIdx] || "",
-      };
-      const arr = wsMap.get(p.name);
-      if (arr) arr.push(line);
-      else wsMap.set(p.name, [line]);
+      p.perDay.forEach((v, idx) => {
+        if (v == null) return; // didn't work that day on this job
+        const line: WorkerJobLine = {
+          title: label,
+          jobId: sec.jobId,
+          hours: v,
+          firstDayIdx: idx,
+          firstDayLabel: finalDayLabels[idx] || "",
+        };
+        const arr = wsMap.get(p.name);
+        if (arr) arr.push(line);
+        else wsMap.set(p.name, [line]);
+      });
     }
   }
   const workerSummaries: WorkerSummary[] = Array.from(wsMap.entries())
@@ -502,7 +503,7 @@ export function buildReport(
       return {
         name,
         jobs,
-        total: jobs.reduce((s, j) => s + j.hours, 0),
+        total: Math.round(jobs.reduce((s, j) => s + j.hours, 0) * 100) / 100,
       };
     })
     .sort((a, b) =>

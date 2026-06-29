@@ -34,7 +34,7 @@ export function buildReportXlsx(rd: ReportData): Buffer {
     for (const p of sec.people) {
       const flagged = flaggedNames.has(p.name.trim().toLowerCase());
       aoa.push([
-        flagged ? `⚑ ${p.name}` : p.name,
+        flagged ? `⚑ ${p.name.toUpperCase()}` : p.name.toUpperCase(),
         ...p.perDay.map((h) => (h == null ? "" : h)),
         p.total,
       ]);
@@ -55,7 +55,7 @@ export function buildReportXlsx(rd: ReportData): Buffer {
     if (rd.noHours.length === 0) {
       aoa.push([tr.everyoneLogged]);
     } else {
-      for (const n of rd.noHours) aoa.push([n]);
+      for (const n of rd.noHours) aoa.push([n.toUpperCase()]);
     }
     aoa.push([]);
   }
@@ -109,9 +109,9 @@ export function buildWorkerXlsx(rd: ReportData): Buffer {
 
   for (const w of rd.workerSummaries) {
     for (const j of w.jobs) {
-      aoa.push([w.name, j.firstDayLabel, j.title, j.jobId, j.hours]);
+      aoa.push([w.name.toUpperCase(), j.firstDayLabel, j.title, j.jobId, j.hours]);
     }
-    aoa.push([`${w.name} — ${tr.total}`, "", "", "", w.total]);
+    aoa.push([`${w.name.toUpperCase()} — ${tr.total}`, "", "", "", w.total]);
     aoa.push([]);
   }
 
@@ -150,7 +150,7 @@ export function buildDailyXlsx(rd: DailyReport): Buffer {
     for (const job of day.jobs) {
       for (const fg of job.foremen) {
         for (const c of fg.crew) {
-          aoa.push([day.dateLabel, job.title, job.jobId, fg.foreman, c.name, c.hours]);
+          aoa.push([day.dateLabel, job.title, job.jobId, fg.foreman.toUpperCase(), c.name.toUpperCase(), c.hours]);
         }
       }
     }

@@ -1,5 +1,5 @@
 import * as XLSX from "xlsx";
-import { ReportData, groupFlags } from "./report";
+import { ReportData, groupFlags, fmtNumericDate } from "./report";
 import { RT } from "./report-i18n";
 import { DailyReport } from "./report-daily";
 
@@ -13,7 +13,7 @@ export function buildReportXlsx(rd: ReportData): Buffer {
 
   const header = [tr.worker, ...rd.dayLabels, tr.total];
 
-  aoa.push([`Ammex ${tr.payrollTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
+  aoa.push([`Ammex ${tr.payrollTitle} — ${fmtNumericDate(rd.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(rd.weekEndISO)}`]);
   if (rd.foremanReport && rd.foremanName) {
     aoa.push([`${tr.foremanLabel}: ${rd.foremanName}`]);
   }
@@ -100,7 +100,7 @@ export function buildWorkerXlsx(rd: ReportData): Buffer {
   const aoa: (string | number)[][] = [];
   const tr = RT[rd.lang];
 
-  aoa.push([`Ammex ${tr.workerReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
+  aoa.push([`Ammex ${tr.workerReportTitle} — ${fmtNumericDate(rd.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(rd.weekEndISO)}`]);
   if (rd.foremanReport && rd.foremanName) {
     aoa.push([`${tr.foremanLabel}: ${rd.foremanName}`]);
   }
@@ -139,7 +139,7 @@ export function buildDailyXlsx(rd: DailyReport): Buffer {
   const aoa: (string | number)[][] = [];
   const tr = RT[rd.lang];
 
-  aoa.push([`Ammex ${tr.dailyReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`]);
+  aoa.push([`Ammex ${tr.dailyReportTitle} — ${fmtNumericDate(rd.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(rd.weekEndISO)}`]);
   if (rd.foremanReport && rd.foremanName) {
     aoa.push([`${tr.foremanLabel}: ${rd.foremanName}`]);
   }

@@ -248,11 +248,18 @@ export default function Page() {
     }
     setWorkers((prev) => [...prev, { name: clean, hours: null, isNew }]);
     setQuery("");
-    // Keep the add-worker box in view so several names can be tapped in a row
-    // without manually scrolling (the list grows above and pushes it down).
-    requestAnimationFrame(() =>
-      addBoxRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })
-    );
+    // Only scroll if the add-worker box has been pushed out of view. When it's
+    // already visible, leave the screen completely still (no jerk on rapid adds).
+    requestAnimationFrame(() => {
+      const el = addBoxRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      const fullyVisible = rect.top >= 0 && rect.bottom <= vh;
+      if (!fullyVisible) {
+        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
   }
 
   function removeWorker(name: string) {
@@ -948,11 +955,13 @@ function weekOptions(): { iso: string; label: string }[] {
   const off = now.getTimezoneOffset();
   const today = new Date(now.getTime() - off * 60000);
   const dow = today.getUTCDay();
-  const thisSun = new Date(today);
-  thisSun.setUTCDate(thisSun.getUTCDate() - dow);
+  // Week runs Monday..Sunday. Find this week's Monday.
+  const backToMonday = (dow + 6) % 7;
+  const thisMon = new Date(today);
+  thisMon.setUTCDate(thisMon.getUTCDate() - backToMonday);
   const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
   const mk = (weeksBack: number, name: string) => {
-    const s = new Date(thisSun);
+    const s = new Date(thisMon);
     s.setUTCDate(s.getUTCDate() - 7 * weeksBack);
     const e = new Date(s);
     e.setUTCDate(e.getUTCDate() + 6);

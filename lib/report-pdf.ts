@@ -1,5 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from "pdf-lib";
-import { ReportData, groupFlags } from "./report";
+import { ReportData, groupFlags, fmtNumericDate } from "./report";
 import { RT } from "./report-i18n";
 import { DailyReport } from "./report-daily";
 import { PayrollGrid } from "./report-payrollgrid";
@@ -62,7 +62,7 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     color: steel,
   });
   y -= 18;
-  page.drawText(`${tr.payrollTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`, {
+  page.drawText(`${tr.payrollTitle} — ${fmtNumericDate(rd.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(rd.weekEndISO)}`, {
     x: MARGIN,
     y,
     size: 11,
@@ -311,7 +311,7 @@ export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
     x: MARGIN, y, size: 15, font: bold, color: steel,
   });
   y -= 18;
-  page.drawText(`${tr.workerReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`, {
+  page.drawText(`${tr.workerReportTitle} — ${fmtNumericDate(rd.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(rd.weekEndISO)}`, {
     x: MARGIN, y, size: 11, font, color: gray,
   });
   y -= 18;
@@ -401,7 +401,7 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
 
   page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y, size: 15, font: bold, color: steel });
   y -= 18;
-  page.drawText(`${tr.dailyReportTitle} — ${rd.weekStartISO} ${tr.rangeJoin} ${rd.weekEndISO}`, {
+  page.drawText(`${tr.dailyReportTitle} — ${fmtNumericDate(rd.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(rd.weekEndISO)}`, {
     x: MARGIN, y, size: 11, font, color: gray,
   });
   y -= 18;
@@ -420,11 +420,13 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
       y = PH - MARGIN;
     }
     ensure(40);
-    // Day header with a filled band
+    // Day header band — date centered + uppercased; day total on the right.
     page.drawRectangle({
       x: MARGIN - 4, y: y - 16, width: PW - MARGIN * 2 + 8, height: 22, color: flagBg,
     });
-    page.drawText(day.dateLabel, { x: MARGIN, y: y - 11, size: 13, font: bold, color: steel });
+    const dLabel = day.dateLabel.toUpperCase();
+    const dLabelW = bold.widthOfTextAtSize(dLabel, 13);
+    page.drawText(dLabel, { x: (PW - dLabelW) / 2, y: y - 11, size: 13, font: bold, color: steel });
     const dtot = `${day.total} ${tr.hrs}`;
     page.drawText(dtot, {
       x: rightX - bold.widthOfTextAtSize(dtot, 12), y: y - 11, size: 12, font: bold, color: steel,
@@ -532,7 +534,7 @@ export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> 
   function header() {
     page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y, size: 14, font: bold, color: steel });
     y -= 16;
-    page.drawText(`${tr.payrollGridTitle} — ${pg.weekStartISO} ${tr.rangeJoin} ${pg.weekEndISO}`, {
+    page.drawText(`${tr.payrollGridTitle} — ${fmtNumericDate(pg.weekStartISO)} ${tr.rangeJoin} ${fmtNumericDate(pg.weekEndISO)}`, {
       x: MARGIN, y, size: 10.5, font, color: gray,
     });
     y -= 22;

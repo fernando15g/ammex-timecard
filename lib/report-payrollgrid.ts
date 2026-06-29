@@ -75,19 +75,21 @@ export function buildPayrollGrid(
     else dj.set(job, { hours: r.hours, order: seq++ });
   }
 
-  // Determine if Sunday (idx 0) has any hours; hide it otherwise.
+  // Week runs Monday(idx0)..Sunday(idx6). Hide the trailing Sunday unless
+  // someone worked it.
   let sundayWorked = false;
   for (const days of byWorker.values()) {
-    const d0 = days.get(0);
-    if (d0 && d0.size > 0) {
+    const d6 = days.get(6);
+    if (d6 && d6.size > 0) {
       sundayWorked = true;
       break;
     }
   }
-  const startIdx = sundayWorked ? 0 : 1;
+  const startIdx = 0;
+  const endIdx = sundayWorked ? 7 : 6; // exclude Sunday column if unworked
 
   const dayLabels: string[] = [];
-  for (let i = startIdx; i < nDays; i++) {
+  for (let i = startIdx; i < endIdx; i++) {
     dayLabels.push(fmtDay(addDaysISO(weekStartISO, i), lang));
   }
 
@@ -95,7 +97,7 @@ export function buildPayrollGrid(
   for (const [name, days] of byWorker) {
     const cells: PayrollGridCell[] = [];
     let total = 0;
-    for (let i = startIdx; i < nDays; i++) {
+    for (let i = startIdx; i < endIdx; i++) {
       const dj = days.get(i);
       if (!dj || dj.size === 0) {
         cells.push({ text: "" });

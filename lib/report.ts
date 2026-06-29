@@ -60,7 +60,7 @@ export interface WorkerSummary {
 }
 
 export interface ReportData {
-  weekStartISO: string; // Sunday
+  weekStartISO: string; // Monday
   weekEndISO: string; // Saturday
   dayLabels: string[]; // ["Sun 6/22", ...]
   sections: JobSection[]; // assigned jobs first, then unassigned
@@ -450,23 +450,24 @@ export function buildReport(
     (a, b) => a.dateISO.localeCompare(b.dateISO) || a.worker.localeCompare(b.worker)
   );
 
-  // Hide the leading Sunday column when nobody logged Sunday hours. Only applies
-  // when the span actually starts on a Sunday (the weekly presets always do);
-  // if someone did work Sunday, the column stays so no hours are lost.
+  // The week runs Monday..Sunday, so Sunday is the LAST day. Hide the trailing
+  // Sunday column when nobody logged Sunday hours; keep it if anyone worked it
+  // so no hours are lost.
   let finalDayLabels = dayLabels;
   let finalSections = sections;
   const [sy, sm, sd] = weekStartISO.split("-").map(Number);
-  const startsSunday = new Date(Date.UTC(sy, sm - 1, sd)).getUTCDay() === 0;
-  if (startsSunday && nDays > 1) {
+  const startsMonday = new Date(Date.UTC(sy, sm - 1, sd)).getUTCDay() === 1;
+  if (startsMonday && nDays === 7) {
+    const lastIdx = nDays - 1; // Sunday
     const sundayWorked = sections.some((sec) =>
-      sec.people.some((p) => p.perDay[0] != null)
+      sec.people.some((p) => p.perDay[lastIdx] != null)
     );
     if (!sundayWorked) {
-      finalDayLabels = dayLabels.slice(1);
+      finalDayLabels = dayLabels.slice(0, lastIdx);
       finalSections = sections.map((sec) => ({
         ...sec,
-        people: sec.people.map((p) => ({ ...p, perDay: p.perDay.slice(1) })),
-        dailyTotals: sec.dailyTotals.slice(1),
+        people: sec.people.map((p) => ({ ...p, perDay: p.perDay.slice(0, lastIdx) })),
+        dailyTotals: sec.dailyTotals.slice(0, lastIdx),
       }));
     }
   }
@@ -530,11 +531,18 @@ export function buildReport(
 
 // Most recently completed Sunday (the start of last week's Sun..Sat).
 // If today is Sunday, last completed week started 7 days ago.
+// Format an ISO date (YYYY-MM-DD) as numeric M/D/YYYY for report headers.
+export function fmtNumericDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  return `${m}/${d}/${y}`;
+}
+
 export function lastCompletedWeekStart(todayISO: string): string {
   const [y, m, d] = todayISO.split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
-  const dow = dt.getUTCDay(); // 0 = Sunday
-  // Go back to this week's Sunday, then back one more week.
-  const thisSunday = addDaysISO(todayISO, -dow);
-  return addDaysISO(thisSunday, -7);
+  const dow = dt.getUTCDay(); // 0 = Sunday, 1 = Monday
+  // The week runs Monday..Sunday. Days back to this week's Monday:
+  const backToMonday = (dow + 6) % 7; // Mon=0, Tue=1, ... Sun=6
+  const thisMonday = addDaysISO(todayISO, -backToMonday);
+  return addDaysISO(thisMonday, -7); // the last fully completed Mon..Sun week
 }

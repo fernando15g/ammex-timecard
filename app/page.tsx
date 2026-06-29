@@ -991,7 +991,7 @@ function ReportsPanel({
   const [foremen, setForemen] = useState<string[]>([]);
   const [foreman, setForeman] = useState(""); // "" = All
   const [reportType, setReportType] = useState<
-    "job" | "worker" | "daily" | "foreman"
+    "job" | "worker" | "daily" | "payrollGrid" | "foreman"
   >("job");
   const [lang, setLang] = useState<"en" | "es">("en");
   const [langTouched, setLangTouched] = useState(false);
@@ -1020,7 +1020,9 @@ function ReportsPanel({
 
   // Auto-suggest language: Spanish for a foreman report (it's for them),
   // English for the master/worker reports — unless the user set it manually.
-  function onReportTypeChange(v: "job" | "worker" | "daily" | "foreman") {
+  function onReportTypeChange(
+    v: "job" | "worker" | "daily" | "payrollGrid" | "foreman"
+  ) {
     setReportType(v);
     if (!langTouched) setLang(v === "foreman" ? "es" : "en");
   }
@@ -1057,6 +1059,8 @@ function ReportsPanel({
           ? "worker"
           : reportType === "daily"
           ? "daily"
+          : reportType === "payrollGrid"
+          ? "payrollGrid"
           : reportType === "foreman" && !foreman
           ? "foremanAll" // foreman report with "All" → per-foreman breakout
           : "job",
@@ -1223,7 +1227,12 @@ function ReportsPanel({
             value={reportType}
             onChange={(e) =>
               onReportTypeChange(
-                e.target.value as "job" | "worker" | "daily" | "foreman"
+                e.target.value as
+                  | "job"
+                  | "worker"
+                  | "daily"
+                  | "payrollGrid"
+                  | "foreman"
               )
             }
             className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
@@ -1231,6 +1240,7 @@ function ReportsPanel({
             <option value="job">{tr.reportTypeJob}</option>
             <option value="worker">{tr.reportTypeWorker}</option>
             <option value="daily">{tr.reportTypeDaily}</option>
+            <option value="payrollGrid">{tr.reportTypePayrollGrid}</option>
             <option value="foreman">{tr.reportTypeForeman}</option>
           </select>
         </Field>

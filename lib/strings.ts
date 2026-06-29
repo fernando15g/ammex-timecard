@@ -78,6 +78,7 @@ export const strings = {
     reportTypeJob: "Reporte maestro",
     reportTypeWorker: "Semanal (por trabajador)",
     reportTypeDaily: "Revisión del dueño — diario",
+    reportTypePayrollGrid: "Cuadrícula de nómina",
     reportTypeForeman: "Reporte de mayordomo",
   },
   en: {
@@ -156,6 +157,7 @@ export const strings = {
     reportTypeJob: "Master Report",
     reportTypeWorker: "Weekly (by worker)",
     reportTypeDaily: "Owner Review — Daily",
+    reportTypePayrollGrid: "Payroll Grid",
     reportTypeForeman: "Foreman report",
   },
 } as const;

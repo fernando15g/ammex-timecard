@@ -28,6 +28,8 @@ export const RT: Record<ReportLang, Record<string, string>> = {
     dailyReportTitle: "Owner Review — Daily",
     jobTotal: "Job total",
     dayTotal: "Day total",
+    payrollGridTitle: "Payroll Grid",
+    noHoursShort: "No hours this week",
   },
   es: {
     payrollTitle: "Nómina Semanal",
@@ -48,6 +50,8 @@ export const RT: Record<ReportLang, Record<string, string>> = {
     dailyReportTitle: "Revisión del Dueño — Diario",
     jobTotal: "Total de la obra",
     dayTotal: "Total del día",
+    payrollGridTitle: "Cuadrícula de Nómina",
+    noHoursShort: "Sin horas esta semana",
   },
 };
 

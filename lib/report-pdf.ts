@@ -2,6 +2,7 @@ import { PDFDocument, StandardFonts, rgb, PDFPage, PDFFont } from "pdf-lib";
 import { ReportData, groupFlags } from "./report";
 import { RT } from "./report-i18n";
 import { DailyReport } from "./report-daily";
+import { PayrollGrid } from "./report-payrollgrid";
 
 // Builds a readable PDF of the weekly payroll report (landscape), mirroring
 // the Excel grid. Paginates automatically as sections fill the page.
@@ -345,14 +346,25 @@ export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
       const left = j.jobId
         ? `${j.firstDayLabel}  ·  ${j.title} (${j.jobId})`
         : `${j.firstDayLabel}  ·  ${j.title}`;
-      page.drawText(clip(left, font, 10, PW - MARGIN * 2 - 60), {
+      const leftClipped = clip(left, font, 10, PW - MARGIN * 2 - 90);
+      page.drawText(leftClipped, {
         x: MARGIN + 6, y, size: 10, font, color: steel,
       });
       const hrs = `${j.hours}`;
-      page.drawText(hrs, {
-        x: rightX - font.widthOfTextAtSize(hrs, 10),
-        y, size: 10, font, color: steel,
-      });
+      const hrsW = font.widthOfTextAtSize(hrs, 10);
+      const hrsX = rightX - hrsW;
+      page.drawText(hrs, { x: hrsX, y, size: 10, font, color: steel });
+      // Faint dashed leader from the text to the hours, so the eye tracks across.
+      const leftEnd = MARGIN + 6 + font.widthOfTextAtSize(leftClipped, 10) + 6;
+      if (hrsX - 6 > leftEnd) {
+        page.drawLine({
+          start: { x: leftEnd, y: y + 3 },
+          end: { x: hrsX - 6, y: y + 3 },
+          thickness: 0.5,
+          color: rgb(0.8, 0.8, 0.8),
+          dashArray: [1, 2],
+        });
+      }
       y -= 15;
     }
     y -= 8;
@@ -404,7 +416,12 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
   }
   y -= 8;
 
-  for (const day of rd.days) {
+  rd.days.forEach((day, di) => {
+    // Each day starts on its own page; the first day stays under the header.
+    if (di > 0) {
+      page = pdf.addPage([PW, PH]);
+      y = PH - MARGIN;
+    }
     ensure(40);
     // Day header with a filled band
     page.drawRectangle({
@@ -432,13 +449,22 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
         }
         // Crew lines
         for (const c of fg.crew) {
-          page.drawText(`•  ${clip(c.name, font, 10, PW - MARGIN * 2 - 80)}`, {
-            x: MARGIN + 12, y, size: 10, font, color: steel,
-          });
+          const nameTxt = `•  ${clip(c.name, font, 10, PW - MARGIN * 2 - 90)}`;
+          page.drawText(nameTxt, { x: MARGIN + 12, y, size: 10, font, color: steel });
           const h = `${c.hours}`;
-          page.drawText(h, {
-            x: rightX - font.widthOfTextAtSize(h, 10), y, size: 10, font, color: steel,
-          });
+          const hW = font.widthOfTextAtSize(h, 10);
+          const hX = rightX - hW;
+          page.drawText(h, { x: hX, y, size: 10, font, color: steel });
+          const nameEnd = MARGIN + 12 + font.widthOfTextAtSize(nameTxt, 10) + 6;
+          if (hX - 6 > nameEnd) {
+            page.drawLine({
+              start: { x: nameEnd, y: y + 3 },
+              end: { x: hX - 6, y: y + 3 },
+              thickness: 0.5,
+              color: rgb(0.8, 0.8, 0.8),
+              dashArray: [1, 2],
+            });
+          }
           y -= 13;
         }
         // Job/foreman subtotal
@@ -448,13 +474,109 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
       }
     }
     y -= 6;
-  }
+  });
 
   if (!rd.foremanReport) {
     ensure(24);
     page.drawText(`${tr.weekTotal}: ${rd.grandTotal} ${tr.hrs}`, {
       x: MARGIN, y: y - 4, size: 12, font: bold, color: safety,
     });
+  }
+
+  return pdf.save();
+}
+
+// Payroll Grid PDF: every worker (with hours) × day, daily totals (or splits
+// like "5 | 3"), alphabetical; no-hours roster listed below. Landscape grid.
+export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const tr = RT[pg.lang];
+
+  const PWL = 792;
+  const PHL = 612;
+  let page = pdf.addPage([PWL, PHL]);
+  let y = PHL - MARGIN;
+
+  const nameW = 150;
+  const totalW = 50;
+  const nCols = pg.dayLabels.length;
+  const gridW = PWL - MARGIN * 2 - nameW - totalW;
+  const colW = gridW / nCols;
+  const rowH = 18;
+  const colX = (i: number) => MARGIN + nameW + i * colW;
+  const totalX = MARGIN + nameW + nCols * colW;
+
+  function header() {
+    page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y, size: 14, font: bold, color: steel });
+    y -= 16;
+    page.drawText(`${tr.payrollGridTitle} — ${pg.weekStartISO} ${tr.rangeJoin} ${pg.weekEndISO}`, {
+      x: MARGIN, y, size: 10.5, font, color: gray,
+    });
+    y -= 20;
+  }
+  function colHeaders() {
+    page.drawRectangle({ x: MARGIN, y: y - rowH + 4, width: PWL - MARGIN * 2, height: rowH, color: lightBg });
+    page.drawText(tr.worker, { x: MARGIN + 4, y: y - rowH + 9, size: 8.5, font: bold, color: steel });
+    pg.dayLabels.forEach((d, i) =>
+      page.drawText(d, { x: colX(i) + 3, y: y - rowH + 9, size: 8, font: bold, color: steel })
+    );
+    page.drawText(tr.total, { x: totalX + 3, y: y - rowH + 9, size: 8.5, font: bold, color: steel });
+    y -= rowH;
+  }
+  function ensure(h: number, repeatHead = true) {
+    if (y - h < MARGIN) {
+      page = pdf.addPage([PWL, PHL]);
+      y = PHL - MARGIN;
+      if (repeatHead) colHeaders();
+    }
+  }
+
+  header();
+  colHeaders();
+
+  pg.rows.forEach((r, ri) => {
+    ensure(rowH);
+    if (ri % 2 === 1) {
+      page.drawRectangle({ x: MARGIN, y: y - rowH + 3, width: PWL - MARGIN * 2, height: rowH, color: zebraBg });
+    }
+    page.drawText(clip(r.name, font, 9, nameW - 8), { x: MARGIN + 4, y: y - rowH + 9, size: 9, font, color: steel });
+    r.cells.forEach((c, i) => {
+      if (c.text) {
+        page.drawText(c.text, { x: colX(i) + 3, y: y - rowH + 9, size: 8.5, font, color: steel });
+      } else {
+        page.drawText("·", { x: colX(i) + 5, y: y - rowH + 10, size: 11, font, color: faintDot });
+      }
+    });
+    page.drawText(String(r.total), { x: totalX + 3, y: y - rowH + 9, size: 9, font: bold, color: steel });
+    y -= rowH;
+  });
+
+  // Grand total
+  y -= 4;
+  ensure(20, false);
+  page.drawText(`${tr.weekTotal}: ${pg.grandTotal} ${tr.hrs}`, {
+    x: MARGIN, y: y - 8, size: 11, font: bold, color: safety,
+  });
+  y -= 26;
+
+  // No-hours roster, grouped below
+  if (pg.noHours.length > 0) {
+    ensure(24, false);
+    page.drawText(tr.noHoursShort, { x: MARGIN, y: y - 8, size: 10.5, font: bold, color: steel });
+    y -= 18;
+    const perRow = 4;
+    const colWidth = (PWL - MARGIN * 2) / perRow;
+    for (let i = 0; i < pg.noHours.length; i += perRow) {
+      ensure(14, false);
+      for (let k = 0; k < perRow && i + k < pg.noHours.length; k++) {
+        page.drawText(`•  ${pg.noHours[i + k]}`, {
+          x: MARGIN + k * colWidth, y: y - 8, size: 9, font, color: gray,
+        });
+      }
+      y -= 13;
+    }
   }
 
   return pdf.save();

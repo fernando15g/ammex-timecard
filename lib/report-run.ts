@@ -10,8 +10,9 @@ import {
 } from "./notion";
 import { buildReport, RawRow } from "./report";
 import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
-import { buildReportPdf, buildWorkerPdf, buildDailyPdf } from "./report-pdf";
+import { buildReportPdf, buildWorkerPdf, buildDailyPdf, buildPayrollGridPdf } from "./report-pdf";
 import { buildDailyReport } from "./report-daily";
+import { buildPayrollGrid } from "./report-payrollgrid";
 import { PDFDocument } from "pdf-lib";
 import * as XLSX from "xlsx";
 
@@ -112,7 +113,7 @@ export interface RunOptions {
   foreman?: string; // filter grid to this foreman
   lang?: "en" | "es";
   mode?: "email" | "view"; // email = send PDF+Excel; view = return PDF only
-  reportView?: "job" | "worker" | "daily" | "foremanAll"; // grid, worker, daily, or all-foremen breakout
+  reportView?: "job" | "worker" | "daily" | "foremanAll" | "payrollGrid";
 }
 
 // The full pipeline: read Notion for the span, build the files, email them.
@@ -133,6 +134,8 @@ export async function runReport(
       ? "daily"
       : opts.reportView === "foremanAll"
       ? "foremanAll"
+      : opts.reportView === "payrollGrid"
+      ? "payrollGrid"
       : "job";
   const notion = new Client({ auth: NOTION_TOKEN });
 
@@ -219,6 +222,50 @@ export async function runReport(
   } while (rc);
 
   // 5) Build report + files
+
+  // 5-PG) Payroll Grid: every worker × day, PDF only.
+  if (reportView === "payrollGrid") {
+    const pg = buildPayrollGrid(rows, activeRoster, startISO, endISO, lang);
+    const pgPdf = await buildPayrollGridPdf(pg);
+    const pgB64 = Buffer.from(pgPdf).toString("base64");
+    const pgName = `Ammex_PayrollGrid_${startISO}_to_${endISO}`;
+    if (mode === "view") {
+      return {
+        ok: true,
+        weekStart: startISO,
+        weekEnd: endISO,
+        jobs: pg.rows.length,
+        unassigned: 0,
+        noHours: pg.noHours.length,
+        flags: 0,
+        debug: { workers: pg.rows.length },
+        pdfBase64: pgB64,
+        filename: `${pgName}.pdf`,
+      };
+    }
+    const resendPg = new Resend(process.env.RESEND_API_KEY);
+    await resendPg.emails.send({
+      from: FROM,
+      to: PAYROLL_RECIPIENT,
+      subject: `Payroll Grid — ${startISO} to ${endISO}`,
+      text:
+        `Payroll Grid attached (PDF).\n\n` +
+        `Range: ${startISO} to ${endISO}\n` +
+        `Workers with hours: ${pg.rows.length}\n` +
+        `No hours: ${pg.noHours.length}`,
+      attachments: [{ filename: `${pgName}.pdf`, content: pgB64 }],
+    });
+    return {
+      ok: true,
+      weekStart: startISO,
+      weekEnd: endISO,
+      jobs: pg.rows.length,
+      unassigned: 0,
+      noHours: pg.noHours.length,
+      flags: 0,
+      debug: { workers: pg.rows.length },
+    };
+  }
 
   // 5-ALL) Foreman breakout: one document with a section per foreman.
   if (reportView === "foremanAll") {

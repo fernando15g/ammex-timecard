@@ -43,7 +43,13 @@ export default function Page() {
   const [justUpdated, setJustUpdated] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
   const [showReports, setShowReports] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  // PIN gates the hamburger (admin area); unlock lasts the session so Reports
+  // and Schedule share one entry.
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminPin, setAdminPin] = useState("");
+  const [adminPinError, setAdminPinError] = useState(false);
   const [query, setQuery] = useState("");
 
   const [screen, setScreen] = useState<"form" | "review">("form");
@@ -820,34 +826,98 @@ export default function Page() {
       {/* Hamburger dropdown menu */}
       {showMenu && (
         <div
-          className="fixed inset-0 z-[55]"
-          onClick={() => setShowMenu(false)}
+          className="fixed inset-0 z-[55] bg-black/40"
+          onClick={() => {
+            setShowMenu(false);
+            setAdminPin("");
+            setAdminPinError(false);
+          }}
         >
           <div
-            className="absolute top-16 left-4 bg-graphite rounded-2xl shadow-xl overflow-hidden min-w-[180px] border border-line"
+            className="absolute top-16 left-4 bg-graphite rounded-2xl shadow-xl overflow-hidden min-w-[220px] border border-line"
             onClick={(e) => e.stopPropagation()}
           >
-            <button
-              onClick={() => {
-                setShowMenu(false);
-                setShowReports(true);
-              }}
-              className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 3v4a1 1 0 0 0 1 1h4" />
-                <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
-                <path d="M9 13h6M9 17h3" />
-              </svg>
-              {tr.reportsTitle}
-            </button>
+            {!adminUnlocked ? (
+              // PIN entry — gates the whole admin area.
+              <div className="p-5">
+                <div className="text-concrete font-semibold mb-1">{tr.enterPin}</div>
+                <div className="text-rebar text-xs mb-3">{tr.pinSubtitle}</div>
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  autoFocus
+                  value={adminPin}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, "").slice(0, 4);
+                    setAdminPin(digits);
+                    setAdminPinError(false);
+                    if (digits.length === 4) {
+                      if (digits === "5314") {
+                        setAdminUnlocked(true);
+                        setAdminPinError(false);
+                      } else {
+                        setAdminPinError(true);
+                        setTimeout(() => setAdminPin(""), 350);
+                      }
+                    }
+                  }}
+                  placeholder="••••"
+                  className={`w-full bg-steel rounded-xl px-4 h-12 text-concrete text-center tracking-[0.5em] text-xl ${
+                    adminPinError ? "ring-2 ring-red-500" : ""
+                  }`}
+                />
+              </div>
+            ) : (
+              <>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowReports(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                    <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                    <path d="M9 13h6M9 17h3" />
+                  </svg>
+                  {tr.reportsTitle}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowSchedule(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="4" width="18" height="18" rx="2" />
+                    <path d="M16 2v4M8 2v4M3 10h18" />
+                  </svg>
+                  {tr.scheduleTitle}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* Reports admin panel (PIN-gated) */}
+      {/* Reports admin panel */}
       {showReports && (
-        <ReportsPanel tr={tr} onClose={() => setShowReports(false)} />
+        <ReportsPanel
+          tr={tr}
+          unlockedPin={adminUnlocked ? "5314" : ""}
+          onClose={() => setShowReports(false)}
+        />
+      )}
+
+      {/* Schedule panel */}
+      {showSchedule && (
+        <SchedulePanel
+          tr={tr}
+          pin={adminUnlocked ? "5314" : ""}
+          onClose={() => setShowSchedule(false)}
+        />
       )}
     </div>
   );
@@ -977,12 +1047,14 @@ function weekOptions(): { iso: string; label: string }[] {
 function ReportsPanel({
   tr,
   onClose,
+  unlockedPin = "",
 }: {
   tr: ReturnType<typeof t>;
   onClose: () => void;
+  unlockedPin?: string;
 }) {
-  const [pin, setPin] = useState("");
-  const [pinOk, setPinOk] = useState(false);
+  const [pin, setPin] = useState(unlockedPin);
+  const [pinOk, setPinOk] = useState(unlockedPin === "5314");
   const [pinError, setPinError] = useState(false);
 
   const weeks = useMemo(() => weekOptions(), []);
@@ -1390,6 +1462,530 @@ function ReportsPanel({
       </div>
     </div>
   );
+}
+
+// ---------- Schedule ----------
+
+interface SchedJob {
+  jobPageId: string;
+  name: string;
+  jobId: string;
+  crew: { worker: string; isLead: boolean }[];
+}
+
+function tomorrowISO(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+}
+
+function SchedulePanel({
+  tr,
+  pin,
+  onClose,
+}: {
+  tr: ReturnType<typeof t>;
+  pin: string;
+  onClose: () => void;
+}) {
+  const [date, setDate] = useState(tomorrowISO());
+  const [jobs, setJobs] = useState<SchedJob[]>([]);
+  const [roster, setRoster] = useState<string[]>([]);
+  const [availJobs, setAvailJobs] = useState<
+    { id: string; name: string; jobId: string }[]
+  >([]);
+  const [loading, setLoading] = useState(true);
+  const [showJobPicker, setShowJobPicker] = useState(false);
+  const [jobQuery, setJobQuery] = useState("");
+  const [workerFor, setWorkerFor] = useState<string | null>(null); // jobPageId
+  const [workerQuery, setWorkerQuery] = useState("");
+  const [showReview, setShowReview] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<"idle" | "saved" | "error">("idle");
+  const [resultMsg, setResultMsg] = useState("");
+  const newJobRef = useRef<HTMLDivElement>(null);
+
+  // Load roster + available jobs on open.
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/schedule-jobs").then((r) => r.json()).catch(() => ({})),
+    ]).then(([rosterData, jobsData]) => {
+      if (!alive) return;
+      if (Array.isArray(rosterData?.workers)) setRoster(rosterData.workers);
+      if (Array.isArray(jobsData?.jobs)) setAvailJobs(jobsData.jobs);
+      setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  function carryOver() {
+    fetch("/api/schedule?recent=1")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.jobs) && d.jobs.length > 0) {
+          setJobs(
+            d.jobs.map((j: any) => ({
+              jobPageId: j.jobPageId,
+              name: j.name,
+              jobId: j.jobId,
+              crew: j.crew || [],
+            }))
+          );
+        } else {
+          setResultMsg("No previous schedule found to carry over.");
+          setTimeout(() => setResultMsg(""), 3000);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function addJob(j: { id: string; name: string; jobId: string }) {
+    if (jobs.some((x) => x.jobPageId === j.id)) {
+      setShowJobPicker(false);
+      setJobQuery("");
+      return;
+    }
+    // New job lands on TOP.
+    setJobs((prev) => [
+      { jobPageId: j.id, name: j.name, jobId: j.jobId, crew: [] },
+      ...prev,
+    ]);
+    setShowJobPicker(false);
+    setJobQuery("");
+    requestAnimationFrame(() =>
+      newJobRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })
+    );
+  }
+
+  function removeJob(jobPageId: string) {
+    setJobs((prev) => prev.filter((j) => j.jobPageId !== jobPageId));
+  }
+
+  function addWorker(jobPageId: string, name: string) {
+    setJobs((prev) =>
+      prev.map((j) => {
+        if (j.jobPageId !== jobPageId) return j;
+        if (j.crew.some((c) => c.worker === name)) return j;
+        return { ...j, crew: [...j.crew, { worker: name, isLead: false }] };
+      })
+    );
+    setWorkerQuery("");
+  }
+
+  function removeWorker(jobPageId: string, name: string) {
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.jobPageId === jobPageId
+          ? { ...j, crew: j.crew.filter((c) => c.worker !== name) }
+          : j
+      )
+    );
+  }
+
+  function setLead(jobPageId: string, name: string) {
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.jobPageId === jobPageId
+          ? {
+              ...j,
+              crew: j.crew.map((c) => ({ ...c, isLead: c.worker === name })),
+            }
+          : j
+      )
+    );
+  }
+
+  // Which jobs (other than this one) a worker is already on, for the warning.
+  function otherJobs(name: string, exceptJobId: string): string[] {
+    return jobs
+      .filter((j) => j.jobPageId !== exceptJobId && j.crew.some((c) => c.worker === name))
+      .map((j) => j.name);
+  }
+
+  const totalCrew = jobs.reduce((s, j) => s + j.crew.length, 0);
+
+  async function save() {
+    setSaving(true);
+    setResult("idle");
+    const assignments: any[] = [];
+    for (const j of jobs) {
+      for (const c of j.crew) {
+        assignments.push({
+          worker: c.worker,
+          jobPageId: j.jobPageId,
+          jobName: j.name,
+          jobId: j.jobId,
+          isLead: c.isLead,
+        });
+      }
+    }
+    try {
+      const resp = await fetch("/api/schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin, date, assignments }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
+        setResult("saved");
+      } else {
+        setResult("error");
+        setResultMsg(data.error || "Save failed.");
+      }
+    } catch (e: any) {
+      setResult("error");
+      setResultMsg(e?.message || "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Review screen
+  if (showReview) {
+    const warnings: string[] = [];
+    for (const j of jobs) {
+      if (!j.crew.some((c) => c.isLead) && j.crew.length > 0)
+        warnings.push(`${j.name}: no foreman marked`);
+    }
+    const seen = new Map<string, number>();
+    for (const j of jobs)
+      for (const c of j.crew) seen.set(c.worker, (seen.get(c.worker) || 0) + 1);
+    for (const [w, n] of seen) if (n > 1) warnings.push(`${w} is on ${n} jobs today`);
+
+    return (
+      <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
+        <div className="max-w-2xl mx-auto p-5 pb-32">
+          <div className="flex items-center justify-between mb-4">
+            <button onClick={() => setShowReview(false)} className="text-rebar font-semibold">
+              ← Back to edit
+            </button>
+            <div className="text-rebar text-sm">{prettyScheduleDate(date)}</div>
+          </div>
+
+          {result === "saved" ? (
+            <div className="text-center py-16">
+              <div className="text-safety text-5xl mb-4">✓</div>
+              <div className="text-concrete text-xl font-bold mb-2">Schedule saved</div>
+              <div className="text-rebar mb-8">
+                Saved to Notion and emailed for {prettyScheduleDate(date)}.
+              </div>
+              <button
+                onClick={onClose}
+                className="bg-safety text-steel font-bold rounded-xl px-8 py-3"
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <>
+              <h2 className="text-concrete text-2xl font-bold mb-1">Review schedule</h2>
+              <div className="text-rebar mb-5">
+                {jobs.length} jobs · {totalCrew} crew
+              </div>
+
+              {warnings.length > 0 && (
+                <div className="bg-[#3a2a18] border border-safety/40 rounded-xl p-4 mb-5">
+                  <div className="text-safety font-semibold mb-2 text-sm">Heads up</div>
+                  {warnings.map((w, i) => (
+                    <div key={i} className="text-concrete/90 text-sm">• {w}</div>
+                  ))}
+                </div>
+              )}
+
+              <div className="space-y-4 mb-6">
+                {jobs.map((j) => {
+                  const lead = j.crew.find((c) => c.isLead);
+                  const others = j.crew.filter((c) => !c.isLead);
+                  return (
+                    <div key={j.jobPageId} className="bg-graphite rounded-2xl p-4 border border-line">
+                      <div className="text-concrete font-bold">
+                        {j.name} {j.jobId && <span className="text-rebar text-sm">({j.jobId})</span>}
+                      </div>
+                      <div className="border-b border-line my-2" />
+                      {lead && (
+                        <div className="text-blue-400 font-semibold text-sm">
+                          Foreman: {lead.worker.toUpperCase()}
+                        </div>
+                      )}
+                      {others.map((c) => (
+                        <div key={c.worker} className="text-concrete/90 text-sm ml-2">
+                          {c.worker.toUpperCase()}
+                        </div>
+                      ))}
+                      {j.crew.length === 0 && (
+                        <div className="text-rebar text-sm">(no crew)</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {result === "error" && (
+                <div className="text-red-400 text-sm mb-4">{resultMsg}</div>
+              )}
+
+              <button
+                onClick={save}
+                disabled={saving || totalCrew === 0}
+                className="w-full bg-safety text-steel font-bold rounded-xl py-4 text-lg disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save to Notion & Email"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Main builder screen
+  const filteredRoster = (jobPageId: string) => {
+    const onJob = new Set(
+      jobs.find((j) => j.jobPageId === jobPageId)?.crew.map((c) => c.worker) || []
+    );
+    const q = workerQuery.trim().toLowerCase();
+    return roster
+      .filter((n) => !onJob.has(n))
+      .filter((n) => !q || n.toLowerCase().includes(q));
+  };
+  const filteredJobs = () => {
+    const q = jobQuery.trim().toLowerCase();
+    const onBoard = new Set(jobs.map((j) => j.jobPageId));
+    return availJobs
+      .filter((j) => !onBoard.has(j.id))
+      .filter((j) => !q || j.name.toLowerCase().includes(q) || j.jobId.toLowerCase().includes(q));
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
+      <div className="max-w-5xl mx-auto p-4 pb-28">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-3">
+          <button onClick={onClose} className="text-rebar font-semibold">✕ Close</button>
+          <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
+          <div className="w-12" />
+        </div>
+
+        {/* Controls */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="bg-graphite border border-line rounded-xl px-3 h-11 text-concrete"
+          />
+          <button
+            onClick={carryOver}
+            className="bg-graphite border border-line rounded-xl px-3 h-11 text-concrete font-semibold text-sm"
+          >
+            ↺ Carry over last
+          </button>
+          {jobs.length > 0 && (
+            <button
+              onClick={() => setJobs([])}
+              className="ml-auto text-rebar border border-line rounded-xl px-3 h-11 text-sm"
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+
+        {resultMsg && !showReview && (
+          <div className="text-rebar text-sm mb-2">{resultMsg}</div>
+        )}
+
+        {/* Add job — on top */}
+        <button
+          onClick={() => setShowJobPicker(true)}
+          className="w-full border border-dashed border-line rounded-2xl py-4 text-safety font-bold mb-4 active:bg-graphite"
+        >
+          + Add job
+        </button>
+
+        {loading && <div className="text-rebar text-center py-8">Loading…</div>}
+
+        {/* Job cards */}
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {jobs.map((j, idx) => (
+            <div
+              key={j.jobPageId}
+              ref={idx === 0 ? newJobRef : undefined}
+              className="bg-graphite rounded-2xl p-4 border border-line self-start"
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="font-bold text-concrete">{j.name}</div>
+                  <div className="text-rebar text-xs">Job ID: {j.jobId || "—"}</div>
+                </div>
+                <button
+                  onClick={() => removeJob(j.jobPageId)}
+                  className="text-rebar text-lg px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="text-rebar text-xs mt-1 mb-2">{j.crew.length} crew</div>
+
+              <div className="space-y-1.5">
+                {j.crew.map((c) => (
+                  <div
+                    key={c.worker}
+                    onClick={() => setLead(j.jobPageId, c.worker)}
+                    className={`flex items-center gap-2 bg-steel rounded-xl px-3 py-2.5 border ${
+                      c.isLead ? "border-blue-500" : "border-transparent"
+                    }`}
+                  >
+                    <span className="flex-1 text-concrete text-sm">{c.worker}</span>
+                    {c.isLead && (
+                      <span className="bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
+                        Lead
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeWorker(j.jobPageId, c.worker);
+                      }}
+                      className="text-rebar"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Add worker for this job */}
+              {workerFor === j.jobPageId ? (
+                <div className="mt-2 bg-steel rounded-xl p-2 border border-line">
+                  <input
+                    autoFocus
+                    value={workerQuery}
+                    onChange={(e) => setWorkerQuery(e.target.value)}
+                    placeholder="Search worker…"
+                    className="w-full bg-graphite rounded-lg px-3 h-10 text-concrete text-sm mb-1"
+                  />
+                  <div className="max-h-44 overflow-y-auto">
+                    {filteredRoster(j.jobPageId).map((n) => {
+                      const elsewhere = otherJobs(n, j.jobPageId);
+                      return (
+                        <button
+                          key={n}
+                          onClick={() => addWorker(j.jobPageId, n)}
+                          className="w-full text-left px-3 py-2 rounded-lg active:bg-graphite text-concrete text-sm flex items-center justify-between"
+                        >
+                          <span>{n}</span>
+                          {elsewhere.length > 0 && (
+                            <span className="text-safety text-[10px]">
+                              on {elsewhere.join(", ")}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                    {filteredRoster(j.jobPageId).length === 0 && (
+                      <div className="text-rebar text-sm px-3 py-2">No matches</div>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {
+                      setWorkerFor(null);
+                      setWorkerQuery("");
+                    }}
+                    className="w-full text-rebar text-sm py-2 mt-1"
+                  >
+                    Done
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setWorkerFor(j.jobPageId);
+                    setWorkerQuery("");
+                  }}
+                  className="mt-2 w-full border border-dashed border-line rounded-xl py-2.5 text-rebar text-sm active:text-safety"
+                >
+                  + Add worker
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {!loading && jobs.length === 0 && (
+          <div className="text-rebar text-center py-10">
+            Tap “Add job” to start, or “Carry over last”.
+          </div>
+        )}
+      </div>
+
+      {/* Job picker modal */}
+      {showJobPicker && (
+        <div
+          className="fixed inset-0 z-[65] bg-black/50 flex items-end sm:items-center sm:justify-center"
+          onClick={() => setShowJobPicker(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-4 max-h-[75vh] overflow-y-auto border border-line"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-concrete font-bold mb-2">Add job</div>
+            <input
+              autoFocus
+              value={jobQuery}
+              onChange={(e) => setJobQuery(e.target.value)}
+              placeholder="Search active jobs…"
+              className="w-full bg-steel rounded-xl px-3 h-11 text-concrete mb-2"
+            />
+            <div className="space-y-1">
+              {filteredJobs().map((j) => (
+                <button
+                  key={j.id}
+                  onClick={() => addJob(j)}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{j.name}</span>
+                  <span className="text-rebar text-sm">{j.jobId}</span>
+                </button>
+              ))}
+              {filteredJobs().length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No active jobs match.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sticky review bar */}
+      {jobs.length > 0 && (
+        <div className="fixed bottom-0 left-0 right-0 bg-graphite/95 border-t border-line p-3 backdrop-blur z-[62]">
+          <div className="max-w-5xl mx-auto flex items-center gap-3">
+            <div className="text-rebar text-sm">
+              {jobs.length} jobs · {totalCrew} crew
+            </div>
+            <button
+              onClick={() => setShowReview(true)}
+              className="ml-auto bg-safety text-steel font-bold rounded-xl px-6 py-2.5"
+            >
+              Review schedule →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function prettyScheduleDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const mons = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${days[dt.getUTCDay()]}, ${mons[m - 1]} ${d}, ${y}`;
 }
 
 function HoursControl({

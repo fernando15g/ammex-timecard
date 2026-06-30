@@ -11,6 +11,31 @@ export const CREW_ROSTER_DB_ID = "35a9aeba5383806caf00f3635e89b12a";
 // Timecards database. One row per worker per job per day.
 export const TIMECARDS_DB_ID = "3879aeba5383807ca40af61a89f21a40";
 
+// Projects database — the source of jobs for the Schedule job picker.
+export const PROJECTS_DB_ID = "35a9aeba5383801990dac4cb0de148e8";
+
+// Schedule database — where built schedules are saved (one row per
+// worker-per-job-per-day). Separate from Timecards; never touches payroll.
+export const SCHEDULE_DB_ID = "38e9aeba5383807c8ff0e767ab894d17";
+
+// Property names in the Projects database.
+export const PROJECT_PROPS = {
+  name: "Actual Project Name", // Title — the job name
+  jobId: "Project ID", // rich_text — e.g. "25-20"
+  status: "Project Status", // status
+};
+
+// Project statuses that count as "schedulable" (show in the job picker).
+export const SCHEDULABLE_STATUSES = ["Awarded", "Mobilizing", "Active", "Punchlist"];
+
+// Property names in the Schedule database.
+export const SCHEDULE_PROPS = {
+  worker: "Worker", // Title
+  date: "Date", // Date
+  job: "Job", // Relation → Projects
+  isLead: "Is Lead", // Checkbox
+};
+
 // Property names in the Crew Roster database.
 export const ROSTER_PROPS = {
   name: "Name", // Title property

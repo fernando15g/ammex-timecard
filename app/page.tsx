@@ -1506,9 +1506,28 @@ function SchedulePanel({
   const [resultMsg, setResultMsg] = useState("");
   const [kbOpen, setKbOpen] = useState(false);
   const [restored, setRestored] = useState(false);
+  const [dragY, setDragY] = useState(0);
+  const dragStartRef = useRef<number | null>(null);
   const newJobRef = useRef<HTMLDivElement>(null);
   const jobSearchRef = useRef<HTMLInputElement>(null);
   const workerSearchRef = useRef<HTMLInputElement>(null);
+
+  // Swipe-down-to-close for the picker sheets (phone). Drag the grab handle
+  // down; release past a threshold to dismiss.
+  function onDragStart(e: React.TouchEvent) {
+    dragStartRef.current = e.touches[0].clientY;
+    setDragY(0);
+  }
+  function onDragMove(e: React.TouchEvent) {
+    if (dragStartRef.current == null) return;
+    const d = e.touches[0].clientY - dragStartRef.current;
+    if (d > 0) setDragY(d);
+  }
+  function onDragEnd(close: () => void) {
+    if (dragY > 90) close();
+    dragStartRef.current = null;
+    setDragY(0);
+  }
 
   // Remember the working state between sessions: restore the last date + jobs
   // on open, and re-save whenever they change. So closing the app and coming
@@ -1727,7 +1746,11 @@ function SchedulePanel({
                 Saved to Notion and emailed for {prettyScheduleDate(date)}.
               </div>
               <button
-                onClick={onClose}
+                onClick={() => {
+                  // Return to the Schedule builder (not out to the timesheet).
+                  setResult("idle");
+                  setShowReview(false);
+                }}
                 className="bg-safety text-steel font-bold rounded-xl px-8 py-3"
               >
                 Done
@@ -1882,7 +1905,7 @@ function SchedulePanel({
             <div
               key={j.jobPageId}
               ref={idx === jobs.length - 1 ? newJobRef : undefined}
-              className="bg-graphite rounded-2xl p-4 border border-line self-start md:flex-shrink-0 md:w-[330px]"
+              className="bg-graphite rounded-2xl p-4 border border-line w-full md:w-[330px] md:flex-shrink-0 md:self-start"
             >
               <div className="flex items-start justify-between">
                 <div>
@@ -1956,7 +1979,17 @@ function SchedulePanel({
           <div
             className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
+            style={{ transform: dragY ? `translateY(${dragY}px)` : undefined }}
           >
+            {/* Grab handle — swipe down to close (phone) */}
+            <div
+              className="sm:hidden pt-2 pb-1 flex justify-center touch-none"
+              onTouchStart={onDragStart}
+              onTouchMove={onDragMove}
+              onTouchEnd={() => onDragEnd(() => { setShowJobPicker(false); setJobQuery(""); })}
+            >
+              <div className="w-10 h-1.5 rounded-full bg-line" />
+            </div>
             {/* Sticky header: title + close, then the search box stays on top */}
             <div className="p-4 pb-2 border-b border-line">
               <div className="flex items-center justify-between mb-2">
@@ -2012,7 +2045,17 @@ function SchedulePanel({
           <div
             className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
+            style={{ transform: dragY ? `translateY(${dragY}px)` : undefined }}
           >
+            {/* Grab handle — swipe down to close (phone) */}
+            <div
+              className="sm:hidden pt-2 pb-1 flex justify-center touch-none"
+              onTouchStart={onDragStart}
+              onTouchMove={onDragMove}
+              onTouchEnd={() => onDragEnd(() => { setWorkerFor(null); setWorkerQuery(""); })}
+            >
+              <div className="w-10 h-1.5 rounded-full bg-line" />
+            </div>
             <div className="p-4 pb-2 border-b border-line">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-concrete font-bold truncate pr-2">

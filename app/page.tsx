@@ -1504,7 +1504,20 @@ function SchedulePanel({
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<"idle" | "saved" | "error">("idle");
   const [resultMsg, setResultMsg] = useState("");
+  const [kbOpen, setKbOpen] = useState(false);
   const newJobRef = useRef<HTMLDivElement>(null);
+
+  // Hide the sticky review bar while the on-screen keyboard is up (it otherwise
+  // overlaps the search). Detected via the visual viewport shrinking.
+  useEffect(() => {
+    const vv = (typeof window !== "undefined" && window.visualViewport) || null;
+    if (!vv) return;
+    const onResize = () => {
+      setKbOpen(window.innerHeight - vv.height > 150);
+    };
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, []);
 
   // Load roster + available jobs on open.
   useEffect(() => {
@@ -1550,15 +1563,20 @@ function SchedulePanel({
       setJobQuery("");
       return;
     }
-    // New job lands on TOP.
+    // New job lands at the END of the sequence (right on iPad, bottom on phone),
+    // matching the left-to-right flow of the paper schedule.
     setJobs((prev) => [
-      { jobPageId: j.id, name: j.name, jobId: j.jobId, crew: [] },
       ...prev,
+      { jobPageId: j.id, name: j.name, jobId: j.jobId, crew: [] },
     ]);
     setShowJobPicker(false);
     setJobQuery("");
     requestAnimationFrame(() =>
-      newJobRef.current?.scrollIntoView({ block: "start", behavior: "smooth" })
+      newJobRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "end",
+        behavior: "smooth",
+      })
     );
   }
 
@@ -1763,12 +1781,12 @@ function SchedulePanel({
 
   return (
     <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
-      <div className="max-w-5xl mx-auto p-4 pb-28">
-        {/* Header */}
+      <div className="max-w-7xl mx-auto p-4 pb-28">
+        {/* Header — Close on the right to match the rest of the app */}
         <div className="flex items-center justify-between mb-3">
-          <button onClick={onClose} className="text-rebar font-semibold">✕ Close</button>
-          <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
           <div className="w-12" />
+          <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
+          <button onClick={onClose} className="text-rebar font-semibold">Close ✕</button>
         </div>
 
         {/* Controls */}
@@ -1809,13 +1827,14 @@ function SchedulePanel({
 
         {loading && <div className="text-rebar text-center py-8">Loading…</div>}
 
-        {/* Job cards */}
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {/* Job cards — vertical stack on phone, horizontal scrolling row on
+            iPad/desktop (jobs side by side in the order added, scroll across). */}
+        <div className="flex flex-col md:flex-row md:overflow-x-auto gap-4 md:pb-3 md:-mx-1 md:px-1">
           {jobs.map((j, idx) => (
             <div
               key={j.jobPageId}
-              ref={idx === 0 ? newJobRef : undefined}
-              className="bg-graphite rounded-2xl p-4 border border-line self-start"
+              ref={idx === jobs.length - 1 ? newJobRef : undefined}
+              className="bg-graphite rounded-2xl p-4 border border-line self-start md:flex-shrink-0 md:w-[330px]"
             >
               <div className="flex items-start justify-between">
                 <div>
@@ -1859,59 +1878,16 @@ function SchedulePanel({
                 ))}
               </div>
 
-              {/* Add worker for this job */}
-              {workerFor === j.jobPageId ? (
-                <div className="mt-2 bg-steel rounded-xl p-2 border border-line">
-                  <input
-                    autoFocus
-                    value={workerQuery}
-                    onChange={(e) => setWorkerQuery(e.target.value)}
-                    placeholder="Search worker…"
-                    className="w-full bg-graphite rounded-lg px-3 h-10 text-concrete text-sm mb-1"
-                  />
-                  <div className="max-h-44 overflow-y-auto">
-                    {filteredRoster(j.jobPageId).map((n) => {
-                      const elsewhere = otherJobs(n, j.jobPageId);
-                      return (
-                        <button
-                          key={n}
-                          onClick={() => addWorker(j.jobPageId, n)}
-                          className="w-full text-left px-3 py-2 rounded-lg active:bg-graphite text-concrete text-sm flex items-center justify-between"
-                        >
-                          <span>{n}</span>
-                          {elsewhere.length > 0 && (
-                            <span className="text-safety text-[10px]">
-                              on {elsewhere.join(", ")}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                    {filteredRoster(j.jobPageId).length === 0 && (
-                      <div className="text-rebar text-sm px-3 py-2">No matches</div>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => {
-                      setWorkerFor(null);
-                      setWorkerQuery("");
-                    }}
-                    className="w-full text-rebar text-sm py-2 mt-1"
-                  >
-                    Done
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={() => {
-                    setWorkerFor(j.jobPageId);
-                    setWorkerQuery("");
-                  }}
-                  className="mt-2 w-full border border-dashed border-line rounded-xl py-2.5 text-rebar text-sm active:text-safety"
-                >
-                  + Add worker
-                </button>
-              )}
+              {/* Add worker — opens a modal picker (search on top, list below) */}
+              <button
+                onClick={() => {
+                  setWorkerFor(j.jobPageId);
+                  setWorkerQuery("");
+                }}
+                className="mt-2 w-full border border-dashed border-line rounded-xl py-2.5 text-rebar text-sm active:text-safety"
+              >
+                + Add worker
+              </button>
             </div>
           ))}
         </div>
@@ -1930,18 +1906,33 @@ function SchedulePanel({
           onClick={() => setShowJobPicker(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl p-4 max-h-[75vh] overflow-y-auto border border-line"
+            className="bg-graphite w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl flex flex-col max-h-[75vh] border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="text-concrete font-bold mb-2">Add job</div>
-            <input
-              autoFocus
-              value={jobQuery}
-              onChange={(e) => setJobQuery(e.target.value)}
-              placeholder="Search active jobs…"
-              className="w-full bg-steel rounded-xl px-3 h-11 text-concrete mb-2"
-            />
-            <div className="space-y-1">
+            {/* Sticky header: title + close, then the search box stays on top */}
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Add job</div>
+                <button
+                  onClick={() => {
+                    setShowJobPicker(false);
+                    setJobQuery("");
+                  }}
+                  aria-label="Close"
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                value={jobQuery}
+                onChange={(e) => setJobQuery(e.target.value)}
+                placeholder="Search active jobs…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            {/* Scrollable list below the fixed search box */}
+            <div className="space-y-1 p-3 overflow-y-auto">
               {filteredJobs().map((j) => (
                 <button
                   key={j.id}
@@ -1960,16 +1951,82 @@ function SchedulePanel({
         </div>
       )}
 
-      {/* Sticky review bar */}
-      {jobs.length > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 bg-graphite/95 border-t border-line p-3 backdrop-blur z-[62]">
-          <div className="max-w-5xl mx-auto flex items-center gap-3">
-            <div className="text-rebar text-sm">
+      {/* Worker picker modal — search on top, list below, multi-add */}
+      {workerFor !== null && (
+        <div
+          className="fixed inset-0 z-[65] bg-black/50 flex items-end sm:items-center sm:justify-center"
+          onClick={() => {
+            setWorkerFor(null);
+            setWorkerQuery("");
+          }}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl flex flex-col max-h-[75vh] border border-line overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold truncate pr-2">
+                  Add worker{" "}
+                  <span className="text-rebar font-normal">
+                    · {jobs.find((j) => j.jobPageId === workerFor)?.name || ""}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    setWorkerFor(null);
+                    setWorkerQuery("");
+                  }}
+                  aria-label="Close"
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                value={workerQuery}
+                onChange={(e) => setWorkerQuery(e.target.value)}
+                placeholder="Search worker…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto">
+              {filteredRoster(workerFor).map((n) => {
+                const elsewhere = otherJobs(n, workerFor);
+                return (
+                  <button
+                    key={n}
+                    onClick={() => addWorker(workerFor, n)}
+                    className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                  >
+                    <span>{n}</span>
+                    {elsewhere.length > 0 && (
+                      <span className="text-safety text-[11px]">
+                        on {elsewhere.join(", ")}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {filteredRoster(workerFor).length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {jobs.length > 0 && !kbOpen && (
+        <div
+          className="fixed bottom-0 left-0 right-0 bg-graphite/95 border-t border-line backdrop-blur z-[62]"
+          style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+        >
+          <div className="max-w-7xl mx-auto flex items-center gap-3 px-4 pt-3">
+            <div className="text-rebar text-sm whitespace-nowrap">
               {jobs.length} jobs · {totalCrew} crew
             </div>
             <button
               onClick={() => setShowReview(true)}
-              className="ml-auto bg-safety text-steel font-bold rounded-xl px-6 py-2.5"
+              className="ml-auto bg-safety text-steel font-bold rounded-xl px-6 py-2.5 whitespace-nowrap"
             >
               Review schedule →
             </button>

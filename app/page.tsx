@@ -1505,7 +1505,32 @@ function SchedulePanel({
   const [result, setResult] = useState<"idle" | "saved" | "error">("idle");
   const [resultMsg, setResultMsg] = useState("");
   const [kbOpen, setKbOpen] = useState(false);
+  const [restored, setRestored] = useState(false);
   const newJobRef = useRef<HTMLDivElement>(null);
+  const jobSearchRef = useRef<HTMLInputElement>(null);
+  const workerSearchRef = useRef<HTMLInputElement>(null);
+
+  // Remember the working state between sessions: restore the last date + jobs
+  // on open, and re-save whenever they change. So closing the app and coming
+  // back leaves the screen exactly as you left it.
+  const DRAFT_KEY = "ammex_schedule_state_v1";
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved?.date) setDate(saved.date);
+        if (Array.isArray(saved?.jobs)) setJobs(saved.jobs);
+      }
+    } catch {}
+    setRestored(true);
+  }, []);
+  useEffect(() => {
+    if (!restored) return; // don't overwrite before we've restored
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ date, jobs }));
+    } catch {}
+  }, [date, jobs, restored]);
 
   // Hide the sticky review bar while the on-screen keyboard is up (it otherwise
   // overlaps the search). Detected via the visual viewport shrinking.
@@ -1519,21 +1544,24 @@ function SchedulePanel({
     return () => vv.removeEventListener("resize", onResize);
   }, []);
 
-  // Load roster + available jobs on open.
-  useEffect(() => {
-    let alive = true;
-    Promise.all([
+  // Load roster + available jobs (re-runnable via the Refresh button so newly
+  // added Notion jobs/workers show up without reopening).
+  const [refreshing, setRefreshing] = useState(false);
+  function loadData(isRefresh = false) {
+    if (isRefresh) setRefreshing(true);
+    return Promise.all([
       fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
       fetch("/api/schedule-jobs").then((r) => r.json()).catch(() => ({})),
     ]).then(([rosterData, jobsData]) => {
-      if (!alive) return;
       if (Array.isArray(rosterData?.workers)) setRoster(rosterData.workers);
       if (Array.isArray(jobsData?.jobs)) setAvailJobs(jobsData.jobs);
       setLoading(false);
+      setRefreshing(false);
     });
-    return () => {
-      alive = false;
-    };
+  }
+  useEffect(() => {
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function carryOver() {
@@ -1546,7 +1574,10 @@ function SchedulePanel({
               jobPageId: j.jobPageId,
               name: j.name,
               jobId: j.jobId,
-              crew: j.crew || [],
+              // Lead first, then the rest — so the foreman shows on top.
+              crew: [...(j.crew || [])].sort(
+                (a: any, b: any) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0)
+              ),
             }))
           );
         } else {
@@ -1569,8 +1600,10 @@ function SchedulePanel({
       { jobPageId: j.id, name: j.name, jobId: j.jobId, crew: [] },
     ]);
     // Stay open for adding several jobs in a row; the picked job drops off the
-    // list. Clear the search so the next one is easy to find.
+    // list. Clear the search and keep the cursor in the box so you can keep
+    // typing the next one without re-clicking.
     setJobQuery("");
+    jobSearchRef.current?.focus();
     requestAnimationFrame(() =>
       newJobRef.current?.scrollIntoView({
         block: "nearest",
@@ -1592,7 +1625,9 @@ function SchedulePanel({
         return { ...j, crew: [...j.crew, { worker: name, isLead: false }] };
       })
     );
+    // Clear search and keep the cursor in the box for rapid multi-add.
     setWorkerQuery("");
+    workerSearchRef.current?.focus();
   }
 
   function removeWorker(jobPageId: string, name: string) {
@@ -1607,14 +1642,13 @@ function SchedulePanel({
 
   function setLead(jobPageId: string, name: string) {
     setJobs((prev) =>
-      prev.map((j) =>
-        j.jobPageId === jobPageId
-          ? {
-              ...j,
-              crew: j.crew.map((c) => ({ ...c, isLead: c.worker === name })),
-            }
-          : j
-      )
+      prev.map((j) => {
+        if (j.jobPageId !== jobPageId) return j;
+        const crew = j.crew.map((c) => ({ ...c, isLead: c.worker === name }));
+        // Keep the lead on top.
+        crew.sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
+        return { ...j, crew };
+      })
     );
   }
 
@@ -1784,7 +1818,21 @@ function SchedulePanel({
       <div className="max-w-7xl mx-auto p-4 pb-28">
         {/* Header — Close on the right to match the rest of the app */}
         <div className="flex items-center justify-between mb-3">
-          <div className="w-12" />
+          <button
+            onClick={() => loadData(true)}
+            disabled={refreshing}
+            className="text-rebar font-semibold text-sm flex items-center gap-1.5 active:text-safety disabled:opacity-50"
+          >
+            <svg
+              width="15" height="15" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+              className={refreshing ? "animate-spin" : ""}
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
           <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
           <button onClick={onClose} className="text-rebar font-semibold">Close ✕</button>
         </div>
@@ -1925,6 +1973,7 @@ function SchedulePanel({
                 </button>
               </div>
               <input
+                ref={jobSearchRef}
                 value={jobQuery}
                 onChange={(e) => setJobQuery(e.target.value)}
                 placeholder="Search active jobs…"
@@ -1984,6 +2033,7 @@ function SchedulePanel({
                 </button>
               </div>
               <input
+                ref={workerSearchRef}
                 value={workerQuery}
                 onChange={(e) => setWorkerQuery(e.target.value)}
                 placeholder="Search worker…"

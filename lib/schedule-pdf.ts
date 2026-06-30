@@ -16,7 +16,6 @@ export interface ScheduleData {
 }
 
 const steel = rgb(0.11, 0.13, 0.15);
-const safety = rgb(1, 0.42, 0.07);
 const blue = rgb(0.12, 0.45, 0.85);
 const gray = rgb(0.45, 0.48, 0.52);
 const line = rgb(0.78, 0.8, 0.82);
@@ -31,15 +30,7 @@ function longDate(iso: string): string {
   return `${DAYS[dow]}, ${MONTHS[m - 1]} ${d}, ${y}`;
 }
 
-function clip(s: string, font: PDFFont, size: number, maxW: number): string {
-  if (font.widthOfTextAtSize(s, size) <= maxW) return s;
-  let t = s;
-  while (t.length > 1 && font.widthOfTextAtSize(t + "…", size) > maxW) t = t.slice(0, -1);
-  return t + "…";
-}
-
-// Wrap a long name onto up to 2 lines within a column width.
-function wrap(s: string, font: PDFFont, size: number, maxW: number): string[] {
+function wrap(s: string, font: PDFFont, size: number, maxW: number, maxLines = 2): string[] {
   if (font.widthOfTextAtSize(s, size) <= maxW) return [s];
   const words = s.split(" ");
   const lines: string[] = [];
@@ -47,115 +38,112 @@ function wrap(s: string, font: PDFFont, size: number, maxW: number): string[] {
   for (const w of words) {
     const test = cur ? cur + " " + w : w;
     if (font.widthOfTextAtSize(test, size) <= maxW) cur = test;
-    else {
-      if (cur) lines.push(cur);
-      cur = w;
-    }
+    else { if (cur) lines.push(cur); cur = w; }
   }
   if (cur) lines.push(cur);
-  // cap at 2 lines, clip the second
-  if (lines.length > 2) {
-    lines.length = 2;
-    lines[1] = clip(lines[1], font, size, maxW);
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+    let t = lines[maxLines - 1];
+    while (t.length > 1 && font.widthOfTextAtSize(t + "…", size) > maxW) t = t.slice(0, -1);
+    lines[maxLines - 1] = t + "…";
   }
   return lines;
 }
 
-// Column-per-job layout, mirroring the handwritten schedule. Landscape; jobs
-// laid out left-to-right in order. Columns that don't fit across wrap to a new
-// page; a very tall crew column continues on the next page in the same slot.
+// Portrait, up to 4 job columns per row, rows wrap below. A row that would
+// bleed past the page bottom moves whole to the next page (never split a
+// column). Lead foreman is listed first in blue (no separate label).
 export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // Landscape Letter.
-  const PW = 792;
-  const PH = 612;
-
-  const nJobs = Math.max(data.jobs.length, 1);
-  // Fit as many columns across as we can; aim for all jobs on one row when
-  // there are 8 or fewer. Column width adapts to the count.
-  const maxAcross = Math.min(nJobs, 8);
-  const gap = 10;
+  const PW = 612;
+  const PH = 792;
+  const COLS = 4;
+  const gap = 12;
   const usableW = PW - MARGIN * 2;
-  const colW = Math.floor((usableW - gap * (maxAcross - 1)) / maxAcross);
+  const colW = (usableW - gap * (COLS - 1)) / COLS;
+  const headH = 40;
+  const rowGap = 18;
+  const lineH = 13;
 
-  const headerH = 52; // top title block on page 1
-  const colTop = PH - MARGIN - headerH;
-  const rowH = 14;
+  // Order each job's crew: lead first, then the rest alphabetical.
+  const jobs = data.jobs.map((j) => {
+    const lead = j.crew.find((c) => c.isLead);
+    const others = j.crew
+      .filter((c) => !c.isLead)
+      .sort((a, b) => a.worker.localeCompare(b.worker, undefined, { sensitivity: "base" }));
+    return { ...j, ordered: lead ? [lead, ...others] : others };
+  });
+
+  // Group into rows of up to COLS.
+  const rows: typeof jobs[] = [];
+  for (let i = 0; i < jobs.length; i += COLS) rows.push(jobs.slice(i, i + COLS));
 
   let page = pdf.addPage([PW, PH]);
   // Title block
   page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y: PH - MARGIN - 4, size: 15, font: bold, color: steel });
-  const dl = longDate(data.date).toUpperCase();
-  page.drawText(dl, { x: MARGIN, y: PH - MARGIN - 24, size: 12, font: bold, color: steel });
+  page.drawText(longDate(data.date).toUpperCase(), { x: MARGIN, y: PH - MARGIN - 24, size: 12, font: bold, color: steel });
   const totalCrew = data.jobs.reduce((s, j) => s + j.crew.length, 0);
   page.drawText(`${data.jobs.length} jobs · ${totalCrew} crew`, { x: MARGIN, y: PH - MARGIN - 40, size: 10, font, color: gray });
+  let y = PH - MARGIN - 56;
 
-  // Draw one job column at slot (col index) on the current page.
-  function drawJobColumn(pg: PDFPage, slot: number, job: ScheduleJob, topY: number) {
-    const x = MARGIN + slot * (colW + gap);
-    let y = topY;
-    // Job header — fixed height (2 lines reserved) so all columns align.
+  function drawColumn(pg: PDFPage, x: number, topY: number, job: typeof jobs[number]) {
+    let yy = topY;
     const nameLines = wrap(job.name, bold, 9.5, colW - 8);
-    const headH = 40;
-    pg.drawRectangle({ x, y: y - headH, width: colW, height: headH, color: headBg });
-    let hy = y - 12;
+    pg.drawRectangle({ x, y: yy - headH, width: colW, height: headH, color: headBg });
+    let hy = yy - 12;
     for (const nl of nameLines) {
       pg.drawText(nl, { x: x + 4, y: hy, size: 9.5, font: bold, color: steel });
       hy -= 11;
     }
-    if (job.jobId) pg.drawText(`#${job.jobId}`, { x: x + 4, y: y - headH + 6, size: 8, font, color: gray });
-    y -= headH;
-    pg.drawLine({ start: { x, y }, end: { x: x + colW, y }, thickness: 0.6, color: line });
-    y -= 14;
-
-    // Lead first, then crew alphabetical.
-    const lead = job.crew.find((c) => c.isLead);
-    const others = job.crew.filter((c) => !c.isLead).sort((a, b) =>
-      a.worker.localeCompare(b.worker, undefined, { sensitivity: "base" })
-    );
-    const ordered = lead ? [lead, ...others] : others;
-
-    for (const c of ordered) {
-      const isLead = c.isLead;
+    if (job.jobId) pg.drawText(`#${job.jobId}`, { x: x + 4, y: yy - headH + 6, size: 8, font, color: gray });
+    yy -= headH;
+    pg.drawLine({ start: { x, y: yy }, end: { x: x + colW, y: yy }, thickness: 0.6, color: line });
+    yy -= 14;
+    for (const c of job.ordered) {
       const nm = c.worker.toUpperCase();
-      const lines = wrap(nm, isLead ? bold : font, 8.5, colW - 8);
+      const lines = wrap(nm, c.isLead ? bold : font, 8.5, colW - 8);
       for (let li = 0; li < lines.length; li++) {
         pg.drawText(lines[li], {
           x: x + (li === 0 ? 4 : 10),
-          y,
+          y: yy,
           size: 8.5,
-          font: isLead ? bold : font,
-          color: isLead ? blue : steel,
+          font: c.isLead ? bold : font,
+          color: c.isLead ? blue : steel,
         });
-        y -= rowH;
-      }
-      if (isLead) {
-        // "Foreman" marker on its own line so it never overflows the column.
-        pg.drawText("FOREMAN", { x: x + 10, y: y + 2, size: 6.5, font: bold, color: blue });
-        y -= 11;
+        yy -= lineH;
       }
     }
-    return y;
   }
 
-  // Lay out jobs across slots; wrap to a new page row when slots fill.
-  let slot = 0;
-  let pageTop = colTop; // page 1 columns start below the full title block
-  for (const job of data.jobs) {
-    if (slot >= maxAcross) {
-      // new page for the next group of columns
+  for (const row of rows) {
+    // Row height = header + tallest column's crew lines.
+    let maxLines = 0;
+    for (const job of row) {
+      let lines = 0;
+      for (const c of job.ordered) {
+        lines += wrap(c.worker.toUpperCase(), c.isLead ? bold : font, 8.5, colW - 8).length;
+      }
+      maxLines = Math.max(maxLines, lines);
+    }
+    const rowH = headH + 14 + maxLines * lineH + rowGap;
+
+    // If the row won't fit, move the whole row to a new page.
+    if (y - rowH < MARGIN && y < PH - MARGIN - 60) {
       page = pdf.addPage([PW, PH]);
       page.drawText(`${longDate(data.date).toUpperCase()} (cont.)`, {
         x: MARGIN, y: PH - MARGIN - 4, size: 11, font: bold, color: steel,
       });
-      pageTop = PH - MARGIN - 24;
-      slot = 0;
+      y = PH - MARGIN - 24;
     }
-    drawJobColumn(page, slot, job, pageTop);
-    slot++;
+
+    row.forEach((job, ci) => {
+      const x = MARGIN + ci * (colW + gap);
+      drawColumn(page, x, y, job);
+    });
+    y -= rowH;
   }
 
   return pdf.save();

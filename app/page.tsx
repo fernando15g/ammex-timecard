@@ -1559,7 +1559,6 @@ function SchedulePanel({
 
   function addJob(j: { id: string; name: string; jobId: string }) {
     if (jobs.some((x) => x.jobPageId === j.id)) {
-      setShowJobPicker(false);
       setJobQuery("");
       return;
     }
@@ -1569,7 +1568,8 @@ function SchedulePanel({
       ...prev,
       { jobPageId: j.id, name: j.name, jobId: j.jobId, crew: [] },
     ]);
-    setShowJobPicker(false);
+    // Stay open for adding several jobs in a row; the picked job drops off the
+    // list. Clear the search so the next one is easy to find.
     setJobQuery("");
     requestAnimationFrame(() =>
       newJobRef.current?.scrollIntoView({
@@ -1902,11 +1902,11 @@ function SchedulePanel({
       {/* Job picker modal */}
       {showJobPicker && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-end sm:items-center sm:justify-center"
+          className="fixed inset-0 z-[65] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
           onClick={() => setShowJobPicker(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl flex flex-col max-h-[75vh] border border-line overflow-hidden"
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Sticky header: title + close, then the search box stays on top */}
@@ -1954,14 +1954,14 @@ function SchedulePanel({
       {/* Worker picker modal — search on top, list below, multi-add */}
       {workerFor !== null && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-end sm:items-center sm:justify-center"
+          className="fixed inset-0 z-[65] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
           onClick={() => {
             setWorkerFor(null);
             setWorkerQuery("");
           }}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md rounded-t-2xl sm:rounded-2xl flex flex-col max-h-[75vh] border border-line overflow-hidden"
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">

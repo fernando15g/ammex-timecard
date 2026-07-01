@@ -23,6 +23,19 @@ function todayISO(): string {
   return local.toISOString().slice(0, 10);
 }
 
+// Friendly, bilingual date like "Tuesday, Jun 30" / "Martes, 30 jun".
+function friendlyDate(iso: string, lang: "en" | "es"): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const daysEn = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const daysEs = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+  const monEn = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const monEs = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+  return lang === "es"
+    ? `${daysEs[dow]}, ${d} ${monEs[m - 1]}`
+    : `${daysEn[dow]}, ${monEn[m - 1]} ${d}`;
+}
+
 export default function Page() {
   const [lang, setLang] = useState<Lang>("es");
   const tr = t(lang);
@@ -31,6 +44,11 @@ export default function Page() {
   const [showForemanPicker, setShowForemanPicker] = useState(false);
 
   const [date, setDate] = useState<string>(todayISO());
+  // The date came from a leftover draft on a previous day and hasn't been
+  // confirmed by the worker. If so, we ask "which day?" at Review time.
+  const staleUnconfirmed = useRef(false);
+  const [showDatePrompt, setShowDatePrompt] = useState(false);
+  const otherDateRef = useRef<HTMLInputElement>(null);
   const [job, setJob] = useState("");
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [workDone, setWorkDone] = useState("");
@@ -84,17 +102,30 @@ export default function Page() {
       if (draftRaw) {
         const d = JSON.parse(draftRaw);
         if (d.foremanRemoved) foremanRemoved.current = true;
-        if (d.date) {
-          setDate(d.date);
-          // A saved draft may hold a deliberately chosen date; if it's not
-          // today, treat it as manual so focus re-check won't overwrite it.
-          if (d.date !== todayISO()) dateManual.current = true;
-        }
-        if (typeof d.job === "string") setJob(d.job);
         let restored: Worker[] = Array.isArray(d.workers) ? d.workers : [];
         if (savedForeman && !foremanRemoved.current) {
           restored = ensureForeman(savedForeman, restored);
         }
+        const draftHasHours = restored.some((w) => w.hours != null && w.hours > 0);
+
+        if (d.date) {
+          if (d.date < todayISO()) {
+            // Leftover draft from a previous day.
+            if (draftHasHours) {
+              // Real work on it — keep the old date but leave it UNCONFIRMED,
+              // so Review asks "which day?" before submitting.
+              setDate(d.date);
+              staleUnconfirmed.current = true;
+            } else {
+              // Empty/abandoned — silently freshen to today, no interruption.
+              setDate(todayISO());
+            }
+          } else {
+            setDate(d.date);
+            if (d.date !== todayISO()) dateManual.current = true;
+          }
+        }
+        if (typeof d.job === "string") setJob(d.job);
         setWorkers(restored);
         if (typeof d.workDone === "string") setWorkDone(d.workDone);
         if (typeof d.notes === "string") setNotes(d.notes);
@@ -332,6 +363,13 @@ export default function Page() {
       setValidationMsg(msg);
       return;
     }
+    // If the date came from a leftover previous-day draft and hasn't been
+    // confirmed, ask "which day?" before showing the review screen.
+    if (staleUnconfirmed.current && date !== todayISO()) {
+      setValidationMsg("");
+      setShowDatePrompt(true);
+      return;
+    }
     setValidationMsg("");
     setScreen("review");
   }
@@ -482,10 +520,10 @@ export default function Page() {
 
           {/* Date heads-up: only when the card isn't dated today. */}
           {date !== todayISO() && (
-            <div className="mb-3 rounded-2xl bg-safety/15 border border-safety/40 px-4 py-3 flex items-start gap-2">
-              <span className="text-safety text-base leading-none mt-0.5">⚠</span>
-              <span className="text-sm text-concrete">
-                {tr.dateNotToday.replace("{date}", prettyDate(date, lang))}
+            <div className="mb-3 rounded-2xl bg-safety/25 border-2 border-safety px-4 py-3 flex items-start gap-2">
+              <span className="text-safety text-xl leading-none mt-0.5">⚠</span>
+              <span className="text-base font-bold text-concrete">
+                {tr.dateNotToday.replace("{date}", friendlyDate(date, lang))}
               </span>
             </div>
           )}
@@ -575,8 +613,70 @@ export default function Page() {
   }
 
   // ---- Main form ----
+  // Proceed to the review screen once the date is settled.
+  function proceedToReview() {
+    staleUnconfirmed.current = false;
+    setShowDatePrompt(false);
+    setValidationMsg("");
+    setScreen("review");
+  }
+
   return (
     <div className="min-h-screen flex flex-col">
+      {/* Date check at Review — only when the date came from a leftover draft on
+          a previous day and the worker hasn't confirmed it. Date-only buttons. */}
+      {showDatePrompt && (
+        <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-6">
+          <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5 relative">
+            <button
+              onClick={() => setShowDatePrompt(false)}
+              aria-label="Close"
+              className="absolute top-3 right-3 w-8 h-8 rounded-full bg-steel border border-line text-rebar flex items-center justify-center active:text-safety"
+            >
+              ✕
+            </button>
+            <div className="text-concrete text-xl font-bold text-center mt-1 mb-5">
+              {tr.staleTitle}
+            </div>
+            {/* Leftover draft date */}
+            <button
+              onClick={() => proceedToReview()}
+              className="w-full bg-steel border border-line rounded-xl py-4 mb-3 text-concrete text-lg font-bold active:bg-black/30"
+            >
+              {friendlyDate(date, lang)}
+            </button>
+            {/* Today */}
+            <button
+              onClick={() => {
+                setDate(todayISO());
+                proceedToReview();
+              }}
+              className="w-full bg-safety text-steel rounded-xl py-4 mb-3 text-lg font-bold active:opacity-90"
+            >
+              {friendlyDate(todayISO(), lang)}
+            </button>
+            {/* Other date — opens the calendar */}
+            <button
+              onClick={() => otherDateRef.current?.showPicker?.()}
+              className="w-full text-rebar text-base font-semibold py-2 active:text-safety"
+            >
+              {tr.staleOtherDate} →
+            </button>
+            <input
+              ref={otherDateRef}
+              type="date"
+              max={todayISO()}
+              className="sr-only"
+              onChange={(e) => {
+                if (e.target.value) {
+                  setDate(e.target.value);
+                  proceedToReview();
+                }
+              }}
+            />
+          </div>
+        </div>
+      )}
       <TopBar
         tr={tr}
         lang={lang}
@@ -613,6 +713,7 @@ export default function Page() {
               max={todayISO()}
               onChange={(e) => {
                 dateManual.current = true;
+                staleUnconfirmed.current = false; // worker chose a date
                 setDate(e.target.value);
               }}
               className="w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete appearance-none"

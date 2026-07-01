@@ -19,9 +19,16 @@ export function buildReportXlsx(rd: ReportData): Buffer {
   }
   aoa.push([]);
 
-  const flaggedNames = new Set(
-    rd.flags.map((f) => f.worker.trim().toLowerCase())
-  );
+  const flaggedJobKeys = new Set<string>();
+  const flaggedNameOnly = new Set<string>();
+  for (const f of rd.flags) {
+    const w = f.worker.trim().toLowerCase();
+    if (f.jobs && f.jobs.length) {
+      for (const j of f.jobs) flaggedJobKeys.add(`${w}|${j.trim().toLowerCase()}`);
+    } else {
+      flaggedNameOnly.add(w);
+    }
+  }
 
   for (const sec of rd.sections) {
     const label = sec.unassigned
@@ -32,7 +39,10 @@ export function buildReportXlsx(rd: ReportData): Buffer {
     aoa.push([label]);
     aoa.push(header);
     for (const p of sec.people) {
-      const flagged = flaggedNames.has(p.name.trim().toLowerCase());
+      const wkey = p.name.trim().toLowerCase();
+      const flagged =
+        flaggedNameOnly.has(wkey) ||
+        flaggedJobKeys.has(`${wkey}|${sec.title.trim().toLowerCase()}`);
       aoa.push([
         flagged ? `⚑ ${p.name.toUpperCase()}` : p.name.toUpperCase(),
         ...p.perDay.map((h) => (h == null ? "" : h)),

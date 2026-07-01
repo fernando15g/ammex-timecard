@@ -26,10 +26,19 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  // Names that have any flag — used to mark/shade their rows in the grid.
-  const flaggedNames = new Set(
-    rd.flags.map((f) => f.worker.trim().toLowerCase())
-  );
+  // Mark rows by (worker + specific job) so a flag only appears on the job(s)
+  // it actually involves — not on every job the worker was on that week.
+  // Name-only flags (e.g. off-roster) mark all of that worker's rows.
+  const flaggedJobKeys = new Set<string>();
+  const flaggedNameOnly = new Set<string>();
+  for (const f of rd.flags) {
+    const w = f.worker.trim().toLowerCase();
+    if (f.jobs && f.jobs.length) {
+      for (const j of f.jobs) flaggedJobKeys.add(`${w}|${j.trim().toLowerCase()}`);
+    } else {
+      flaggedNameOnly.add(w);
+    }
+  }
   const tr = RT[rd.lang];
 
   let page = pdf.addPage([PAGE_W, PAGE_H]);
@@ -131,7 +140,10 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
 
     sec.people.forEach((p, ri) => {
       ensure(rowH + 4);
-      const flagged = flaggedNames.has(p.name.trim().toLowerCase());
+      const wkey = p.name.trim().toLowerCase();
+      const flagged =
+        flaggedNameOnly.has(wkey) ||
+        flaggedJobKeys.has(`${wkey}|${sec.title.trim().toLowerCase()}`);
       if (flagged) {
         // Shade the flagged person's row (takes priority over zebra).
         page.drawRectangle({
@@ -172,10 +184,10 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
           // Faint dot marks a non-worked day (quiet, keeps a column anchor).
           drawCellText("·", colX(i) + 6, y - rowH + 10, font, 12, faintDot);
         } else {
-          drawCellText(String(h), colX(i) + 4, y - rowH + 9, font, 9, steel);
+          drawCellText(String(h), colX(i) + 4, y - rowH + 9, bold, 10, steel);
         }
       });
-      drawCellText(String(p.total), totalX + 4, y - rowH + 9, bold, 9);
+      drawCellText(String(p.total), totalX + 4, y - rowH + 9, bold, 10);
       y -= rowH;
     });
 
@@ -190,9 +202,9 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     });
     drawCellText(tr.dailyTotal, MARGIN + 4, y - rowH + 9, bold, 9);
     sec.dailyTotals.forEach((tt, i) => {
-      drawCellText(String(tt), colX(i) + 4, y - rowH + 9, bold, 9);
+      drawCellText(String(tt), colX(i) + 4, y - rowH + 9, bold, 10);
     });
-    drawCellText(String(sec.grandTotal), totalX + 4, y - rowH + 9, bold, 9, safety);
+    drawCellText(String(sec.grandTotal), totalX + 4, y - rowH + 9, bold, 10, safety);
     y -= rowH + 14;
   }
 
@@ -349,9 +361,9 @@ export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
       const leftClipped = clip(left, font, 10, PW - MARGIN * 2 - 90);
       page.drawText(leftClipped, { x: MARGIN + 6, y, size: 10, font, color: steel });
       const hrs = `${j.hours}`;
-      const hrsW = font.widthOfTextAtSize(hrs, 10);
+      const hrsW = bold.widthOfTextAtSize(hrs, 11);
       const hrsX = rightX - hrsW;
-      page.drawText(hrs, { x: hrsX, y, size: 10, font, color: steel });
+      page.drawText(hrs, { x: hrsX, y, size: 11, font: bold, color: steel });
       const leftEnd = MARGIN + 6 + font.widthOfTextAtSize(leftClipped, 10) + 6;
       if (hrsX - 6 > leftEnd) {
         page.drawLine({
@@ -434,12 +446,13 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
     y -= 30;
 
     for (const job of day.jobs) {
+      ensure(34);
+      // Job title once, then each foreman's crew grouped underneath it.
+      const jobLine = job.jobId ? `${job.title} (${job.jobId})` : job.title;
+      page.drawText(jobLine, { x: MARGIN + 6, y, size: 11, font: bold, color: steel });
+      y -= 15;
       for (const fg of job.foremen) {
-        ensure(20 + fg.crew.length * 13 + 16);
-        // Job + foreman header
-        const jobLine = job.jobId ? `${job.title} (${job.jobId})` : job.title;
-        page.drawText(jobLine, { x: MARGIN + 6, y, size: 11, font: bold, color: steel });
-        y -= 14;
+        ensure(16 + fg.crew.length * 13 + 4);
         if (fg.foreman) {
           page.drawText(`${tr.foremanLabel}: ${fg.foreman.toUpperCase()}`, {
             x: MARGIN + 6, y, size: 9.5, font, color: safety,
@@ -451,9 +464,9 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
           const nameTxt = clip(c.name.toUpperCase(), font, 10, PW - MARGIN * 2 - 90);
           page.drawText(nameTxt, { x: MARGIN + 18, y, size: 10, font, color: steel });
           const h = `${c.hours}`;
-          const hW = font.widthOfTextAtSize(h, 10);
+          const hW = bold.widthOfTextAtSize(h, 11);
           const hX = rightX - hW;
-          page.drawText(h, { x: hX, y, size: 10, font, color: steel });
+          page.drawText(h, { x: hX, y, size: 11, font: bold, color: steel });
           const nameEnd = MARGIN + 18 + font.widthOfTextAtSize(nameTxt, 10) + 6;
           if (hX - 6 > nameEnd) {
             page.drawLine({
@@ -466,11 +479,11 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
           }
           y -= 13;
         }
-        // Job/foreman subtotal
-        const jt = `${tr.jobTotal}: ${fg.total} ${tr.hrs}`;
-        page.drawText(jt, { x: MARGIN + 12, y, size: 9, font: bold, color: gray });
-        y -= 18;
       }
+      // One job total across all foremen on this job.
+      const jt = `${tr.jobTotal}: ${job.total} ${tr.hrs}`;
+      page.drawText(jt, { x: MARGIN + 12, y, size: 9, font: bold, color: gray });
+      y -= 18;
     }
     y -= 6;
   });
@@ -570,11 +583,11 @@ export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> 
     page.drawText(clip(r.name.toUpperCase(), font, 8.5, nameW - 8), { x: xName + 4, y: yTop - rowH + 6, size: 8.5, font, color: steel });
     r.cells.forEach((c, i) => {
       if (c.text) {
-        const t = clip(c.text, font, 8.5, colW - 4);
-        page.drawText(t, { x: colX(i) + 3, y: yTop - rowH + 6, size: 8.5, font, color: steel });
+        const t = clip(c.text, bold, 9.5, colW - 4);
+        page.drawText(t, { x: colX(i) + 3, y: yTop - rowH + 6, size: 9.5, font: bold, color: steel });
       }
     });
-    page.drawText(String(r.total), { x: totalX + 3, y: yTop - rowH + 6, size: 8.5, font: bold, color: steel });
+    page.drawText(String(r.total), { x: totalX + 3, y: yTop - rowH + 6, size: 9.5, font: bold, color: steel });
     rowGrid(yTop);
     y -= rowH;
   });

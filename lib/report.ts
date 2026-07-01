@@ -43,6 +43,7 @@ export interface Flag {
   kind: "over_hours" | "double_entry" | "multi_job" | "single_high" | "off_roster";
   detail: string;
   foremen?: string[]; // foremen whose entries are part of this flag
+  jobs?: string[]; // job title(s) this flag actually involves (for row marking)
 }
 
 export interface WorkerJobLine {
@@ -353,10 +354,10 @@ export function buildReport(
         foremen: Array.from(
           new Set(entries.map((e) => e.foreman).filter(Boolean))
         ),
+        jobs: Array.from(new Set(entries.map((e) => e.job))),
       });
     }
   }
-
   // Double entry: same worker, same job, same day, more than one card.
   for (const [key, entries] of entriesByJobDay) {
     if (entries.length > 1) {
@@ -375,6 +376,7 @@ export function buildReport(
         foremen: Array.from(
           new Set(entries.map((e) => e.foreman).filter(Boolean))
         ),
+        jobs: [job],
       });
     }
   }
@@ -397,6 +399,7 @@ export function buildReport(
         kind: "multi_job",
         detail: phraseMultiJob(lang, jmap.size, parts),
         foremen: Array.from(allForemen),
+        jobs: Array.from(jmap.keys()),
       });
     }
   }
@@ -415,6 +418,7 @@ export function buildReport(
         SINGLE_ENTRY_LIMIT
       ),
       foremen: s.foreman ? [s.foreman] : [],
+      jobs: [s.job],
     });
   }
 

@@ -588,21 +588,21 @@ export default function Page() {
       />
 
       <div className="flex-1 overflow-y-auto px-5 pb-32">
-        {/* Foreman line */}
-        <button
-          onClick={() => setShowForemanPicker(true)}
-          className="w-full flex items-center justify-between mt-4 mb-5 text-left"
-        >
+        {/* Foreman line — only the Change button is tappable now */}
+        <div className="w-full flex items-center justify-between mt-4 mb-5">
           <div>
             <div className="text-[11px] font-bold text-rebar tracking-wide">
               {tr.foreman.toUpperCase()}
             </div>
             <div className="text-lg font-bold">{foreman}</div>
           </div>
-          <span className="text-safety text-sm font-semibold">
+          <button
+            onClick={() => setShowForemanPicker(true)}
+            className="text-safety text-xs font-bold px-3 py-1.5 rounded-full border border-safety/60 active:bg-safety/10 shrink-0"
+          >
             {tr.changeForeman}
-          </span>
-        </button>
+          </button>
+        </div>
 
         {/* Date + Job */}
         <div className="grid grid-cols-2 gap-3 mb-5">

@@ -110,7 +110,7 @@ export function buildPayrollGrid(
       const text =
         jobs.length === 1
           ? String(r2(jobs[0].hours))
-          : jobs.map((j) => r2(j.hours)).join(" | ");
+          : jobs.map((j) => r2(j.hours)).join(" / ");
       cells.push({ text });
     }
     gridRows.push({ name, cells, total: r2(total) });

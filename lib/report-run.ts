@@ -118,6 +118,133 @@ export interface RunOptions {
 
 // The full pipeline: read Notion for the span, build the files, email them.
 // startISO..endISO is inclusive. Used by both the manual button and the cron.
+// Load all timecard rows in the span plus the active roster. Shared by the
+// on-demand report runner and the weekly auto-send bundle.
+export async function loadRowsAndRoster(
+  startISO: string,
+  endISO: string
+): Promise<{ rows: RawRow[]; activeRoster: string[] }> {
+  const notion = new Client({ auth: NOTION_TOKEN });
+
+  const raw: any[] = [];
+  let cursor: string | undefined = undefined;
+  do {
+    const res: any = await notion.databases.query({
+      database_id: TIMECARDS_DB_ID,
+      filter: {
+        and: [
+          { property: TIMECARD_PROPS.date, date: { on_or_after: startISO } },
+          { property: TIMECARD_PROPS.date, date: { on_or_before: endISO } },
+        ],
+      },
+      start_cursor: cursor,
+      page_size: 100,
+    });
+    raw.push(...res.results);
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+
+  const needResolve = new Set<string>();
+  for (const page of raw) {
+    const ph = page.properties?.[TIMECARD_PROPS.projectHelper];
+    relationIds(ph).forEach((id) => needResolve.add(id));
+  }
+  const relTitle = new Map<string, string>();
+  for (const id of needResolve) {
+    try {
+      const pg: any = await notion.pages.retrieve({ page_id: id });
+      let title = "";
+      for (const key of Object.keys(pg.properties || {})) {
+        const p = pg.properties[key];
+        if (p?.type === "title") {
+          title = (p.title || []).map((t: any) => t.plain_text).join("").trim();
+          break;
+        }
+      }
+      if (title) relTitle.set(id, title);
+    } catch {
+      /* ignore unresolved */
+    }
+  }
+
+  const rows: RawRow[] = [];
+  for (const page of raw) {
+    const props = page.properties || {};
+    const worker = readText(props[TIMECARD_PROPS.worker]);
+    const dateISO = props[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "";
+    const hoursVal = props[TIMECARD_PROPS.hours]?.number;
+    const hours = typeof hoursVal === "number" ? hoursVal : 0;
+    const jobText = readText(props[TIMECARD_PROPS.job]);
+    let projectName = readText(props[TIMECARD_PROPS.projectHelper]);
+    if (!projectName) {
+      const ids = relationIds(props[TIMECARD_PROPS.projectHelper]);
+      projectName = ids.map((id) => relTitle.get(id) || "").filter(Boolean).join(", ");
+    }
+    const jobId = readText(props[TIMECARD_PROPS.jobIdHelper]);
+    const foreman = readText(props[TIMECARD_PROPS.foreman]);
+    if (!worker || !dateISO) continue;
+    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman });
+  }
+
+  const activeRoster: string[] = [];
+  let rc: string | undefined = undefined;
+  do {
+    const res: any = await notion.databases.query({
+      database_id: CREW_ROSTER_DB_ID,
+      filter: { property: ROSTER_PROPS.active, checkbox: { equals: true } },
+      start_cursor: rc,
+      page_size: 100,
+    });
+    for (const pg of res.results) {
+      const nm = readText(pg.properties?.[ROSTER_PROPS.name]);
+      if (nm) activeRoster.push(nm);
+    }
+    rc = res.has_more ? res.next_cursor : undefined;
+  } while (rc);
+
+  return { rows, activeRoster };
+}
+
+// Weekly auto-send bundle: Master report, Payroll Grid, and Owner Review —
+// Daily, all as PDF, in one email. Used by the Monday cron.
+export async function runWeeklyBundle(
+  startISO: string,
+  endISO: string
+): Promise<{ ok: boolean; attachments: number }> {
+  const { rows, activeRoster } = await loadRowsAndRoster(startISO, endISO);
+
+  // Master report (job-grouped grid)
+  const masterRd = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, "en");
+  const masterPdf = await buildReportPdf(masterRd);
+
+  // Payroll Grid
+  const pg = buildPayrollGrid(rows, activeRoster, startISO, endISO, "en");
+  const pgPdf = await buildPayrollGridPdf(pg);
+
+  // Owner Review — Daily
+  const daily = buildDailyReport(rows, startISO, endISO, "en");
+  const dailyPdf = await buildDailyPdf(daily);
+
+  const b64 = (u: Uint8Array) => Buffer.from(u).toString("base64");
+  const resend = new Resend(process.env.RESEND_API_KEY);
+  await resend.emails.send({
+    from: FROM,
+    to: PAYROLL_RECIPIENT,
+    subject: `Weekly reports — ${startISO} to ${endISO}`,
+    text:
+      `Attached are this week's reports (PDF):\n` +
+      `• Master report\n• Payroll Grid\n• Owner Review — Daily\n\n` +
+      `Week: ${startISO} to ${endISO}`,
+    attachments: [
+      { filename: `Ammex_Master_${startISO}_to_${endISO}.pdf`, content: b64(masterPdf) },
+      { filename: `Ammex_PayrollGrid_${startISO}_to_${endISO}.pdf`, content: b64(pgPdf) },
+      { filename: `Ammex_OwnerReview_${startISO}_to_${endISO}.pdf`, content: b64(dailyPdf) },
+    ],
+  });
+
+  return { ok: true, attachments: 3 };
+}
+
 export async function runReport(
   startISO: string,
   endISO: string,

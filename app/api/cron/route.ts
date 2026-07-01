@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { NOTION_TOKEN } from "@/lib/notion";
 import { addDaysISO, lastCompletedWeekStart } from "@/lib/report";
-import { runReport } from "@/lib/report-run";
+import { runWeeklyBundle } from "@/lib/report-run";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -12,8 +12,9 @@ function todayISO(): string {
   return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
 }
 
-// Vercel Cron hits this every Sunday morning (Arizona). It builds and emails
-// the report for the Sun–Sat week that just completed the night before.
+// Vercel Cron hits this Monday morning (Arizona). It builds and emails the
+// weekly bundle — Master report, Payroll Grid, and Owner Review — Daily, all
+// as PDF — for the Mon–Sun week that just completed.
 export async function GET(req: Request) {
   // If CRON_SECRET is configured, require Vercel's bearer header. If it's not
   // set, the endpoint still works (worst case: an extra report emailed to the
@@ -34,7 +35,7 @@ export async function GET(req: Request) {
   const weekEnd = addDaysISO(weekStart, 6);
 
   try {
-    const result = await runReport(weekStart, weekEnd, true);
+    const result = await runWeeklyBundle(weekStart, weekEnd);
     return NextResponse.json({ ran: true, ...result });
   } catch (err: any) {
     console.error("Cron report failed:", err?.message || err);

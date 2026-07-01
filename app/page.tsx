@@ -1853,32 +1853,35 @@ function SchedulePanel({
           </button>
         </div>
 
-        {/* Controls — right-sized date pill with an intentional action row */}
-        <div className="flex items-center gap-2 mb-4">
+        {/* Controls — date pill, then a balanced action row. Stacks on phone
+            (date on top, actions below), single row on iPad. */}
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center gap-2">
           <input
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
             className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete text-sm w-[150px] shrink-0"
           />
-          <button
-            onClick={carryOver}
-            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-semibold text-sm inline-flex items-center gap-1.5 active:text-safety"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.36 2.64L3 8" />
-              <path d="M3 3v5h5" />
-            </svg>
-            Carry over
-          </button>
-          {jobs.length > 0 && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => setJobs([])}
-              className="ml-auto text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0"
+              onClick={carryOver}
+              className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-semibold text-sm inline-flex items-center gap-1.5 active:text-safety"
             >
-              Clear all
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.36 2.64L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              Carry over
             </button>
-          )}
+            {jobs.length > 0 && (
+              <button
+                onClick={() => setJobs([])}
+                className="ml-auto text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
         </div>
 
         {resultMsg && !showReview && (

@@ -139,7 +139,7 @@ export const strings = {
     updated: "✓ Updated",
     refresh: "Refresh list",
     dateNotToday: "This timecard is dated {date}. Please confirm the date is correct.",
-    staleTitle: "Confirm your timecard date",
+    staleTitle: "Confirm Timecard Date",
     staleOtherDate: "Other date",
     noFutureDate: "Can't submit a timecard for a future date.",
     reportsTitle: "Reports",

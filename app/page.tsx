@@ -48,6 +48,19 @@ export default function Page() {
   // confirmed by the worker. If so, we ask "which day?" at Review time.
   const staleUnconfirmed = useRef(false);
   const [showDatePrompt, setShowDatePrompt] = useState(false);
+  const dateFieldRef = useRef<HTMLDivElement>(null);
+  const [datePulse, setDatePulse] = useState(false);
+
+  // "Other date" from the prompt: close it, bring the date field into view,
+  // then pulse it so the worker sees where to change the date.
+  function goToDateField() {
+    setShowDatePrompt(false);
+    setTimeout(() => {
+      dateFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setDatePulse(true);
+      setTimeout(() => setDatePulse(false), 2600);
+    }, 60);
+  }
   const [job, setJob] = useState("");
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [workDone, setWorkDone] = useState("");
@@ -654,23 +667,15 @@ export default function Page() {
             >
               {friendlyDate(todayISO(), lang)}
             </button>
-            {/* Other date — a real native date input overlaid transparently on
-                the label so a tap anywhere opens the native calendar reliably
-                on all devices (no showPicker(), which iOS web-apps block). */}
-            <label className="relative block w-full text-center text-rebar text-base font-semibold py-2.5 active:text-safety cursor-pointer">
+            {/* Other date — close the prompt, scroll to the date field on the
+                card and highlight it, so the worker changes it there (the field
+                that already works reliably on every device). */}
+            <button
+              onClick={goToDateField}
+              className="block w-full text-center text-rebar text-base font-semibold py-2.5 active:text-safety"
+            >
               {tr.staleOtherDate} →
-              <input
-                type="date"
-                max={todayISO()}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                onChange={(e) => {
-                  if (e.target.value) {
-                    setDate(e.target.value);
-                    proceedToReview();
-                  }
-                }}
-              />
-            </label>
+            </button>
           </div>
         </div>
       )}
@@ -704,17 +709,23 @@ export default function Page() {
         {/* Date + Job */}
         <div className="grid grid-cols-2 gap-3 mb-5">
           <Field label={tr.date}>
-            <input
-              type="date"
-              value={date}
-              max={todayISO()}
-              onChange={(e) => {
-                dateManual.current = true;
-                staleUnconfirmed.current = false; // worker chose a date
-                setDate(e.target.value);
-              }}
-              className="w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete appearance-none"
-            />
+            <div ref={dateFieldRef}>
+              <input
+                type="date"
+                value={date}
+                max={todayISO()}
+                onChange={(e) => {
+                  dateManual.current = true;
+                  staleUnconfirmed.current = false; // worker chose a date
+                  setDate(e.target.value);
+                }}
+                className={`w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete appearance-none transition-all duration-300 ${
+                  datePulse
+                    ? "ring-4 ring-safety ring-offset-2 ring-offset-steel"
+                    : "ring-0"
+                }`}
+              />
+            </div>
           </Field>
           <Field label={tr.job}>
             <input

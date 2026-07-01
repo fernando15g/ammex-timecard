@@ -1161,14 +1161,25 @@ function ReportsPanel({
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const blob = new Blob([bytes], { type: "application/pdf" });
-      const file = new File([blob], filename, { type: "application/pdf" });
-      const nav: any = navigator;
-      if (nav.canShare && nav.canShare({ files: [file] })) {
-        await nav.share({ files: [file], title: filename });
-        return;
-      }
-      // Fallback: open the PDF in a new tab (user can then save/share).
       const url = URL.createObjectURL(blob);
+
+      // On touch devices (iPhone/iPad) the native share sheet is the natural
+      // way to handle a file. On desktop (Mac/PC) that share sheet is a
+      // nuisance for a "view" action, so just open the PDF in a new tab.
+      const isTouch =
+        typeof navigator !== "undefined" && (navigator.maxTouchPoints || 0) > 0;
+
+      if (isTouch) {
+        const nav: any = navigator;
+        const file = new File([blob], filename, { type: "application/pdf" });
+        if (nav.canShare && nav.canShare({ files: [file] })) {
+          await nav.share({ files: [file], title: filename });
+          URL.revokeObjectURL(url);
+          return;
+        }
+      }
+
+      // Desktop (and any non-shareable case): open the PDF to review it.
       window.open(url, "_blank");
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch {

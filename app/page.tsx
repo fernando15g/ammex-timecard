@@ -1506,28 +1506,9 @@ function SchedulePanel({
   const [resultMsg, setResultMsg] = useState("");
   const [kbOpen, setKbOpen] = useState(false);
   const [restored, setRestored] = useState(false);
-  const [dragY, setDragY] = useState(0);
-  const dragStartRef = useRef<number | null>(null);
   const newJobRef = useRef<HTMLDivElement>(null);
   const jobSearchRef = useRef<HTMLInputElement>(null);
   const workerSearchRef = useRef<HTMLInputElement>(null);
-
-  // Swipe-down-to-close for the picker sheets (phone). Drag the grab handle
-  // down; release past a threshold to dismiss.
-  function onDragStart(e: React.TouchEvent) {
-    dragStartRef.current = e.touches[0].clientY;
-    setDragY(0);
-  }
-  function onDragMove(e: React.TouchEvent) {
-    if (dragStartRef.current == null) return;
-    const d = e.touches[0].clientY - dragStartRef.current;
-    if (d > 0) setDragY(d);
-  }
-  function onDragEnd(close: () => void) {
-    if (dragY > 90) close();
-    dragStartRef.current = null;
-    setDragY(0);
-  }
 
   // Remember the working state between sessions: restore the last date + jobs
   // on open, and re-save whenever they change. So closing the app and coming
@@ -1837,47 +1818,63 @@ function SchedulePanel({
   };
 
   return (
-    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
+    <div
+      className={`fixed inset-0 z-[60] bg-steel ${
+        showJobPicker || workerFor !== null ? "overflow-hidden" : "overflow-y-auto"
+      }`}
+    >
       <div className="max-w-7xl mx-auto p-4 pb-28">
         {/* Header — Close on the right to match the rest of the app */}
-        <div className="flex items-center justify-between mb-3">
+        {/* Header — Refresh + title + Close, as circular icon pills to match
+            the rest of the app */}
+        <div className="flex items-center justify-between mb-4">
           <button
             onClick={() => loadData(true)}
             disabled={refreshing}
-            className="text-rebar font-semibold text-sm flex items-center gap-1.5 active:text-safety disabled:opacity-50"
+            aria-label="Refresh"
+            className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center active:text-safety disabled:opacity-50"
           >
             <svg
-              width="15" height="15" viewBox="0 0 24 24" fill="none"
+              width="16" height="16" viewBox="0 0 24 24" fill="none"
               stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
               className={refreshing ? "animate-spin" : ""}
             >
               <path d="M21 12a9 9 0 1 1-2.64-6.36" />
               <path d="M21 3v6h-6" />
             </svg>
-            {refreshing ? "Refreshing…" : "Refresh"}
           </button>
           <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
-          <button onClick={onClose} className="text-rebar font-semibold">Close ✕</button>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center text-lg active:text-safety"
+          >
+            ✕
+          </button>
         </div>
 
-        {/* Controls */}
-        <div className="flex flex-wrap items-center gap-2 mb-3">
+        {/* Controls — right-sized date pill with an intentional action row */}
+        <div className="flex items-center gap-2 mb-4">
           <input
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            className="bg-graphite border border-line rounded-xl px-3 h-11 text-concrete"
+            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete text-sm w-[150px] shrink-0"
           />
           <button
             onClick={carryOver}
-            className="bg-graphite border border-line rounded-xl px-3 h-11 text-concrete font-semibold text-sm"
+            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-semibold text-sm inline-flex items-center gap-1.5 active:text-safety"
           >
-            ↺ Carry over last
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.36 2.64L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+            Carry over
           </button>
           {jobs.length > 0 && (
             <button
               onClick={() => setJobs([])}
-              className="ml-auto text-rebar border border-line rounded-xl px-3 h-11 text-sm"
+              className="ml-auto text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0"
             >
               Clear all
             </button>
@@ -1979,17 +1976,7 @@ function SchedulePanel({
           <div
             className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
-            style={{ transform: dragY ? `translateY(${dragY}px)` : undefined }}
           >
-            {/* Grab handle — swipe down to close (phone) */}
-            <div
-              className="sm:hidden pt-2 pb-1 flex justify-center touch-none"
-              onTouchStart={onDragStart}
-              onTouchMove={onDragMove}
-              onTouchEnd={() => onDragEnd(() => { setShowJobPicker(false); setJobQuery(""); })}
-            >
-              <div className="w-10 h-1.5 rounded-full bg-line" />
-            </div>
             {/* Sticky header: title + close, then the search box stays on top */}
             <div className="p-4 pb-2 border-b border-line">
               <div className="flex items-center justify-between mb-2">
@@ -2014,7 +2001,7 @@ function SchedulePanel({
               />
             </div>
             {/* Scrollable list below the fixed search box */}
-            <div className="space-y-1 p-3 overflow-y-auto">
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
               {filteredJobs().map((j) => (
                 <button
                   key={j.id}
@@ -2045,17 +2032,7 @@ function SchedulePanel({
           <div
             className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
-            style={{ transform: dragY ? `translateY(${dragY}px)` : undefined }}
           >
-            {/* Grab handle — swipe down to close (phone) */}
-            <div
-              className="sm:hidden pt-2 pb-1 flex justify-center touch-none"
-              onTouchStart={onDragStart}
-              onTouchMove={onDragMove}
-              onTouchEnd={() => onDragEnd(() => { setWorkerFor(null); setWorkerQuery(""); })}
-            >
-              <div className="w-10 h-1.5 rounded-full bg-line" />
-            </div>
             <div className="p-4 pb-2 border-b border-line">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-concrete font-bold truncate pr-2">
@@ -2083,7 +2060,7 @@ function SchedulePanel({
                 className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
               />
             </div>
-            <div className="space-y-1 p-3 overflow-y-auto">
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
               {filteredRoster(workerFor).map((n) => {
                 const elsewhere = otherJobs(n, workerFor);
                 return (

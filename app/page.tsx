@@ -48,7 +48,6 @@ export default function Page() {
   // confirmed by the worker. If so, we ask "which day?" at Review time.
   const staleUnconfirmed = useRef(false);
   const [showDatePrompt, setShowDatePrompt] = useState(false);
-  const otherDateRef = useRef<HTMLInputElement>(null);
   const [job, setJob] = useState("");
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [workDone, setWorkDone] = useState("");
@@ -655,25 +654,23 @@ export default function Page() {
             >
               {friendlyDate(todayISO(), lang)}
             </button>
-            {/* Other date — opens the calendar */}
-            <button
-              onClick={() => otherDateRef.current?.showPicker?.()}
-              className="w-full text-rebar text-base font-semibold py-2 active:text-safety"
-            >
+            {/* Other date — a real native date input overlaid transparently on
+                the label so a tap anywhere opens the native calendar reliably
+                on all devices (no showPicker(), which iOS web-apps block). */}
+            <label className="relative block w-full text-center text-rebar text-base font-semibold py-2.5 active:text-safety cursor-pointer">
               {tr.staleOtherDate} →
-            </button>
-            <input
-              ref={otherDateRef}
-              type="date"
-              max={todayISO()}
-              className="sr-only"
-              onChange={(e) => {
-                if (e.target.value) {
-                  setDate(e.target.value);
-                  proceedToReview();
-                }
-              }}
-            />
+              <input
+                type="date"
+                max={todayISO()}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                onChange={(e) => {
+                  if (e.target.value) {
+                    setDate(e.target.value);
+                    proceedToReview();
+                  }
+                }}
+              />
+            </label>
           </div>
         </div>
       )}

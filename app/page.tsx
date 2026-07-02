@@ -2521,6 +2521,8 @@ type ReconEntry = {
   worker: string;
   date: string;
   job: string;
+  projectName: string;
+  projectId: string;
   hours: number;
   foreman: string;
   notes: string;
@@ -2589,8 +2591,10 @@ function ReconPanel({
 
   const [entries, setEntries] = useState<ReconEntry[]>([]);
   const [flags, setFlags] = useState<Record<string, string[]>>({});
+  const [confirmed, setConfirmed] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  const [showVoided, setShowVoided] = useState(false);
 
   // load roster once
   useEffect(() => {
@@ -2613,6 +2617,7 @@ function ReconPanel({
         if (d?.ok) {
           setEntries(d.entries || []);
           setFlags(d.flags || {});
+          setConfirmed(d.confirmed || []);
           if ((d.entries || []).length === 0) setMsg("No timecards for this worker in that range.");
         } else {
           setMsg(d?.error || "Search failed.");
@@ -2741,86 +2746,154 @@ function ReconPanel({
             )}
 
             {!loading &&
-              entries.map((e) => {
+              entries.filter((e) => !e.voided).map((e) => {
                 const efl = flags[e.id] || [];
+                const displayName = e.projectName || e.job || "—";
                 return (
                   <div
                     key={e.id}
-                    className={`bg-graphite border border-line rounded-2xl p-4 mb-3 ${
-                      e.voided ? "opacity-50" : ""
-                    } ${efl.length ? "border-l-4 border-l-amber-500" : ""}`}
-                    style={efl.length ? { borderLeftColor: "#e0a63b" } : undefined}
+                    className="bg-graphite border border-line rounded-2xl p-4 mb-3"
+                    style={efl.length ? { borderLeft: "4px solid #e0a63b" } : undefined}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-concrete font-bold">
-                          {e.job || "—"}{" "}
-                          {e.voided && (
-                            <span className="text-rebar text-xs font-normal">(voided)</span>
-                          )}
+                        <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
+                          {prettyDate(e.date, lang)}
                         </div>
+                        <div className="text-concrete font-bold text-[15px]">{displayName}</div>
                         <div className="text-rebar text-xs mt-0.5">
-                          {prettyDate(e.date, lang)} · Foreman: {e.foreman || "—"}
+                          Foreman: {e.foreman || "—"}
+                          {e.projectName && e.job && e.job !== e.projectName && (
+                            <span className="text-rebar/70"> · logged as "{e.job}"</span>
+                          )}
                         </div>
                       </div>
                       <div className="text-concrete text-xl font-extrabold">{e.hours}h</div>
                     </div>
 
-                    {/* flags */}
                     {efl.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mt-2">
-                        {efl.map((f) => (
-                          <span
-                            key={f}
-                            className="text-[11px] font-bold px-2 py-0.5 rounded-full"
-                            style={{ color: "#f0cf8f", background: "rgba(224,166,59,.16)" }}
+                      <div className="flex flex-wrap gap-1.5 mt-2 items-center">
+                        {efl.map((f) => {
+                          const key = `${e.worker.toLowerCase()}|${e.date}|${(FLAG_LABEL[f] || f).toLowerCase()}`;
+                          const ok = confirmed.includes(key);
+                          return (
+                            <span
+                              key={f}
+                              className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+                              style={
+                                ok
+                                  ? { color: "#9fdcb4", background: "rgba(74,158,99,.16)" }
+                                  : { color: "#f0cf8f", background: "rgba(224,166,59,.16)" }
+                              }
+                            >
+                              {ok ? "✓" : "⚑"} {FLAG_LABEL[f] || f}
+                            </span>
+                          );
+                        })}
+                        {/* Looks OK — only if any flag is not yet confirmed */}
+                        {efl.some(
+                          (f) =>
+                            !confirmed.includes(
+                              `${e.worker.toLowerCase()}|${e.date}|${(FLAG_LABEL[f] || f).toLowerCase()}`
+                            )
+                        ) && (
+                          <button
+                            onClick={async () => {
+                              for (const f of efl) {
+                                await fetch("/api/recon", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    op: "log",
+                                    worker: e.worker,
+                                    date: e.date,
+                                    kind: FLAG_LABEL[f] || f,
+                                    status: "Confirmed OK",
+                                    note: displayName,
+                                  }),
+                                });
+                              }
+                              // optimistic
+                              setConfirmed((c) => [
+                                ...c,
+                                ...efl.map(
+                                  (f) =>
+                                    `${e.worker.toLowerCase()}|${e.date}|${(FLAG_LABEL[f] || f).toLowerCase()}`
+                                ),
+                              ]);
+                            }}
+                            className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
                           >
-                            ⚑ {FLAG_LABEL[f] || f}
-                          </span>
-                        ))}
+                            Looks OK
+                          </button>
+                        )}
                       </div>
                     )}
 
-                    {e.voided && e.voidNote && (
-                      <div className="text-rebar text-xs italic mt-2">Void note: {e.voidNote}</div>
-                    )}
-
-                    {/* actions */}
                     <div className="flex gap-2 mt-3 flex-wrap">
-                      {!e.voided ? (
-                        <>
-                          <button
-                            onClick={() => setEditEntry(e)}
-                            className="bg-graphite border border-line text-concrete rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setVoidEntry(e)}
-                            className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
-                          >
-                            Void
-                          </button>
-                        </>
-                      ) : (
-                        <button
-                          onClick={async () => {
-                            await fetch("/api/recon", {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ op: "void", id: e.id, voided: false, note: "" }),
-                            });
-                            refreshAfterWrite();
-                          }}
-                          className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
-                        >
-                          Un-void
-                        </button>
-                      )}
+                      <button
+                        onClick={() => setEditEntry(e)}
+                        className="bg-graphite border border-line text-concrete rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => setVoidEntry(e)}
+                        className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Void
+                      </button>
                     </div>
                   </div>
                 );
               })}
+
+            {/* Collapsible voided section */}
+            {!loading && entries.some((e) => e.voided) && (
+              <div className="mt-4">
+                <button
+                  onClick={() => setShowVoided((v) => !v)}
+                  className="w-full flex items-center justify-between text-rebar text-sm font-bold py-2 px-1"
+                >
+                  <span>Voided ({entries.filter((e) => e.voided).length})</span>
+                  <span>{showVoided ? "▾" : "▸"}</span>
+                </button>
+                {showVoided &&
+                  entries.filter((e) => e.voided).map((e) => (
+                    <div key={e.id} className="bg-graphite border border-line rounded-2xl p-4 mb-3 opacity-60">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                            {prettyDate(e.date, lang)}
+                          </div>
+                          <div className="text-concrete font-bold text-[15px]">
+                            {e.projectName || e.job || "—"}{" "}
+                            <span className="text-rebar text-xs font-normal">(voided)</span>
+                          </div>
+                          <div className="text-rebar text-xs mt-0.5">Foreman: {e.foreman || "—"}</div>
+                          {e.voidNote && (
+                            <div className="text-rebar text-xs italic mt-1">Void note: {e.voidNote}</div>
+                          )}
+                        </div>
+                        <div className="text-rebar text-xl font-extrabold">{e.hours}h</div>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          await fetch("/api/recon", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ op: "void", id: e.id, voided: false, note: "" }),
+                          });
+                          refreshAfterWrite();
+                        }}
+                        className="mt-3 text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Un-void
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            )}
           </>
         ) : (
           /* Review view — built in the next stage */
@@ -2927,11 +3000,34 @@ function ReconEditModal({
   const [hours, setHours] = useState(String(entry.hours));
   const [job, setJob] = useState(entry.job);
   const [foreman, setForeman] = useState(entry.foreman);
+  const [projectId, setProjectId] = useState(entry.projectId);
+  const [projectName, setProjectName] = useState(entry.projectName);
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(false);
 
+  // project picker
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [projPickerOpen, setProjPickerOpen] = useState(false);
+  const [projQuery, setProjQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filteredProjects = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(projQuery.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(projQuery.toLowerCase())
+  );
+
   const changed =
-    parseFloat(hours) !== entry.hours || job !== entry.job || foreman !== entry.foreman;
+    parseFloat(hours) !== entry.hours ||
+    job !== entry.job ||
+    foreman !== entry.foreman ||
+    projectId !== entry.projectId;
 
   async function save() {
     setSaving(true);
@@ -2940,6 +3036,7 @@ function ReconEditModal({
     if (!isNaN(h) && h !== entry.hours) body.hours = h;
     if (job !== entry.job) body.job = job;
     if (foreman !== entry.foreman) body.foreman = foreman;
+    if (projectId !== entry.projectId) body.projectId = projectId;
     await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2962,6 +3059,32 @@ function ReconEditModal({
           {entry.worker} · {prettyDate(entry.date, lang)}
         </div>
 
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Real project</label>
+        <button
+          onClick={() => {
+            setProjPickerOpen(true);
+            setProjQuery("");
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-1 flex items-center justify-between"
+        >
+          <span className={projectName ? "text-concrete" : "text-rebar"}>
+            {projectName || "Pick the real project…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+        {projectName && (
+          <button
+            onClick={() => {
+              setProjectId("");
+              setProjectName("");
+            }}
+            className="text-rebar text-xs underline mb-3"
+          >
+            clear project
+          </button>
+        )}
+        <div className="mb-3" />
+
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
         <input
           type="number"
@@ -2969,7 +3092,9 @@ function ReconEditModal({
           onChange={(e) => setHours(e.target.value)}
           className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
         />
-        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Job</label>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Foreman's job name
+        </label>
         <input
           value={job}
           onChange={(e) => setJob(e.target.value)}
@@ -3011,6 +3136,57 @@ function ReconEditModal({
           </div>
         )}
       </div>
+
+      {/* Project picker (searchable) */}
+      {projPickerOpen && (
+        <div
+          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setProjPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button
+                  onClick={() => setProjPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={projQuery}
+                onChange={(ev) => setProjQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredProjects.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setProjectId(p.id);
+                    setProjectName(p.name);
+                    setProjPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filteredProjects.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

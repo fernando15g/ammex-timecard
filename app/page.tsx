@@ -3410,12 +3410,18 @@ function ReconReviewView({
         const [job, date] = key.split("|");
         // foreman who submitted the card (from the timecards themselves)
         const foreman = items.find((i) => i.foreman)?.foreman || "—";
+        const fLower = foreman.toLowerCase();
         return {
           key,
           job,
           date,
           foreman,
-          items: items.slice().sort((a, b) => a.worker.localeCompare(b.worker)),
+          // foreman's own row first (if present), then the rest alphabetical
+          items: items.slice().sort((a, b) => {
+            const af = a.worker.toLowerCase() === fLower ? 0 : 1;
+            const bf = b.worker.toLowerCase() === fLower ? 0 : 1;
+            return af - bf || a.worker.localeCompare(b.worker);
+          }),
           workers: new Set(items.map((i) => i.worker)).size,
         };
       })
@@ -3493,39 +3499,47 @@ function ReconReviewView({
 
                   {open && (
                     <div className="mt-3 pt-3 border-t border-line">
-                      {/* foreman — soft blue-outlined pill */}
-                      <div className="mb-3">
-                        <span
-                          className="inline-block text-xs font-bold px-3 py-1 rounded-full"
-                          style={{
-                            color: "#8fbcff",
-                            border: "1px solid rgba(47,115,216,.5)",
-                            background: "rgba(47,115,216,.08)",
-                          }}
-                        >
-                          {g.foreman}
-                        </span>
-                      </div>
                       <div className="space-y-2">
-                        {g.items.map((e) => (
-                          <div
-                            key={e.id}
-                            className="flex items-center justify-between gap-3 bg-steel/40 rounded-xl px-3 py-2"
-                          >
-                            <div className="text-concrete text-sm font-semibold truncate min-w-0">
-                              {e.worker}
+                        {g.items.map((e) => {
+                          const isForeman =
+                            g.foreman !== "—" &&
+                            e.worker.toLowerCase() === g.foreman.toLowerCase();
+                          return (
+                            <div
+                              key={e.id}
+                              className="flex items-center justify-between gap-3 rounded-xl px-3 py-2"
+                              style={
+                                isForeman
+                                  ? {
+                                      border: "1px solid rgba(47,115,216,.5)",
+                                      background: "rgba(47,115,216,.08)",
+                                    }
+                                  : { background: "rgba(28,33,39,.4)" }
+                              }
+                            >
+                              <div className="text-concrete text-sm font-semibold truncate min-w-0">
+                                {e.worker}
+                                {isForeman && (
+                                  <span
+                                    className="ml-2 text-[10px] font-bold uppercase tracking-wide"
+                                    style={{ color: "#8fbcff" }}
+                                  >
+                                    Foreman
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0">
+                                <div className="text-concrete font-bold">{e.hours}h</div>
+                                <button
+                                  onClick={() => setEditEntry(e)}
+                                  className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
+                                >
+                                  Edit
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex items-center gap-3 shrink-0">
-                              <div className="text-concrete font-bold">{e.hours}h</div>
-                              <button
-                                onClick={() => setEditEntry(e)}
-                                className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
-                              >
-                                Edit
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}

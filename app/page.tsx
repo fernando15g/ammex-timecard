@@ -3408,16 +3408,29 @@ function ReconReviewView({
     return Array.from(m.entries())
       .map(([key, items]) => {
         const [job, date] = key.split("|");
+        // foreman who submitted the card (from the timecards themselves)
+        const foreman = items.find((i) => i.foreman)?.foreman || "—";
         return {
           key,
           job,
           date,
+          foreman,
           items: items.slice().sort((a, b) => a.worker.localeCompare(b.worker)),
           workers: new Set(items.map((i) => i.worker)).size,
         };
       })
       .sort((a, b) => a.date.localeCompare(b.date) || a.job.localeCompare(b.job));
   }, [missing]);
+
+  // group the cards by date, for the outside date section headers
+  const byDate = useMemo(() => {
+    const m = new Map<string, typeof groups>();
+    for (const g of groups) {
+      if (!m.has(g.date)) m.set(g.date, [] as any);
+      m.get(g.date)!.push(g);
+    }
+    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [groups]);
 
   return (
     <div>
@@ -3445,61 +3458,82 @@ function ReconReviewView({
       )}
 
       {!loading &&
-        groups.map((g) => {
-          const open = !!expanded[g.key];
-          return (
-            <div key={g.key} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
-              <div className="flex items-start justify-between gap-3">
-                <button
-                  onClick={() => setExpanded((s) => ({ ...s, [g.key]: !s[g.key] }))}
-                  className="text-left flex-1"
-                >
-                  <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
-                    {prettyDate(g.date, lang)}
-                  </div>
-                  <div className="text-concrete font-bold text-[15px]">
-                    "{g.job}" <span className="text-rebar">{open ? "▾" : "▸"}</span>
-                  </div>
-                  <div className="text-rebar text-xs mt-0.5">
-                    {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
-                    {g.workers === 1 ? "worker" : "workers"}
-                  </div>
-                </button>
-                <button
-                  onClick={() => setBulkGroup(g.key)}
-                  className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
-                >
-                  Set project
-                </button>
-              </div>
+        byDate.map(([date, cards]) => (
+          <div key={date} className="mb-5">
+            {/* Date section header — outside the cards */}
+            <div className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1">
+              {prettyDate(date, lang)}
+            </div>
 
-              {open && (
-                <div className="mt-3 pt-3 border-t border-line space-y-2">
-                  {g.items.map((e) => (
-                    <div
-                      key={e.id}
-                      className="flex items-center justify-between gap-3 bg-steel/40 rounded-xl px-3 py-2"
+            {cards.map((g) => {
+              const open = !!expanded[g.key];
+              return (
+                <div key={g.key} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <button
+                      onClick={() => setExpanded((s) => ({ ...s, [g.key]: !s[g.key] }))}
+                      className="text-left flex-1"
                     >
-                      <div className="min-w-0">
-                        <div className="text-concrete text-sm font-semibold truncate">{e.worker}</div>
-                        <div className="text-rebar text-xs">Foreman: {e.foreman || "—"}</div>
+                      <div className="text-concrete font-bold text-[15px]">
+                        "{g.job}" <span className="text-rebar">{open ? "▾" : "▸"}</span>
                       </div>
-                      <div className="flex items-center gap-3 shrink-0">
-                        <div className="text-concrete font-bold">{e.hours}h</div>
-                        <button
-                          onClick={() => setEditEntry(e)}
-                          className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
+                      <div className="text-rebar text-xs mt-0.5">{g.foreman}</div>
+                      <div className="text-rebar text-xs mt-0.5">
+                        {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
+                        {g.workers === 1 ? "worker" : "workers"}
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => setBulkGroup(g.key)}
+                      className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
+                    >
+                      Set project
+                    </button>
+                  </div>
+
+                  {open && (
+                    <div className="mt-3 pt-3 border-t border-line">
+                      {/* foreman — soft blue-outlined pill */}
+                      <div className="mb-3">
+                        <span
+                          className="inline-block text-xs font-bold px-3 py-1 rounded-full"
+                          style={{
+                            color: "#8fbcff",
+                            border: "1px solid rgba(47,115,216,.5)",
+                            background: "rgba(47,115,216,.08)",
+                          }}
                         >
-                          Edit
-                        </button>
+                          {g.foreman}
+                        </span>
+                      </div>
+                      <div className="space-y-2">
+                        {g.items.map((e) => (
+                          <div
+                            key={e.id}
+                            className="flex items-center justify-between gap-3 bg-steel/40 rounded-xl px-3 py-2"
+                          >
+                            <div className="text-concrete text-sm font-semibold truncate min-w-0">
+                              {e.worker}
+                            </div>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <div className="text-concrete font-bold">{e.hours}h</div>
+                              <button
+                                onClick={() => setEditEntry(e)}
+                                className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
+                              >
+                                Edit
+                              </button>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        ))}
 
       {bulkGroup && (
         <ReconBulkProjectModal

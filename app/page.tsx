@@ -3052,6 +3052,7 @@ function ReconEditModal({
   const [foreman, setForeman] = useState(entry.foreman);
   const [projectId, setProjectId] = useState(entry.projectId);
   const [projectName, setProjectName] = useState(entry.projectName);
+  const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(false);
 
@@ -3082,11 +3083,29 @@ function ReconEditModal({
   async function save() {
     setSaving(true);
     const body: any = { op: "edit", id: entry.id };
+    const changes: string[] = [];
     const h = parseFloat(hours);
-    if (!isNaN(h) && h !== entry.hours) body.hours = h;
-    if (job !== entry.job) body.job = job;
-    if (foreman !== entry.foreman) body.foreman = foreman;
-    if (projectId !== entry.projectId) body.projectId = projectId;
+    if (!isNaN(h) && h !== entry.hours) {
+      body.hours = h;
+      changes.push(`Hours ${entry.hours} → ${h}`);
+    }
+    if (job !== entry.job) {
+      body.job = job;
+      changes.push(`Job "${entry.job || "—"}" → "${job || "—"}"`);
+    }
+    if (foreman !== entry.foreman) {
+      body.foreman = foreman;
+      changes.push(`Foreman ${entry.foreman || "—"} → ${foreman || "—"}`);
+    }
+    if (projectId !== entry.projectId) {
+      body.projectId = projectId;
+      changes.push(`Project → ${projectName || "(cleared)"}`);
+    }
+    // change-logging fields (always logs the auto description; note optional)
+    body.logWorker = entry.worker;
+    body.logDate = entry.date;
+    body.changeDesc = changes.join("; ");
+    if (note.trim()) body.note = note.trim();
     await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3168,6 +3187,18 @@ function ReconEditModal({
         ) : (
           <div>
             <div className="text-concrete text-sm text-center mb-3">Save these changes?</div>
+            <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+              Reason (optional)
+            </label>
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. foreman miscounted"
+              className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-1"
+            />
+            <div className="text-rebar text-[11px] mb-3">
+              The change is logged either way; this adds context.
+            </div>
             <div className="flex gap-2">
               <button
                 onClick={() => setConfirm(false)}
@@ -3330,13 +3361,20 @@ function ReconReviewView({
     worker: string;
     date: string;
     job: string;
+    projectName: string;
+    projectId: string;
     hours: number;
     foreman: string;
+    notes: string;
+    voided: boolean;
+    voidNote: string;
   };
   const [missing, setMissing] = useState<Miss[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
-  const [bulkGroup, setBulkGroup] = useState<string | null>(null); // job name being set
+  const [bulkGroup, setBulkGroup] = useState<string | null>(null); // "job|date" key
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [editEntry, setEditEntry] = useState<Miss | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -3358,21 +3396,27 @@ function ReconReviewView({
     load();
   }, [load]);
 
-  // group missing entries by the foreman's typed job name (case-insensitive)
+  // One card per JOB NAME + DATE. Sorted by date, then job name.
   const groups = useMemo(() => {
     const m = new Map<string, Miss[]>();
     for (const e of missing) {
-      const key = (e.job || "(no job name)").trim();
+      const jobName = (e.job || "(no job name)").trim();
+      const key = `${jobName}|${e.date}`;
       if (!m.has(key)) m.set(key, []);
       m.get(key)!.push(e);
     }
     return Array.from(m.entries())
-      .map(([job, items]) => ({
-        job,
-        items,
-        workers: new Set(items.map((i) => i.worker)).size,
-      }))
-      .sort((a, b) => b.items.length - a.items.length);
+      .map(([key, items]) => {
+        const [job, date] = key.split("|");
+        return {
+          key,
+          job,
+          date,
+          items: items.slice().sort((a, b) => a.worker.localeCompare(b.worker)),
+          workers: new Set(items.map((i) => i.worker)).size,
+        };
+      })
+      .sort((a, b) => a.date.localeCompare(b.date) || a.job.localeCompare(b.job));
   }, [missing]);
 
   return (
@@ -3380,13 +3424,13 @@ function ReconReviewView({
       <div className="flex items-center gap-2 mb-1">
         <span className="text-safety font-bold text-sm">Needs real project</span>
         <span className="text-rebar text-xs">
-          {missing.length} {missing.length === 1 ? "entry" : "entries"} · {groups.length} job{" "}
-          {groups.length === 1 ? "name" : "names"}
+          {missing.length} {missing.length === 1 ? "entry" : "entries"} · {groups.length}{" "}
+          {groups.length === 1 ? "card" : "cards"}
         </span>
       </div>
       <div className="text-rebar text-xs mb-4">
-        These timecards have no real project set. Assign one per job name — it updates every entry in
-        that group at once.
+        These timecards have no real project set. Each card is one job on one day — assign the real
+        project and it updates every entry in that card. Tap a card to see the entries.
       </div>
 
       {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
@@ -3401,38 +3445,82 @@ function ReconReviewView({
       )}
 
       {!loading &&
-        groups.map((g) => (
-          <div key={g.job} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-concrete font-bold text-[15px]">"{g.job}"</div>
-                <div className="text-rebar text-xs mt-0.5">
-                  {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
-                  {g.workers === 1 ? "worker" : "workers"}
-                </div>
+        groups.map((g) => {
+          const open = !!expanded[g.key];
+          return (
+            <div key={g.key} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
+              <div className="flex items-start justify-between gap-3">
+                <button
+                  onClick={() => setExpanded((s) => ({ ...s, [g.key]: !s[g.key] }))}
+                  className="text-left flex-1"
+                >
+                  <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
+                    {prettyDate(g.date, lang)}
+                  </div>
+                  <div className="text-concrete font-bold text-[15px]">
+                    "{g.job}" <span className="text-rebar">{open ? "▾" : "▸"}</span>
+                  </div>
+                  <div className="text-rebar text-xs mt-0.5">
+                    {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
+                    {g.workers === 1 ? "worker" : "workers"}
+                  </div>
+                </button>
+                <button
+                  onClick={() => setBulkGroup(g.key)}
+                  className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
+                >
+                  Set project
+                </button>
               </div>
-              <button
-                onClick={() => setBulkGroup(g.job)}
-                className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
-              >
-                Set project
-              </button>
+
+              {open && (
+                <div className="mt-3 pt-3 border-t border-line space-y-2">
+                  {g.items.map((e) => (
+                    <div
+                      key={e.id}
+                      className="flex items-center justify-between gap-3 bg-steel/40 rounded-xl px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-concrete text-sm font-semibold truncate">{e.worker}</div>
+                        <div className="text-rebar text-xs">Foreman: {e.foreman || "—"}</div>
+                      </div>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <div className="text-concrete font-bold">{e.hours}h</div>
+                        <button
+                          onClick={() => setEditEntry(e)}
+                          className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
+                        >
+                          Edit
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-            {/* small preview of who/when */}
-            <div className="text-rebar text-xs mt-2 leading-relaxed">
-              {Array.from(new Set(g.items.map((i) => i.worker))).slice(0, 4).join(", ")}
-              {g.workers > 4 ? `, +${g.workers - 4} more` : ""}
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
       {bulkGroup && (
         <ReconBulkProjectModal
-          jobName={bulkGroup}
-          entries={groups.find((g) => g.job === bulkGroup)?.items || []}
+          jobName={groups.find((g) => g.key === bulkGroup)?.job || ""}
+          dateLabel={prettyDate(groups.find((g) => g.key === bulkGroup)?.date || "", lang)}
+          entries={groups.find((g) => g.key === bulkGroup)?.items || []}
           onClose={() => setBulkGroup(null)}
           onDone={() => {
             setBulkGroup(null);
+            load();
+          }}
+        />
+      )}
+
+      {editEntry && (
+        <ReconEditModal
+          entry={editEntry as any}
+          lang={lang}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => {
+            setEditEntry(null);
             load();
           }}
         />
@@ -3443,11 +3531,13 @@ function ReconReviewView({
 
 function ReconBulkProjectModal({
   jobName,
+  dateLabel,
   entries,
   onClose,
   onDone,
 }: {
   jobName: string;
+  dateLabel: string;
   entries: { id: string }[];
   onClose: () => void;
   onDone: () => void;
@@ -3502,7 +3592,7 @@ function ReconBulkProjectModal({
             </button>
           </div>
           <div className="text-rebar text-xs mb-2">
-            "{jobName}" · {entries.length} {entries.length === 1 ? "entry" : "entries"}
+            "{jobName}" · {dateLabel} · {entries.length} {entries.length === 1 ? "entry" : "entries"}
           </div>
           {!picked ? (
             <input

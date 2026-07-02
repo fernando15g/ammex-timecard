@@ -233,6 +233,23 @@ export async function POST(req: Request) {
       if (typeof projectId === "string")
         props[TIMECARD_PROPS.projectHelper] = { relation: projectId ? [{ id: projectId }] : [] };
       await notion.pages.update({ page_id: id, properties: props });
+
+      // Always log the change (auto description + optional note) to the
+      // Reconciliation Log — a durable activity trail. No name (sole admin).
+      const { logWorker, logDate, changeDesc, note } = body;
+      if (changeDesc && logWorker) {
+        try {
+          const full = note ? `${changeDesc} — ${note}` : changeDesc;
+          const lp: any = {
+            [RECON_PROPS.worker]: { title: [{ text: { content: logWorker } }] },
+            [RECON_PROPS.status]: { select: { name: "Fixed" } },
+            [RECON_PROPS.note]: { rich_text: [{ text: { content: full } }] },
+            [RECON_PROPS.refs]: { rich_text: [{ text: { content: id } }] },
+          };
+          if (logDate) lp[RECON_PROPS.date] = { date: { start: logDate } };
+          await notion.pages.create({ parent: { database_id: RECON_LOG_DB_ID }, properties: lp });
+        } catch { /* logging failure shouldn't block the edit */ }
+      }
       return NextResponse.json({ ok: true });
     }
 

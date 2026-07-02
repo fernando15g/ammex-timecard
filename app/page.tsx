@@ -2591,7 +2591,7 @@ function ReconPanel({
 
   const [entries, setEntries] = useState<ReconEntry[]>([]);
   const [flags, setFlags] = useState<Record<string, string[]>>({});
-  const [confirmed, setConfirmed] = useState<string[]>([]);
+  const [confirmed, setConfirmed] = useState<{ key: string; refs: string; pageId: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
   const [showVoided, setShowVoided] = useState(false);
@@ -2647,6 +2647,28 @@ function ReconPanel({
   function refreshAfterWrite() {
     search();
   }
+
+  const flagLabel = (f: string) => FLAG_LABEL[f] || f;
+
+  // The exact set of entry IDs that share a given flag on a given date
+  // (worker is fixed by the search). Used for strict "reviewed" matching.
+  function flagSetIds(date: string, flagCode: string): string {
+    return entries
+      .filter((e) => !e.voided && e.date === date && (flags[e.id] || []).includes(flagCode))
+      .map((e) => e.id)
+      .sort()
+      .join(",");
+  }
+
+  // A flag is "reviewed OK" only if a log record matches worker+date+kind AND
+  // the exact same entry set (Refs). Older records with empty Refs match on
+  // worker+date+kind alone (lean fallback), so nothing breaks.
+  function findReview(e: ReconEntry, f: string) {
+    const key = `${e.worker.toLowerCase()}|${e.date}|${flagLabel(f).toLowerCase()}`;
+    const setIds = flagSetIds(e.date, f);
+    return confirmed.find((c) => c.key === key && (c.refs === "" || c.refs === setIds));
+  }
+  const isFlagOk = (e: ReconEntry, f: string) => !!findReview(e, f);
 
   return (
     <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
@@ -2749,11 +2771,18 @@ function ReconPanel({
               entries.filter((e) => !e.voided).map((e) => {
                 const efl = flags[e.id] || [];
                 const displayName = e.projectName || e.job || "—";
+                const allOk = efl.length > 0 && efl.every((f) => isFlagOk(e, f));
+                const edge = efl.length
+                  ? allOk
+                    ? "4px solid #4a9e63"
+                    : "4px solid #e0a63b"
+                  : undefined;
+                const needsProject = !e.projectId;
                 return (
                   <div
                     key={e.id}
                     className="bg-graphite border border-line rounded-2xl p-4 mb-3"
-                    style={efl.length ? { borderLeft: "4px solid #e0a63b" } : undefined}
+                    style={edge ? { borderLeft: edge } : undefined}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -2768,14 +2797,24 @@ function ReconPanel({
                           )}
                         </div>
                       </div>
-                      <div className="text-concrete text-xl font-extrabold">{e.hours}h</div>
+                      <div className="flex flex-col items-end gap-1.5">
+                        <div className="text-concrete text-xl font-extrabold">{e.hours}h</div>
+                        {needsProject && (
+                          <button
+                            onClick={() => setEditEntry(e)}
+                            className="text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
+                            style={{ color: "#8fbcff", background: "rgba(47,115,216,.16)" }}
+                          >
+                            Set project ▸
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     {efl.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 mt-2 items-center">
                         {efl.map((f) => {
-                          const key = `${e.worker.toLowerCase()}|${e.date}|${(FLAG_LABEL[f] || f).toLowerCase()}`;
-                          const ok = confirmed.includes(key);
+                          const ok = isFlagOk(e, f);
                           return (
                             <span
                               key={f}
@@ -2786,20 +2825,17 @@ function ReconPanel({
                                   : { color: "#f0cf8f", background: "rgba(224,166,59,.16)" }
                               }
                             >
-                              {ok ? "✓" : "⚑"} {FLAG_LABEL[f] || f}
+                              {ok ? "✓" : "⚑"} {flagLabel(f)}
                             </span>
                           );
                         })}
-                        {/* Looks OK — only if any flag is not yet confirmed */}
-                        {efl.some(
-                          (f) =>
-                            !confirmed.includes(
-                              `${e.worker.toLowerCase()}|${e.date}|${(FLAG_LABEL[f] || f).toLowerCase()}`
-                            )
-                        ) && (
+                        {!allOk ? (
                           <button
                             onClick={async () => {
-                              for (const f of efl) {
+                              const toConfirm = efl.filter((f) => !isFlagOk(e, f));
+                              const optimistic: { key: string; refs: string; pageId: string }[] = [];
+                              for (const f of toConfirm) {
+                                const refs = flagSetIds(e.date, f);
                                 await fetch("/api/recon", {
                                   method: "POST",
                                   headers: { "Content-Type": "application/json" },
@@ -2807,24 +2843,45 @@ function ReconPanel({
                                     op: "log",
                                     worker: e.worker,
                                     date: e.date,
-                                    kind: FLAG_LABEL[f] || f,
+                                    kind: flagLabel(f),
                                     status: "Confirmed OK",
                                     note: displayName,
+                                    refs,
                                   }),
                                 });
+                                optimistic.push({
+                                  key: `${e.worker.toLowerCase()}|${e.date}|${flagLabel(f).toLowerCase()}`,
+                                  refs,
+                                  pageId: "pending",
+                                });
                               }
-                              // optimistic
-                              setConfirmed((c) => [
-                                ...c,
-                                ...efl.map(
-                                  (f) =>
-                                    `${e.worker.toLowerCase()}|${e.date}|${(FLAG_LABEL[f] || f).toLowerCase()}`
-                                ),
-                              ]);
+                              setConfirmed((c) => [...c, ...optimistic]);
                             }}
                             className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
                           >
                             Looks OK
+                          </button>
+                        ) : (
+                          <button
+                            onClick={async () => {
+                              // undo: archive each matching log record
+                              const toUndo = efl
+                                .map((f) => findReview(e, f))
+                                .filter((r): r is { key: string; refs: string; pageId: string } => !!r);
+                              for (const r of toUndo) {
+                                if (r.pageId && r.pageId !== "pending") {
+                                  await fetch("/api/recon", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ op: "unlog", pageId: r.pageId }),
+                                  });
+                                }
+                              }
+                              refreshAfterWrite();
+                            }}
+                            className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
+                          >
+                            Undo OK
                           </button>
                         )}
                       </div>

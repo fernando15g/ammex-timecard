@@ -64,9 +64,10 @@ export const RECON_LOG_DB_ID = "3919aeba538380cbab67c636dcdb5b32";
 export const RECON_PROPS = {
   worker: "Worker", // Title
   date: "Date", // Date
-  kind: "Kind", // Select: No timecard / Different job / Not scheduled / Wrong foreman / Duplicate
-  status: "Status", // Select: No-show / Confirmed OK / Fixed
+  kind: "Kind", // Select
+  status: "Status", // Select
   note: "Note", // Text (rich_text)
+  refs: "Refs", // Text (rich_text) — entry IDs this outcome applies to (strict match)
   loggedAt: "Logged at", // Created time
 };
 

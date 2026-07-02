@@ -114,8 +114,10 @@ function computeFlags(entries: TCEntry[]) {
   return flags;
 }
 
-async function confirmedKeys(startISO: string, endISO: string): Promise<string[]> {
-  const keys: string[] = [];
+async function confirmedReviews(startISO: string, endISO: string): Promise<
+  { key: string; refs: string; pageId: string }[]
+> {
+  const out: { key: string; refs: string; pageId: string }[] = [];
   let cursor: string | undefined;
   try {
     do {
@@ -136,12 +138,13 @@ async function confirmedKeys(startISO: string, endISO: string): Promise<string[]
         const w = (p[RECON_PROPS.worker]?.title || []).map((t: any) => t.plain_text).join("").trim();
         const d = p[RECON_PROPS.date]?.date?.start?.slice(0, 10) || "";
         const k = p[RECON_PROPS.kind]?.select?.name || "";
-        if (w && d && k) keys.push(`${w.toLowerCase()}|${d}|${k.toLowerCase()}`);
+        const refs = rt(p[RECON_PROPS.refs]);
+        if (w && d && k) out.push({ key: `${w.toLowerCase()}|${d}|${k.toLowerCase()}`, refs, pageId: pg.id });
       }
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
   } catch { /* log may be empty */ }
-  return keys;
+  return out;
 }
 
 export async function GET(req: Request) {
@@ -197,7 +200,7 @@ export async function GET(req: Request) {
 
     const entries = await queryEntries(start, end, worker);
     const flags = computeFlags(entries);
-    const confirmed = await confirmedKeys(start, end);
+    const confirmed = await confirmedReviews(start, end);
     entries.sort((a, b) => a.date.localeCompare(b.date) || a.worker.localeCompare(b.worker));
     return NextResponse.json({ ok: true, entries, flags, confirmed });
   } catch (err: any) {
@@ -249,7 +252,7 @@ export async function POST(req: Request) {
     }
 
     if (op === "log") {
-      const { worker, date, kind, status, note } = body;
+      const { worker, date, kind, status, note, refs } = body;
       const props: any = {
         [RECON_PROPS.worker]: { title: [{ text: { content: worker } }] },
         [RECON_PROPS.kind]: { select: { name: kind } },
@@ -257,7 +260,15 @@ export async function POST(req: Request) {
       };
       if (date) props[RECON_PROPS.date] = { date: { start: date } };
       if (note) props[RECON_PROPS.note] = { rich_text: [{ text: { content: note } }] };
+      if (refs) props[RECON_PROPS.refs] = { rich_text: [{ text: { content: refs } }] };
       await notion.pages.create({ parent: { database_id: RECON_LOG_DB_ID }, properties: props });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "unlog") {
+      // Undo a review — archive (soft-delete) the log record.
+      const { pageId } = body;
+      await notion.pages.update({ page_id: pageId, archived: true });
       return NextResponse.json({ ok: true });
     }
 

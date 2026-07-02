@@ -3060,6 +3060,19 @@ function ReconEditModal({
   const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
   const [projPickerOpen, setProjPickerOpen] = useState(false);
   const [projQuery, setProjQuery] = useState("");
+  // foreman picker (roster, excluding rodbusters)
+  const [foremen, setForemen] = useState<string[]>([]);
+  const [fmPickerOpen, setFmPickerOpen] = useState(false);
+  const [fmQuery, setFmQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=foremen")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.foremen)) setForemen(d.foremen);
+      })
+      .catch(() => {});
+  }, []);
+  const filteredForemen = foremen.filter((f) => f.toLowerCase().includes(fmQuery.toLowerCase()));
   useEffect(() => {
     fetch("/api/recon?action=projects")
       .then((r) => r.json())
@@ -3170,11 +3183,18 @@ function ReconEditModal({
           className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
         />
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Foreman</label>
-        <input
-          value={foreman}
-          onChange={(e) => setForeman(e.target.value)}
-          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
-        />
+        <button
+          onClick={() => {
+            setFmPickerOpen(true);
+            setFmQuery("");
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+        >
+          <span className={foreman ? "text-concrete" : "text-rebar"}>
+            {foreman || "Pick a foreman…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
 
         {!confirm ? (
           <button
@@ -3262,6 +3282,55 @@ function ReconEditModal({
                 </button>
               ))}
               {filteredProjects.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Foreman picker (roster, excluding rodbusters) */}
+      {fmPickerOpen && (
+        <div
+          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setFmPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick foreman</div>
+                <button
+                  onClick={() => setFmPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={fmQuery}
+                onChange={(ev) => setFmQuery(ev.target.value)}
+                placeholder="Search a foreman…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredForemen.map((f) => (
+                <button
+                  key={f}
+                  onClick={() => {
+                    setForeman(f);
+                    setFmPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete"
+                >
+                  {f}
+                </button>
+              ))}
+              {filteredForemen.length === 0 && (
                 <div className="text-rebar text-sm px-3 py-3">No matches.</div>
               )}
             </div>

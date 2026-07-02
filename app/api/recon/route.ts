@@ -172,6 +172,28 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, workers: names });
     }
 
+    if (action === "foremen") {
+      // Active roster excluding Rodbusters — for the foreman picker.
+      const names: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const res: any = await notion.databases.query({
+          database_id: CREW_ROSTER_DB_ID,
+          filter: { property: ROSTER_PROPS.active, checkbox: { equals: true } },
+          start_cursor: cursor,
+          page_size: 100,
+        });
+        res.results.forEach((pg: any) => {
+          const n = rt(pg.properties?.[ROSTER_PROPS.name]);
+          const role = rt(pg.properties?.[ROSTER_PROPS.role]);
+          if (n && role.toLowerCase() !== "rodbuster") names.push(n);
+        });
+        cursor = res.has_more ? res.next_cursor : undefined;
+      } while (cursor);
+      names.sort((a, b) => a.localeCompare(b));
+      return NextResponse.json({ ok: true, foremen: names });
+    }
+
     if (action === "projects") {
       const jobs: { id: string; name: string; jobId: string }[] = [];
       let cursor: string | undefined;

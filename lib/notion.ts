@@ -55,6 +55,19 @@ export const TIMECARD_PROPS = {
   notes: "Notes", // Text (rich_text)
   projectHelper: "Project Helper", // Relation/rollup — clean project name
   jobIdHelper: "Job ID Helper", // Rollup — clean job ID (text, e.g. "26-4")
+  voided: "Voided", // Checkbox — void-not-delete for duplicates/corrections
+  voidNote: "Void note", // Text (rich_text) — why it was voided
+};
+
+// Reconciliation Log — durable record of outcomes (no-show / confirmed / fixed).
+export const RECON_LOG_DB_ID = "3919aeba538380cbab67c636dcdb5b32";
+export const RECON_PROPS = {
+  worker: "Worker", // Title
+  date: "Date", // Date
+  kind: "Kind", // Select: No timecard / Different job / Not scheduled / Wrong foreman / Duplicate
+  status: "Status", // Select: No-show / Confirmed OK / Fixed
+  note: "Note", // Text (rich_text)
+  loggedAt: "Logged at", // Created time
 };
 
 export const PAYROLL_RECIPIENT = "fernando@ammexrebar.com";

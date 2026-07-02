@@ -74,6 +74,7 @@ export default function Page() {
   const [searchFocused, setSearchFocused] = useState(false);
   const [showReports, setShowReports] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
+  const [showRecon, setShowRecon] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   // PIN gates the hamburger (admin area); unlock lasts the session so Reports
   // and Schedule share one entry.
@@ -1005,6 +1006,19 @@ export default function Page() {
                   </svg>
                   {tr.scheduleTitle}
                 </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowRecon(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 11l3 3L22 4" />
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                  </svg>
+                  {tr.reconTitle}
+                </button>
               </>
             )}
           </div>
@@ -1026,6 +1040,15 @@ export default function Page() {
           tr={tr}
           pin={adminUnlocked ? "5314" : ""}
           onClose={() => setShowSchedule(false)}
+        />
+      )}
+
+      {/* Reconciliation panel */}
+      {showRecon && (
+        <ReconPanel
+          tr={tr}
+          lang={lang}
+          onClose={() => setShowRecon(false)}
         />
       )}
     </div>
@@ -2485,4 +2508,578 @@ function prettyDate(iso: string, lang: Lang) {
   const day = (lang === "es" ? daysEs : daysEn)[dow];
   const mo = (lang === "es" ? monthsEs : monthsEn)[m - 1];
   return `${day}, ${d} ${mo} ${y}`;
+}
+
+// ============================================================================
+// Reconciliation cockpit — admin tool with two views (Find + Review).
+// Find: pull up any worker, see their timecard entries + flags, edit/void/note.
+// Review: schedule-vs-actual discrepancies (built next stage).
+// ============================================================================
+
+type ReconEntry = {
+  id: string;
+  worker: string;
+  date: string;
+  job: string;
+  hours: number;
+  foreman: string;
+  notes: string;
+  voided: boolean;
+  voidNote: string;
+};
+
+function isoAddDays(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return dt.toISOString().slice(0, 10);
+}
+function mondayOf(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun
+  const back = (dow + 6) % 7; // days since Monday
+  return isoAddDays(iso, -back);
+}
+
+const FLAG_LABEL: Record<string, string> = {
+  duplicate: "Duplicate",
+  multi_job: "Two jobs same day",
+  over_hours: "Over 11 hrs that day",
+  single_high: "High hours",
+};
+
+function ReconPanel({
+  tr,
+  lang,
+  onClose,
+}: {
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  const today = (() => {
+    const d = new Date();
+    const off = d.getTimezoneOffset();
+    return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+  })();
+
+  const [view, setView] = useState<"find" | "review">("find");
+
+  // date range
+  const [rangeMode, setRangeMode] = useState<"this" | "last" | "custom">("this");
+  const [customStart, setCustomStart] = useState(today);
+  const [customEnd, setCustomEnd] = useState(today);
+
+  const { start, end } = useMemo(() => {
+    if (rangeMode === "this") {
+      const mon = mondayOf(today);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    if (rangeMode === "last") {
+      const mon = isoAddDays(mondayOf(today), -7);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    return { start: customStart, end: customEnd };
+  }, [rangeMode, customStart, customEnd, today]);
+
+  // worker search
+  const [workers, setWorkers] = useState<string[]>([]);
+  const [worker, setWorker] = useState<string>("");
+  const [workerQuery, setWorkerQuery] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const [entries, setEntries] = useState<ReconEntry[]>([]);
+  const [flags, setFlags] = useState<Record<string, string[]>>({});
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  // load roster once
+  useEffect(() => {
+    fetch("/api/recon?action=roster")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.workers)) setWorkers(d.workers);
+      })
+      .catch(() => {});
+  }, []);
+
+  const search = useCallback(() => {
+    if (!worker) return;
+    setLoading(true);
+    setMsg("");
+    const url = `/api/recon?start=${start}&end=${end}&worker=${encodeURIComponent(worker)}`;
+    fetch(url)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setEntries(d.entries || []);
+          setFlags(d.flags || {});
+          if ((d.entries || []).length === 0) setMsg("No timecards for this worker in that range.");
+        } else {
+          setMsg(d?.error || "Search failed.");
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        setMsg("Search failed.");
+        setLoading(false);
+      });
+  }, [worker, start, end]);
+
+  // auto-search when worker or range changes
+  useEffect(() => {
+    if (worker) search();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worker, start, end]);
+
+  const filteredWorkers = workers.filter((w) =>
+    w.toLowerCase().includes(workerQuery.toLowerCase())
+  );
+
+  // ---- edit / void / note modals ----
+  const [editEntry, setEditEntry] = useState<ReconEntry | null>(null);
+  const [voidEntry, setVoidEntry] = useState<ReconEntry | null>(null);
+
+  function refreshAfterWrite() {
+    search();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
+      <div className="max-w-3xl mx-auto p-4 pb-28">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          <div className="w-9" />
+          <div className="font-bold text-concrete text-lg">{tr.reconTitle}</div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center text-lg active:text-safety"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Toggle */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-5">
+          <button
+            onClick={() => setView("review")}
+            className={`flex-1 rounded-full py-2.5 text-sm font-bold ${
+              view === "review" ? "bg-safety text-steel" : "text-rebar"
+            }`}
+          >
+            Review
+          </button>
+          <button
+            onClick={() => setView("find")}
+            className={`flex-1 rounded-full py-2.5 text-sm font-bold ${
+              view === "find" ? "bg-safety text-steel" : "text-rebar"
+            }`}
+          >
+            Find
+          </button>
+        </div>
+
+        {view === "find" ? (
+          <>
+            {/* Range selector */}
+            <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+              {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(
+                ([k, label]) => (
+                  <button
+                    key={k}
+                    onClick={() => setRangeMode(k)}
+                    className={`flex-1 rounded-full py-2 text-xs font-bold ${
+                      rangeMode === k ? "bg-steel text-concrete border border-line" : "text-rebar"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                )
+              )}
+            </div>
+            {rangeMode === "custom" && (
+              <div className="flex items-center gap-2 mb-3">
+                <input
+                  type="date"
+                  value={customStart}
+                  max={today}
+                  onChange={(e) => setCustomStart(e.target.value)}
+                  className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+                />
+                <span className="text-rebar text-sm">to</span>
+                <input
+                  type="date"
+                  value={customEnd}
+                  max={today}
+                  onChange={(e) => setCustomEnd(e.target.value)}
+                  className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+                />
+              </div>
+            )}
+
+            {/* Worker picker */}
+            <button
+              onClick={() => {
+                setPickerOpen(true);
+                setWorkerQuery("");
+              }}
+              className="w-full bg-graphite border border-line rounded-xl h-12 px-4 text-left mb-4 flex items-center justify-between"
+            >
+              <span className={worker ? "text-concrete font-semibold" : "text-rebar"}>
+                {worker || "Search a worker…"}
+              </span>
+              <span className="text-rebar">▾</span>
+            </button>
+
+            {/* Results */}
+            {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
+            {!loading && msg && <div className="text-rebar text-sm px-1 py-2">{msg}</div>}
+            {!loading && worker && entries.length > 0 && (
+              <div className="text-rebar text-xs mb-2 px-1">
+                {entries.length} {entries.length === 1 ? "entry" : "entries"} · {prettyDate(start, lang).split(",")[1]?.trim() || start} – {prettyDate(end, lang).split(",")[1]?.trim() || end}
+              </div>
+            )}
+
+            {!loading &&
+              entries.map((e) => {
+                const efl = flags[e.id] || [];
+                return (
+                  <div
+                    key={e.id}
+                    className={`bg-graphite border border-line rounded-2xl p-4 mb-3 ${
+                      e.voided ? "opacity-50" : ""
+                    } ${efl.length ? "border-l-4 border-l-amber-500" : ""}`}
+                    style={efl.length ? { borderLeftColor: "#e0a63b" } : undefined}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-concrete font-bold">
+                          {e.job || "—"}{" "}
+                          {e.voided && (
+                            <span className="text-rebar text-xs font-normal">(voided)</span>
+                          )}
+                        </div>
+                        <div className="text-rebar text-xs mt-0.5">
+                          {prettyDate(e.date, lang)} · Foreman: {e.foreman || "—"}
+                        </div>
+                      </div>
+                      <div className="text-concrete text-xl font-extrabold">{e.hours}h</div>
+                    </div>
+
+                    {/* flags */}
+                    {efl.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {efl.map((f) => (
+                          <span
+                            key={f}
+                            className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+                            style={{ color: "#f0cf8f", background: "rgba(224,166,59,.16)" }}
+                          >
+                            ⚑ {FLAG_LABEL[f] || f}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {e.voided && e.voidNote && (
+                      <div className="text-rebar text-xs italic mt-2">Void note: {e.voidNote}</div>
+                    )}
+
+                    {/* actions */}
+                    <div className="flex gap-2 mt-3 flex-wrap">
+                      {!e.voided ? (
+                        <>
+                          <button
+                            onClick={() => setEditEntry(e)}
+                            className="bg-graphite border border-line text-concrete rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => setVoidEntry(e)}
+                            className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                          >
+                            Void
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          onClick={async () => {
+                            await fetch("/api/recon", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ op: "void", id: e.id, voided: false, note: "" }),
+                            });
+                            refreshAfterWrite();
+                          }}
+                          className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                        >
+                          Un-void
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+          </>
+        ) : (
+          /* Review view — built in the next stage */
+          <div className="text-center text-rebar mt-16 px-6">
+            <div className="text-concrete font-bold text-lg mb-2">Review — coming next</div>
+            <div className="text-sm">
+              The schedule-vs-actual reconciliation view is the next build stage. For now, use{" "}
+              <span className="text-concrete font-semibold">Find</span> to pull up any worker and
+              fix or void their entries directly.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Worker picker modal */}
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 z-[65] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Find worker</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={workerQuery}
+                onChange={(ev) => setWorkerQuery(ev.target.value)}
+                placeholder="Type a name…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredWorkers.map((w) => (
+                <button
+                  key={w}
+                  onClick={() => {
+                    setWorker(w);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete"
+                >
+                  {w}
+                </button>
+              ))}
+              {filteredWorkers.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit modal */}
+      {editEntry && (
+        <ReconEditModal
+          entry={editEntry}
+          lang={lang}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => {
+            setEditEntry(null);
+            refreshAfterWrite();
+          }}
+        />
+      )}
+
+      {/* Void modal */}
+      {voidEntry && (
+        <ReconVoidModal
+          entry={voidEntry}
+          lang={lang}
+          onClose={() => setVoidEntry(null)}
+          onSaved={() => {
+            setVoidEntry(null);
+            refreshAfterWrite();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReconEditModal({
+  entry,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  entry: ReconEntry;
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [hours, setHours] = useState(String(entry.hours));
+  const [job, setJob] = useState(entry.job);
+  const [foreman, setForeman] = useState(entry.foreman);
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+
+  const changed =
+    parseFloat(hours) !== entry.hours || job !== entry.job || foreman !== entry.foreman;
+
+  async function save() {
+    setSaving(true);
+    const body: any = { op: "edit", id: entry.id };
+    const h = parseFloat(hours);
+    if (!isNaN(h) && h !== entry.hours) body.hours = h;
+    if (job !== entry.job) body.job = job;
+    if (foreman !== entry.foreman) body.foreman = foreman;
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Edit timecard</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {prettyDate(entry.date, lang)}
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Job</label>
+        <input
+          value={job}
+          onChange={(e) => setJob(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Foreman</label>
+        <input
+          value={foreman}
+          onChange={(e) => setForeman(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+
+        {!confirm ? (
+          <button
+            disabled={!changed}
+            onClick={() => setConfirm(true)}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Save changes
+          </button>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">Save these changes?</div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirm(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={saving}
+                onClick={save}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Saving…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReconVoidModal({
+  entry,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  entry: ReconEntry;
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function doVoid() {
+    setSaving(true);
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "void", id: entry.id, voided: true, note }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Void this entry</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {entry.job} · {entry.hours}h · {prettyDate(entry.date, lang)}
+        </div>
+        <div className="text-rebar text-sm mb-3">
+          The entry stays on record but is ignored by reports. You can un-void it anytime.
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Why? (optional)
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. duplicate of the 8h entry"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={saving}
+            onClick={doVoid}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+          >
+            {saving ? "Voiding…" : "Void entry"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

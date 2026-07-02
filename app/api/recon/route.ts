@@ -8,6 +8,8 @@ import {
   ROSTER_PROPS,
   PROJECTS_DB_ID,
   PROJECT_PROPS,
+  SCHEDULE_DB_ID,
+  SCHEDULE_PROPS,
   RECON_LOG_DB_ID,
   RECON_PROPS,
 } from "@/lib/notion";
@@ -147,6 +149,214 @@ async function confirmedReviews(startISO: string, endISO: string): Promise<
   return out;
 }
 
+// --- Schedule vs. actual reconciliation ---
+
+type SchedRow = {
+  worker: string;
+  date: string;
+  jobId: string;
+  jobName: string;
+  isLead: boolean;
+};
+
+async function querySchedule(startISO: string, endISO: string): Promise<SchedRow[]> {
+  const out: SchedRow[] = [];
+  let cursor: string | undefined;
+  do {
+    const res: any = await notion.databases.query({
+      database_id: SCHEDULE_DB_ID,
+      filter: {
+        and: [
+          { property: SCHEDULE_PROPS.date, date: { on_or_after: startISO } },
+          { property: SCHEDULE_PROPS.date, date: { on_or_before: endISO } },
+        ],
+      },
+      start_cursor: cursor,
+      page_size: 100,
+    });
+    for (const pg of res.results) {
+      const p = pg.properties || {};
+      out.push({
+        worker: rt(p[SCHEDULE_PROPS.worker]),
+        date: p[SCHEDULE_PROPS.date]?.date?.start?.slice(0, 10) || "",
+        jobId: relIds(p[SCHEDULE_PROPS.job])[0] || "",
+        jobName: "",
+        isLead: !!p[SCHEDULE_PROPS.isLead]?.checkbox,
+      });
+    }
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+  const nmeMap = await resolveProjectNames(out.map((s) => s.jobId).filter(Boolean));
+  out.forEach((s) => { if (s.jobId) s.jobName = nmeMap.get(s.jobId) || ""; });
+  return out;
+}
+
+function daysAgo(dateISO: string, todayISO: string): number {
+  const a = Date.parse(dateISO + "T00:00:00Z");
+  const b = Date.parse(todayISO + "T00:00:00Z");
+  return Math.round((b - a) / 86400000);
+}
+
+// Compute schedule-vs-actual discrepancies.
+async function reconcile(startISO: string, endISO: string, todayISO: string) {
+  const [sched, cards] = await Promise.all([
+    querySchedule(startISO, endISO),
+    queryEntries(startISO, endISO),
+  ]);
+  const live = cards.filter((c) => !c.voided);
+
+  // scheduled foreman (lead) per job+date
+  const leadByJobDate = new Map<string, string>();
+  for (const s of sched) {
+    if (s.isLead) leadByJobDate.set(`${s.jobId}|${s.date}`, s.worker);
+  }
+
+  // index timecards by worker+date
+  const tcByWD = new Map<string, typeof live>();
+  for (const c of live) {
+    const k = `${c.worker.toLowerCase()}|${c.date}`;
+    if (!tcByWD.has(k)) tcByWD.set(k, []);
+    tcByWD.get(k)!.push(c);
+  }
+  // index schedule by worker+date
+  const schedByWD = new Map<string, SchedRow[]>();
+  for (const s of sched) {
+    const k = `${s.worker.toLowerCase()}|${s.date}`;
+    if (!schedByWD.has(k)) schedByWD.set(k, []);
+    schedByWD.get(k)!.push(s);
+  }
+
+  type Disc = {
+    kind: string; // No timecard / Different job / Not scheduled / Wrong foreman
+    severity: "attention" | "pending" | "glance";
+    worker: string;
+    date: string;
+    scheduledJob: string;
+    scheduledForeman: string;
+    loggedJob: string;
+    loggedForeman: string;
+    hours: number;
+  };
+  const discs: Disc[] = [];
+
+  // 1 & 2 & 4: iterate schedule assignments
+  const seenWD = new Set<string>();
+  for (const [wd, rows] of schedByWD) {
+    seenWD.add(wd);
+    const s = rows[0]; // a worker on a date (use first scheduled job)
+    const tcs = tcByWD.get(wd) || [];
+    if (tcs.length === 0) {
+      // scheduled but no timecard — skip future dates
+      const ago = daysAgo(s.date, todayISO);
+      if (ago < 0) continue;
+      const scheduledForeman = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
+      discs.push({
+        kind: "No timecard",
+        severity: ago >= 2 ? "attention" : "pending",
+        worker: s.worker,
+        date: s.date,
+        scheduledJob: s.jobName || "(job)",
+        scheduledForeman,
+        loggedJob: "",
+        loggedForeman: "",
+        hours: 0,
+      });
+      continue;
+    }
+    // logged something — check job & foreman against schedule
+    const schedJobIds = new Set(rows.map((r) => r.jobId));
+    for (const tc of tcs) {
+      const scheduledForeman = leadByJobDate.get(`${tc.projectId}|${tc.date}`) ||
+        leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
+      if (tc.projectId && !schedJobIds.has(tc.projectId)) {
+        // different job (only when the timecard has a real project)
+        discs.push({
+          kind: "Different job",
+          severity: "glance",
+          worker: tc.worker,
+          date: tc.date,
+          scheduledJob: rows.map((r) => r.jobName).filter(Boolean).join(", ") || "(job)",
+          scheduledForeman,
+          loggedJob: tc.projectName || tc.job,
+          loggedForeman: tc.foreman,
+          hours: tc.hours,
+        });
+      } else {
+        // same job (or unverifiable) — check foreman
+        if (
+          scheduledForeman &&
+          tc.foreman &&
+          scheduledForeman.toLowerCase() !== tc.foreman.toLowerCase()
+        ) {
+          discs.push({
+            kind: "Wrong foreman",
+            severity: "glance",
+            worker: tc.worker,
+            date: tc.date,
+            scheduledJob: tc.projectName || tc.job || (s.jobName || "(job)"),
+            scheduledForeman,
+            loggedJob: tc.projectName || tc.job,
+            loggedForeman: tc.foreman,
+            hours: tc.hours,
+          });
+        }
+      }
+    }
+  }
+
+  // 3: logged but not scheduled
+  for (const [wd, tcs] of tcByWD) {
+    if (seenWD.has(wd)) continue;
+    for (const tc of tcs) {
+      discs.push({
+        kind: "Not scheduled",
+        severity: "glance",
+        worker: tc.worker,
+        date: tc.date,
+        scheduledJob: "",
+        scheduledForeman: "",
+        loggedJob: tc.projectName || tc.job,
+        loggedForeman: tc.foreman,
+        hours: tc.hours,
+      });
+    }
+  }
+
+  // filter out resolved discrepancies (no-show / confirmed / fixed in the log)
+  const resolved = new Set<string>();
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: RECON_LOG_DB_ID,
+        filter: {
+          and: [
+            { property: RECON_PROPS.date, date: { on_or_after: startISO } },
+            { property: RECON_PROPS.date, date: { on_or_before: endISO } },
+          ],
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const p = pg.properties || {};
+        const w = (p[RECON_PROPS.worker]?.title || []).map((t: any) => t.plain_text).join("").trim();
+        const d = p[RECON_PROPS.date]?.date?.start?.slice(0, 10) || "";
+        const k = p[RECON_PROPS.kind]?.select?.name || "";
+        const st = p[RECON_PROPS.status]?.select?.name || "";
+        if (w && d && k && st) resolved.add(`${w.toLowerCase()}|${d}|${k.toLowerCase()}`);
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch { /* ignore */ }
+
+  const open = discs.filter(
+    (x) => !resolved.has(`${x.worker.toLowerCase()}|${x.date}|${x.kind.toLowerCase()}`)
+  );
+  open.sort((a, b) => a.date.localeCompare(b.date) || a.worker.localeCompare(b.worker));
+  return open;
+}
+
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
@@ -223,6 +433,15 @@ export async function GET(req: Request) {
       const all = await queryEntries(s, e2);
       const missing = all.filter((x) => !x.voided && !x.projectId);
       return NextResponse.json({ ok: true, entries: missing });
+    }
+
+    if (action === "reconcile") {
+      const s = url.searchParams.get("start") || "";
+      const e2 = url.searchParams.get("end") || s;
+      const today = url.searchParams.get("today") || s;
+      if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
+      const discrepancies = await reconcile(s, e2, today);
+      return NextResponse.json({ ok: true, discrepancies });
     }
 
     const start = url.searchParams.get("start") || "";

@@ -3445,6 +3445,29 @@ function ReconReviewView({
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Miss | null>(null);
 
+  // schedule-vs-actual discrepancies
+  type Disc = {
+    kind: string;
+    severity: "attention" | "pending" | "glance";
+    worker: string;
+    date: string;
+    scheduledJob: string;
+    scheduledForeman: string;
+    loggedJob: string;
+    loggedForeman: string;
+    hours: number;
+  };
+  const [discs, setDiscs] = useState<Disc[]>([]);
+  const [discLoading, setDiscLoading] = useState(false);
+  const [noShowFor, setNoShowFor] = useState<Disc | null>(null);
+  const [addFor, setAddFor] = useState<Disc | null>(null);
+
+  const today = (() => {
+    const d = new Date();
+    const off = d.getTimezoneOffset();
+    return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+  })();
+
   const load = useCallback(() => {
     setLoading(true);
     setMsg("");
@@ -3464,6 +3487,40 @@ function ReconReviewView({
   useEffect(() => {
     load();
   }, [load]);
+
+  const loadDiscs = useCallback(() => {
+    setDiscLoading(true);
+    fetch(`/api/recon?action=reconcile&start=${start}&end=${end}&today=${today}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) setDiscs(d.discrepancies || []);
+        setDiscLoading(false);
+      })
+      .catch(() => setDiscLoading(false));
+  }, [start, end, today]);
+
+  useEffect(() => {
+    loadDiscs();
+  }, [loadDiscs]);
+
+  // resolve a discrepancy: log outcome + drop it from the list
+  async function resolveDisc(d: Disc, status: string, note: string) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "log",
+        worker: d.worker,
+        date: d.date,
+        kind: d.kind,
+        status,
+        note,
+      }),
+    });
+    setDiscs((cur) =>
+      cur.filter((x) => !(x.worker === d.worker && x.date === d.date && x.kind === d.kind))
+    );
+  }
 
   // One card per JOB NAME + DATE. Sorted by date, then job name.
   const groups = useMemo(() => {
@@ -3618,6 +3675,132 @@ function ReconReviewView({
           </div>
         ))}
 
+      {/* ---- Schedule vs. actual reconciliation ---- */}
+      <div className="mt-8 mb-3 pt-5 border-t border-line">
+        <div className="text-concrete font-bold text-base mb-1">Schedule vs. actual</div>
+        <div className="text-rebar text-xs">
+          Who was scheduled but didn't log, logged a different job, wasn't scheduled, or logged under
+          a different foreman.
+        </div>
+      </div>
+
+      {discLoading && <div className="text-rebar text-sm px-1">Checking…</div>}
+
+      {!discLoading && discs.length === 0 && (
+        <div className="bg-graphite border border-line rounded-2xl p-6 text-center">
+          <div className="text-concrete font-bold mb-1">All matched ✓</div>
+          <div className="text-rebar text-sm">
+            Everything scheduled lines up with what was logged in this range.
+          </div>
+        </div>
+      )}
+
+      {!discLoading &&
+        (
+          [
+            ["attention", "Needs attention", "#e5533c"],
+            ["pending", "Pending", "#9aa3af"],
+            ["glance", "Worth a glance", "#e0a63b"],
+          ] as const
+        ).map(([sev, label, color]) => {
+          const items = discs.filter((d) => d.severity === sev);
+          if (items.length === 0) return null;
+          return (
+            <div key={sev} className="mb-5">
+              <div className="flex items-center gap-2 mb-2 px-1">
+                <span className="text-xs font-bold uppercase tracking-wider" style={{ color }}>
+                  {label}
+                </span>
+                <span className="text-rebar text-xs">{items.length}</span>
+              </div>
+              {items.map((d, i) => (
+                <div
+                  key={`${d.worker}|${d.date}|${d.kind}|${i}`}
+                  className="bg-graphite border border-line rounded-2xl p-4 mb-3"
+                  style={{ borderLeft: `4px solid ${color}` }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
+                        {prettyDate(d.date, lang)}
+                      </div>
+                      <div className="text-concrete font-bold text-[15px]">{d.worker}</div>
+                      <div
+                        className="inline-block text-[11px] font-bold px-2 py-0.5 rounded-full mt-1"
+                        style={{ color, background: `${color}22` }}
+                      >
+                        {d.kind === "No timecard"
+                          ? sev === "pending"
+                            ? "No hours yet"
+                            : "No timecard"
+                          : d.kind}
+                      </div>
+                    </div>
+                    {d.hours > 0 && (
+                      <div className="text-concrete text-lg font-extrabold">{d.hours}h</div>
+                    )}
+                  </div>
+
+                  {/* scheduled vs logged comparison */}
+                  <div className="mt-3 pt-3 border-t border-line space-y-1.5 text-sm">
+                    {d.scheduledJob && (
+                      <div className="flex gap-3">
+                        <span className="text-rebar text-xs font-bold uppercase w-20 pt-0.5">
+                          Scheduled
+                        </span>
+                        <span className="text-concrete flex-1">
+                          {d.scheduledJob}
+                          {d.scheduledForeman && (
+                            <span className="text-rebar"> · {d.scheduledForeman}</span>
+                          )}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex gap-3">
+                      <span className="text-rebar text-xs font-bold uppercase w-20 pt-0.5">
+                        Logged
+                      </span>
+                      <span className={d.loggedJob ? "text-concrete flex-1" : "text-rebar italic flex-1"}>
+                        {d.loggedJob
+                          ? `${d.loggedJob}${d.loggedForeman ? ` · ${d.loggedForeman}` : ""}`
+                          : "nothing logged"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* actions per kind */}
+                  <div className="flex gap-2 mt-3 flex-wrap">
+                    {d.kind === "No timecard" ? (
+                      <>
+                        <button
+                          onClick={() => setAddFor(d)}
+                          className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold"
+                        >
+                          Add timecard
+                        </button>
+                        <button
+                          onClick={() => setNoShowFor(d)}
+                          className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                        >
+                          No-show
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => resolveDisc(d, "Confirmed OK", "")}
+                        className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                        style={{ color: "#9fdcb4" }}
+                      >
+                        Looks right
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+
       {bulkGroup && (
         <ReconBulkProjectModal
           jobName={groups.find((g) => g.key === bulkGroup)?.job || ""}
@@ -3639,6 +3822,30 @@ function ReconReviewView({
           onSaved={() => {
             setEditEntry(null);
             load();
+          }}
+        />
+      )}
+
+      {noShowFor && (
+        <ReconNoShowModal
+          disc={noShowFor}
+          lang={lang}
+          onClose={() => setNoShowFor(null)}
+          onDone={(note) => {
+            resolveDisc(noShowFor, "No-show", note);
+            setNoShowFor(null);
+          }}
+        />
+      )}
+
+      {addFor && (
+        <ReconAddModal
+          disc={addFor}
+          lang={lang}
+          onClose={() => setAddFor(null)}
+          onDone={() => {
+            setAddFor(null);
+            loadDiscs();
           }}
         />
       )}
@@ -3764,6 +3971,149 @@ function ReconBulkProjectModal({
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// No-show: record that a scheduled worker didn't report (resolves the flag).
+function ReconNoShowModal({
+  disc,
+  lang,
+  onClose,
+  onDone,
+}: {
+  disc: { worker: string; date: string; scheduledJob: string; scheduledForeman: string };
+  lang: Lang;
+  onClose: () => void;
+  onDone: (note: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Mark no-show</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {disc.worker} · {prettyDate(disc.date, lang)} · {disc.scheduledJob}
+        </div>
+        <div className="text-rebar text-sm mb-3">
+          Records that this scheduled worker didn't report. It resolves the flag and stays on record.
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Note (optional)
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. called out sick"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onDone(note.trim())}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+          >
+            Mark no-show
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Add a missing timecard (deliberate — not auto-filled), pre-seeded from the schedule.
+function ReconAddModal({
+  disc,
+  lang,
+  onClose,
+  onDone,
+}: {
+  disc: {
+    worker: string;
+    date: string;
+    scheduledJob: string;
+    scheduledForeman: string;
+  };
+  lang: Lang;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [hours, setHours] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function add() {
+    const h = parseFloat(hours);
+    if (isNaN(h)) return;
+    setSaving(true);
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "add",
+        worker: disc.worker,
+        date: disc.date,
+        job: disc.scheduledJob,
+        hours: h,
+        foreman: disc.scheduledForeman,
+      }),
+    });
+    setSaving(false);
+    onDone();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Add timecard</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {disc.worker} · {prettyDate(disc.date, lang)}
+        </div>
+        <div className="bg-steel/40 rounded-xl p-3 mb-4 text-sm">
+          <div className="text-rebar text-xs">Job (from schedule)</div>
+          <div className="text-concrete font-semibold">{disc.scheduledJob || "—"}</div>
+          <div className="text-rebar text-xs mt-2">Foreman</div>
+          <div className="text-concrete font-semibold">{disc.scheduledForeman || "—"}</div>
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          autoFocus
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          placeholder="e.g. 8"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={add}
+            disabled={saving || !hours}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            {saving ? "Adding…" : "Add timecard"}
+          </button>
+        </div>
       </div>
     </div>
   );

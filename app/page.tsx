@@ -2706,43 +2706,44 @@ function ReconPanel({
           </button>
         </div>
 
+        {/* Range selector — shared by both views */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+          {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(
+            ([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setRangeMode(k)}
+                className={`flex-1 rounded-full py-2 text-xs font-bold ${
+                  rangeMode === k ? "bg-steel text-concrete border border-line" : "text-rebar"
+                }`}
+              >
+                {label}
+              </button>
+            )
+          )}
+        </div>
+        {rangeMode === "custom" && (
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              type="date"
+              value={customStart}
+              max={today}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+            <span className="text-rebar text-sm">to</span>
+            <input
+              type="date"
+              value={customEnd}
+              max={today}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+          </div>
+        )}
+
         {view === "find" ? (
           <>
-            {/* Range selector */}
-            <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
-              {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(
-                ([k, label]) => (
-                  <button
-                    key={k}
-                    onClick={() => setRangeMode(k)}
-                    className={`flex-1 rounded-full py-2 text-xs font-bold ${
-                      rangeMode === k ? "bg-steel text-concrete border border-line" : "text-rebar"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                )
-              )}
-            </div>
-            {rangeMode === "custom" && (
-              <div className="flex items-center gap-2 mb-3">
-                <input
-                  type="date"
-                  value={customStart}
-                  max={today}
-                  onChange={(e) => setCustomStart(e.target.value)}
-                  className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
-                />
-                <span className="text-rebar text-sm">to</span>
-                <input
-                  type="date"
-                  value={customEnd}
-                  max={today}
-                  onChange={(e) => setCustomEnd(e.target.value)}
-                  className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
-                />
-              </div>
-            )}
 
             {/* Worker picker */}
             <button
@@ -2953,15 +2954,7 @@ function ReconPanel({
             )}
           </>
         ) : (
-          /* Review view — built in the next stage */
-          <div className="text-center text-rebar mt-16 px-6">
-            <div className="text-concrete font-bold text-lg mb-2">Review — coming next</div>
-            <div className="text-sm">
-              The schedule-vs-actual reconciliation view is the next build stage. For now, use{" "}
-              <span className="text-concrete font-semibold">Find</span> to pull up any worker and
-              fix or void their entries directly.
-            </div>
-          </div>
+          <ReconReviewView tr={tr} lang={lang} start={start} end={end} />
         )}
       </div>
 
@@ -3312,6 +3305,258 @@ function ReconVoidModal({
             {saving ? "Voiding…" : "Void entry"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Review view — Stage A: "Needs real project" bulk-fix (grouped by the foreman's
+// typed job name). Stage B (schedule-vs-actual checks + no-show) comes next.
+// ============================================================================
+function ReconReviewView({
+  tr,
+  lang,
+  start,
+  end,
+}: {
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  start: string;
+  end: string;
+}) {
+  type Miss = {
+    id: string;
+    worker: string;
+    date: string;
+    job: string;
+    hours: number;
+    foreman: string;
+  };
+  const [missing, setMissing] = useState<Miss[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [bulkGroup, setBulkGroup] = useState<string | null>(null); // job name being set
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setMsg("");
+    fetch(`/api/recon?action=needs_project&start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) setMissing(d.entries || []);
+        else setMsg(d?.error || "Failed to load.");
+        setLoading(false);
+      })
+      .catch(() => {
+        setMsg("Failed to load.");
+        setLoading(false);
+      });
+  }, [start, end]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // group missing entries by the foreman's typed job name (case-insensitive)
+  const groups = useMemo(() => {
+    const m = new Map<string, Miss[]>();
+    for (const e of missing) {
+      const key = (e.job || "(no job name)").trim();
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(e);
+    }
+    return Array.from(m.entries())
+      .map(([job, items]) => ({
+        job,
+        items,
+        workers: new Set(items.map((i) => i.worker)).size,
+      }))
+      .sort((a, b) => b.items.length - a.items.length);
+  }, [missing]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="text-safety font-bold text-sm">Needs real project</span>
+        <span className="text-rebar text-xs">
+          {missing.length} {missing.length === 1 ? "entry" : "entries"} · {groups.length} job{" "}
+          {groups.length === 1 ? "name" : "names"}
+        </span>
+      </div>
+      <div className="text-rebar text-xs mb-4">
+        These timecards have no real project set. Assign one per job name — it updates every entry in
+        that group at once.
+      </div>
+
+      {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
+      {!loading && msg && <div className="text-rebar text-sm px-1">{msg}</div>}
+      {!loading && missing.length === 0 && !msg && (
+        <div className="bg-graphite border border-line rounded-2xl p-6 text-center">
+          <div className="text-concrete font-bold mb-1">All set ✓</div>
+          <div className="text-rebar text-sm">
+            Every timecard in this range has a real project assigned.
+          </div>
+        </div>
+      )}
+
+      {!loading &&
+        groups.map((g) => (
+          <div key={g.job} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-concrete font-bold text-[15px]">"{g.job}"</div>
+                <div className="text-rebar text-xs mt-0.5">
+                  {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
+                  {g.workers === 1 ? "worker" : "workers"}
+                </div>
+              </div>
+              <button
+                onClick={() => setBulkGroup(g.job)}
+                className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
+              >
+                Set project
+              </button>
+            </div>
+            {/* small preview of who/when */}
+            <div className="text-rebar text-xs mt-2 leading-relaxed">
+              {Array.from(new Set(g.items.map((i) => i.worker))).slice(0, 4).join(", ")}
+              {g.workers > 4 ? `, +${g.workers - 4} more` : ""}
+            </div>
+          </div>
+        ))}
+
+      {bulkGroup && (
+        <ReconBulkProjectModal
+          jobName={bulkGroup}
+          entries={groups.find((g) => g.job === bulkGroup)?.items || []}
+          onClose={() => setBulkGroup(null)}
+          onDone={() => {
+            setBulkGroup(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReconBulkProjectModal({
+  jobName,
+  entries,
+  onClose,
+  onDone,
+}: {
+  jobName: string;
+  entries: { id: string }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [query, setQuery] = useState("");
+  const [picked, setPicked] = useState<{ id: string; name: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState("");
+
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  async function apply() {
+    if (!picked) return;
+    setSaving(true);
+    setProgress(`Updating ${entries.length}…`);
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "bulk_project",
+        ids: entries.map((e) => e.id),
+        projectId: picked.id,
+      }),
+    }).then((r) => r.json()).catch(() => null);
+    setSaving(false);
+    if (res?.ok) onDone();
+    else setProgress("Something went wrong. Try again.");
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
+      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 pb-2 border-b border-line">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-concrete font-bold">Set project</div>
+            <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+              ✕
+            </button>
+          </div>
+          <div className="text-rebar text-xs mb-2">
+            "{jobName}" · {entries.length} {entries.length === 1 ? "entry" : "entries"}
+          </div>
+          {!picked ? (
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name or job ID…"
+              className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+            />
+          ) : null}
+        </div>
+
+        {!picked ? (
+          <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+            {filtered.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPicked({ id: p.id, name: p.name })}
+                className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+              >
+                <span>{p.name}</span>
+                {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+            )}
+          </div>
+        ) : (
+          <div className="p-5">
+            <div className="text-concrete text-center mb-1">Set</div>
+            <div className="text-safety font-bold text-center text-lg mb-1">{picked.name}</div>
+            <div className="text-rebar text-sm text-center mb-5">
+              on all {entries.length} "{jobName}" {entries.length === 1 ? "entry" : "entries"}?
+            </div>
+            {progress && <div className="text-rebar text-sm text-center mb-3">{progress}</div>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPicked(null)}
+                disabled={saving}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Back
+              </button>
+              <button
+                onClick={apply}
+                disabled={saving}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Updating…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

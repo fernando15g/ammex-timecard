@@ -193,6 +193,16 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, projects: jobs });
     }
 
+    if (action === "needs_project") {
+      // Non-voided timecards in range missing a Project Helper — for bulk fix.
+      const s = url.searchParams.get("start") || "";
+      const e2 = url.searchParams.get("end") || s;
+      if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
+      const all = await queryEntries(s, e2);
+      const missing = all.filter((x) => !x.voided && !x.projectId);
+      return NextResponse.json({ ok: true, entries: missing });
+    }
+
     const start = url.searchParams.get("start") || "";
     const end = url.searchParams.get("end") || start;
     const worker = url.searchParams.get("worker") || undefined;
@@ -249,6 +259,27 @@ export async function POST(req: Request) {
         properties: props,
       });
       return NextResponse.json({ ok: true, id: (created as any).id });
+    }
+
+    if (op === "bulk_project") {
+      // Set Project Helper on many timecards at once (bulk fix by job name).
+      const { ids, projectId } = body;
+      if (!Array.isArray(ids) || !projectId)
+        return NextResponse.json({ ok: false, error: "ids and projectId required" }, { status: 400 });
+      const done: string[] = [];
+      const failed: string[] = [];
+      for (const id of ids) {
+        try {
+          await notion.pages.update({
+            page_id: id,
+            properties: { [TIMECARD_PROPS.projectHelper]: { relation: [{ id: projectId }] } },
+          });
+          done.push(id);
+        } catch {
+          failed.push(id);
+        }
+      }
+      return NextResponse.json({ ok: true, done: done.length, failed: failed.length });
     }
 
     if (op === "log") {

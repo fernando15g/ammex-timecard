@@ -211,20 +211,59 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     if (s.isLead) leadByJobDate.set(`${s.jobId}|${s.date}`, s.worker);
   }
 
-  // crew context: for each job+date, how many scheduled workers logged ANY hours
-  const crewByJobDate = new Map<string, { total: number; logged: number }>();
-  {
-    // index: did a worker log anything that date?
-    const loggedWD = new Set<string>();
-    for (const c of live) loggedWD.add(`${c.worker.toLowerCase()}|${c.date}`);
-    for (const s of sched) {
-      const jk = `${s.jobId}|${s.date}`;
-      if (!crewByJobDate.has(jk)) crewByJobDate.set(jk, { total: 0, logged: 0 });
-      const rec = crewByJobDate.get(jk)!;
-      rec.total += 1;
-      if (loggedWD.has(`${s.worker.toLowerCase()}|${s.date}`)) rec.logged += 1;
+  // Did anyone log ON this specific job+date? (immune to a worker logging
+  // elsewhere masking a foreman's un-submitted card.) Match on the timecard's
+  // real project (projectId) = the scheduled jobId.
+  const loggedOnJobDate = new Set<string>(); // `${jobId}|${date}`
+  const loggedWorkerOnJobDate = new Set<string>(); // `${worker}|${jobId}|${date}`
+  for (const c of live) {
+    if (c.projectId) {
+      loggedOnJobDate.add(`${c.projectId}|${c.date}`);
+      loggedWorkerOnJobDate.add(`${c.worker.toLowerCase()}|${c.projectId}|${c.date}`);
     }
   }
+
+  // crew context per job+date: total scheduled, and how many logged ON that job.
+  // Also collect the scheduled crew names + who's still missing (for the popup).
+  const crewByJobDate = new Map<
+    string,
+    { total: number; logged: number; foreman: string; jobName: string; date: string; jobId: string;
+      crew: { worker: string; logged: boolean }[] }
+  >();
+  for (const s of sched) {
+    const jk = `${s.jobId}|${s.date}`;
+    if (!crewByJobDate.has(jk)) {
+      crewByJobDate.set(jk, {
+        total: 0, logged: 0,
+        foreman: leadByJobDate.get(jk) || "",
+        jobName: s.jobName, date: s.date, jobId: s.jobId, crew: [],
+      });
+    }
+    const rec = crewByJobDate.get(jk)!;
+    const didLog = loggedWorkerOnJobDate.has(`${s.worker.toLowerCase()}|${s.jobId}|${s.date}`);
+    rec.total += 1;
+    if (didLog) rec.logged += 1;
+    rec.crew.push({ worker: s.worker, logged: didLog });
+    if (s.jobName && !rec.jobName) rec.jobName = s.jobName;
+  }
+
+  // Missing cards: a foreman never submitted for a job+date (nobody logged on
+  // that job that day), and it's a past/current date (not future).
+  const missingCards: { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[] = [];
+  for (const [jk, rec] of crewByJobDate) {
+    if (daysAgo(rec.date, todayISO) < 0) continue; // future
+    if (!loggedOnJobDate.has(jk)) {
+      missingCards.push({
+        foreman: rec.foreman,
+        jobName: rec.jobName || "(job)",
+        date: rec.date,
+        jobId: rec.jobId,
+        crewCount: rec.total,
+      });
+    }
+  }
+  missingCards.sort((a, b) => b.date.localeCompare(a.date)); // newest first
+
 
   // index timecards by worker+date
   const tcByWD = new Map<string, typeof live>();
@@ -385,7 +424,15 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     (x) => !resolved.has(`${x.worker.toLowerCase()}|${x.date}|${x.kind.toLowerCase()}`)
   );
   open.sort((a, b) => a.date.localeCompare(b.date) || a.worker.localeCompare(b.worker));
-  return open;
+
+  // scheduled crew per job+date (for the "view crew" popup): who was scheduled
+  // and whether each logged on that job.
+  const crews: Record<string, { worker: string; logged: boolean }[]> = {};
+  for (const [jk, rec] of crewByJobDate) {
+    crews[jk] = rec.crew.slice().sort((a, b) => a.worker.localeCompare(b.worker));
+  }
+
+  return { discrepancies: open, missingCards, crews };
 }
 
 export async function GET(req: Request) {
@@ -471,8 +518,8 @@ export async function GET(req: Request) {
       const e2 = url.searchParams.get("end") || s;
       const today = url.searchParams.get("today") || s;
       if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
-      const discrepancies = await reconcile(s, e2, today);
-      return NextResponse.json({ ok: true, discrepancies });
+      const result = await reconcile(s, e2, today);
+      return NextResponse.json({ ok: true, ...result });
     }
 
     const start = url.searchParams.get("start") || "";

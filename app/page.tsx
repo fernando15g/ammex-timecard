@@ -3416,25 +3416,32 @@ function DiscCard({
   lang,
   color,
   sev,
+  busy,
   onAdd,
   onNoShow,
   onDismiss,
   onLooksRight,
+  onViewCrew,
 }: {
   d: any;
   lang: Lang;
   color: string;
   sev: string;
+  busy: boolean;
   onAdd: () => void;
   onNoShow: () => void;
   onDismiss: () => void;
   onLooksRight: () => void;
+  onViewCrew?: () => void;
 }) {
   const isNoTimecard = d.kind === "No timecard";
   const kindLabel = isNoTimecard ? (sev === "pending" ? "No hours yet" : "No timecard") : d.kind;
+  const spin = busy ? (
+    <span className="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin align-middle" />
+  ) : null;
   return (
     <div
-      className="bg-graphite border border-line rounded-2xl p-4 mb-3"
+      className="bg-graphite border border-line rounded-2xl p-4 mb-3 relative"
       style={{ borderLeft: `4px solid ${color}` }}
     >
       <div className="flex items-start justify-between gap-3">
@@ -3447,7 +3454,17 @@ function DiscCard({
             {kindLabel}
           </div>
         </div>
-        {d.hours > 0 && <div className="text-concrete text-lg font-extrabold">{d.hours}h</div>}
+        {isNoTimecard && onViewCrew ? (
+          <button
+            onClick={onViewCrew}
+            className="text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
+            style={{ color: "#8fbcff", background: "rgba(47,115,216,.16)" }}
+          >
+            View crew
+          </button>
+        ) : (
+          d.hours > 0 && <div className="text-concrete text-lg font-extrabold">{d.hours}h</div>
+        )}
       </div>
 
       <div className="mt-3 pt-3 border-t border-line space-y-1.5 text-sm">
@@ -3476,24 +3493,27 @@ function DiscCard({
         </div>
       )}
 
-      <div className="flex gap-2 mt-3 flex-wrap">
+      <div className="flex gap-2 mt-3 flex-wrap items-center">
         {isNoTimecard ? (
           <>
             <button
               onClick={onAdd}
-              className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold"
+              disabled={busy}
+              className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold disabled:opacity-60"
             >
               Add timecard
             </button>
             <button
               onClick={onNoShow}
-              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+              disabled={busy}
+              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
             >
               No-show
             </button>
             <button
               onClick={onDismiss}
-              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+              disabled={busy}
+              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
             >
               Dismiss
             </button>
@@ -3502,19 +3522,22 @@ function DiscCard({
           <>
             <button
               onClick={onLooksRight}
-              className="border border-line rounded-lg px-4 py-2 text-sm font-bold"
+              disabled={busy}
+              className="border border-line rounded-lg px-4 py-2 text-sm font-bold disabled:opacity-60"
               style={{ color: "#9fdcb4" }}
             >
               Looks right
             </button>
             <button
               onClick={onDismiss}
-              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+              disabled={busy}
+              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
             >
               Dismiss
             </button>
           </>
         )}
+        {spin}
       </div>
     </div>
   );
@@ -3571,17 +3594,29 @@ function ReconReviewView({
     crewTotal: number;
   };
   const [discs, setDiscs] = useState<Disc[]>([]);
+  const [missingCards, setMissingCards] = useState<
+    { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[]
+  >([]);
+  const [crews, setCrews] = useState<Record<string, { worker: string; logged: boolean }[]>>({});
   const [discLoading, setDiscLoading] = useState(false);
   const [ranCheck, setRanCheck] = useState(false);
   const [noShowFor, setNoShowFor] = useState<Disc | null>(null);
   const [addFor, setAddFor] = useState<Disc | null>(null);
   const [crewOpen, setCrewOpen] = useState<Record<string, boolean>>({});
+  const [viewCrew, setViewCrew] = useState<{ jobId: string; date: string; job: string; foreman: string } | null>(null);
+  const [dismissAllFor, setDismissAllFor] = useState<Disc[] | null>(null);
+  const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
+  const [showMissing, setShowMissing] = useState(false);
 
   const today = (() => {
     const d = new Date();
     const off = d.getTimezoneOffset();
     return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
   })();
+
+  const CACHE_KEY = "ammex_recon_cache";
+  const CACHE_MS = 5 * 60 * 1000;
+  const cacheTs = useRef(0);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -3603,41 +3638,80 @@ function ReconReviewView({
     load();
   }, [load]);
 
+  const applyResult = useCallback((d: any) => {
+    setDiscs(d.discrepancies || []);
+    setMissingCards(d.missingCards || []);
+    setCrews(d.crews || {});
+  }, []);
+
   const loadDiscs = useCallback(() => {
     setDiscLoading(true);
     setRanCheck(true);
     fetch(`/api/recon?action=reconcile&start=${start}&end=${end}&today=${today}`)
       .then((r) => r.json())
       .then((d) => {
-        if (d?.ok) setDiscs(d.discrepancies || []);
+        if (d?.ok) {
+          applyResult(d);
+          cacheTs.current = Date.now();
+          try {
+            localStorage.setItem(
+              CACHE_KEY,
+              JSON.stringify({ start, end, ts: cacheTs.current, data: d })
+            );
+          } catch {}
+        }
         setDiscLoading(false);
       })
       .catch(() => setDiscLoading(false));
-  }, [start, end, today]);
+  }, [start, end, today, applyResult]);
 
-  // reset the check when the range changes (make them re-run for a new range)
+  // On mount / range change: use a fresh cache (same range, < 5 min) if present,
+  // so the check survives tab switches and quick app re-opens.
   useEffect(() => {
     setRanCheck(false);
     setDiscs([]);
-  }, [start, end]);
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c.start === start && c.end === end && Date.now() - c.ts < CACHE_MS && c.data?.ok) {
+          applyResult(c.data);
+          cacheTs.current = c.ts;
+          setRanCheck(true);
+        }
+      }
+    } catch {}
+  }, [start, end, applyResult]);
+
+  // Keep the cache in sync after resolves so items don't reappear on tab switch.
+  useEffect(() => {
+    if (!ranCheck) return;
+    try {
+      localStorage.setItem(
+        CACHE_KEY,
+        JSON.stringify({
+          start,
+          end,
+          ts: cacheTs.current || Date.now(),
+          data: { ok: true, discrepancies: discs, missingCards, crews },
+        })
+      );
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discs, missingCards, crews]);
 
   // resolve a discrepancy: log outcome + drop it from the list
-  async function resolveDisc(d: Disc, status: string, note: string) {
+  async function resolveDisc(d: Disc, status: string, note: string, key: string) {
+    setBusyKey(key);
     await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        op: "log",
-        worker: d.worker,
-        date: d.date,
-        kind: d.kind,
-        status,
-        note,
-      }),
+      body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note }),
     });
     setDiscs((cur) =>
       cur.filter((x) => !(x.worker === d.worker && x.date === d.date && x.kind === d.kind))
     );
+    setBusyKey("");
   }
 
   // resolve many at once (bulk dismiss — job cancelled)
@@ -3646,14 +3720,7 @@ function ReconReviewView({
       await fetch("/api/recon", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          op: "log",
-          worker: d.worker,
-          date: d.date,
-          kind: d.kind,
-          status,
-          note,
-        }),
+        body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note }),
       });
     }
     const keys = new Set(items.map((d) => `${d.worker}|${d.date}|${d.kind}`));
@@ -3817,8 +3884,19 @@ function ReconReviewView({
 
       {/* ---- Schedule vs. actual reconciliation ---- */}
       <div className="mt-8 mb-3 pt-5 border-t border-line">
-        <div className="text-concrete font-bold text-base mb-1">Schedule vs. actual</div>
-        <div className="text-rebar text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-concrete font-bold text-base">Schedule vs. actual</div>
+          {ranCheck && !discLoading && (
+            <button
+              onClick={loadDiscs}
+              aria-label="Re-run check"
+              className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center active:text-safety shrink-0"
+            >
+              ↻
+            </button>
+          )}
+        </div>
+        <div className="text-rebar text-xs mt-1">
           Compares who was scheduled against who logged hours.
         </div>
       </div>
@@ -3834,7 +3912,21 @@ function ReconReviewView({
 
       {discLoading && <div className="text-rebar text-sm px-1 py-3">Checking…</div>}
 
-      {ranCheck && !discLoading && discs.length === 0 && (
+      {ranCheck && !discLoading && missingCards.length > 0 && (
+        <button
+          onClick={() => setShowMissing(true)}
+          className="w-full flex items-center gap-2 rounded-xl px-4 py-3 mb-4 text-left"
+          style={{ background: "rgba(229,83,60,.12)", border: "1px solid rgba(229,83,60,.4)" }}
+        >
+          <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+          <span className="text-concrete font-bold text-sm">
+            {missingCards.length} missing {missingCards.length === 1 ? "card" : "cards"}
+          </span>
+          <span className="text-rebar text-xs ml-auto">tap to view →</span>
+        </button>
+      )}
+
+      {ranCheck && !discLoading && discs.length === 0 && missingCards.length === 0 && (
         <div className="bg-graphite border border-line rounded-2xl p-6 text-center">
           <div className="text-concrete font-bold mb-1">All matched ✓</div>
           <div className="text-rebar text-sm">
@@ -3845,13 +3937,6 @@ function ReconReviewView({
 
       {ranCheck && !discLoading && discs.length > 0 && (
         <>
-          <button
-            onClick={loadDiscs}
-            className="text-rebar text-xs font-bold underline mb-4"
-          >
-            ↻ Re-run check
-          </button>
-
           {(
             [
               ["attention", "Needs attention", "#e5533c", "Likely missed hours — look into these."],
@@ -3920,40 +4005,48 @@ function ReconReviewView({
 
                             {open && (
                               <div className="mt-3 pt-3 border-t border-line space-y-2">
-                                {crew.map((d) => (
-                                  <div
-                                    key={`${d.worker}|${d.date}`}
-                                    className="bg-steel/40 rounded-xl px-3 py-2"
-                                  >
-                                    <div className="text-concrete text-sm font-semibold mb-1.5">
-                                      {d.worker}
+                                {crew.map((d) => {
+                                  const bk = `${d.worker}|${d.date}|${d.kind}`;
+                                  const busy = busyKey === bk;
+                                  return (
+                                    <div
+                                      key={`${d.worker}|${d.date}`}
+                                      className="bg-steel/40 rounded-xl px-3 py-2"
+                                    >
+                                      <div className="text-concrete text-sm font-semibold mb-1.5 flex items-center gap-2">
+                                        {d.worker}
+                                        {busy && (
+                                          <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />
+                                        )}
+                                      </div>
+                                      <div className="flex gap-2 flex-wrap">
+                                        <button
+                                          onClick={() => setAddFor(d)}
+                                          disabled={busy}
+                                          className="bg-safety text-steel rounded-lg px-3 py-1.5 text-xs font-bold disabled:opacity-60"
+                                        >
+                                          Add timecard
+                                        </button>
+                                        <button
+                                          onClick={() => setNoShowFor(d)}
+                                          disabled={busy}
+                                          className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
+                                        >
+                                          No-show
+                                        </button>
+                                        <button
+                                          onClick={() => resolveDisc(d, "Dismissed", "", bk)}
+                                          disabled={busy}
+                                          className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
+                                        >
+                                          Dismiss
+                                        </button>
+                                      </div>
                                     </div>
-                                    <div className="flex gap-2 flex-wrap">
-                                      <button
-                                        onClick={() => setAddFor(d)}
-                                        className="bg-safety text-steel rounded-lg px-3 py-1.5 text-xs font-bold"
-                                      >
-                                        Add timecard
-                                      </button>
-                                      <button
-                                        onClick={() => setNoShowFor(d)}
-                                        className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
-                                      >
-                                        No-show
-                                      </button>
-                                      <button
-                                        onClick={() => resolveDisc(d, "Dismissed", "")}
-                                        className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
-                                      >
-                                        Dismiss
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))}
+                                  );
+                                })}
                                 <button
-                                  onClick={() =>
-                                    resolveMany(crew, "Dismissed", "job cancelled — crew stood down")
-                                  }
+                                  onClick={() => setDismissAllFor(crew)}
                                   className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mt-1 active:text-safety"
                                 >
                                   Dismiss all (job cancelled)
@@ -3964,7 +4057,8 @@ function ReconReviewView({
                         );
                       });
                     })()
-                  : // ATTENTION & GLANCE: group by date, cluster by kind
+                  : // ATTENTION & GLANCE: group by date (oldest-first for
+                    // attention, newest-first for glance), cluster by crew+kind.
                     (() => {
                       const byDate = new Map<string, typeof items>();
                       for (const d of items) {
@@ -3972,30 +4066,56 @@ function ReconReviewView({
                         byDate.get(d.date)!.push(d);
                       }
                       const dateArr = Array.from(byDate.entries()).sort((a, b) =>
-                        a[0].localeCompare(b[0])
+                        sev === "attention"
+                          ? a[0].localeCompare(b[0]) // oldest first
+                          : b[0].localeCompare(a[0]) // newest first
                       );
                       return dateArr.map(([date, dItems]) => {
+                        // cluster: same crew (job+foreman) together, then by kind
                         const sorted = dItems
                           .slice()
-                          .sort((a, b) => a.kind.localeCompare(b.kind) || a.worker.localeCompare(b.worker));
+                          .sort(
+                            (a, b) =>
+                              (a.scheduledJobId || "").localeCompare(b.scheduledJobId || "") ||
+                              a.kind.localeCompare(b.kind) ||
+                              a.worker.localeCompare(b.worker)
+                          );
                         return (
                           <div key={date} className="mb-4">
-                            <div className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1">
+                            <div
+                              className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1 py-1 sticky top-0 z-10"
+                              style={{ background: "#1c2127" }}
+                            >
                               {prettyDate(date, lang)}
                             </div>
-                            {sorted.map((d, i) => (
-                              <DiscCard
-                                key={`${d.worker}|${d.date}|${d.kind}|${i}`}
-                                d={d}
-                                lang={lang}
-                                color={color}
-                                sev={sev}
-                                onAdd={() => setAddFor(d)}
-                                onNoShow={() => setNoShowFor(d)}
-                                onDismiss={() => resolveDisc(d, "Dismissed", "")}
-                                onLooksRight={() => resolveDisc(d, "Confirmed OK", "")}
-                              />
-                            ))}
+                            {sorted.map((d, i) => {
+                              const bk = `${d.worker}|${d.date}|${d.kind}`;
+                              return (
+                                <DiscCard
+                                  key={`${bk}|${i}`}
+                                  d={d}
+                                  lang={lang}
+                                  color={color}
+                                  sev={sev}
+                                  busy={busyKey === bk}
+                                  onAdd={() => setAddFor(d)}
+                                  onNoShow={() => setNoShowFor(d)}
+                                  onDismiss={() => resolveDisc(d, "Dismissed", "", bk)}
+                                  onLooksRight={() => resolveDisc(d, "Confirmed OK", "", bk)}
+                                  onViewCrew={
+                                    d.kind === "No timecard" && d.scheduledJobId
+                                      ? () =>
+                                          setViewCrew({
+                                            jobId: d.scheduledJobId,
+                                            date: d.date,
+                                            job: d.scheduledJob,
+                                            foreman: d.scheduledForeman,
+                                          })
+                                      : undefined
+                                  }
+                                />
+                              );
+                            })}
                           </div>
                         );
                       });
@@ -4037,7 +4157,7 @@ function ReconReviewView({
           lang={lang}
           onClose={() => setNoShowFor(null)}
           onDone={(note) => {
-            resolveDisc(noShowFor, "No-show", note);
+            resolveDisc(noShowFor, "No-show", note, `${noShowFor.worker}|${noShowFor.date}|${noShowFor.kind}`);
             setNoShowFor(null);
           }}
         />
@@ -4052,6 +4172,34 @@ function ReconReviewView({
             setAddFor(null);
             loadDiscs();
           }}
+        />
+      )}
+
+      {viewCrew && (
+        <ReconCrewModal
+          info={viewCrew}
+          crew={crews[`${viewCrew.jobId}|${viewCrew.date}`] || []}
+          lang={lang}
+          onClose={() => setViewCrew(null)}
+        />
+      )}
+
+      {dismissAllFor && (
+        <ReconDismissAllModal
+          count={dismissAllFor.length}
+          onClose={() => setDismissAllFor(null)}
+          onConfirm={() => {
+            resolveMany(dismissAllFor, "Dismissed", "job cancelled — crew stood down");
+            setDismissAllFor(null);
+          }}
+        />
+      )}
+
+      {showMissing && (
+        <ReconMissingCardsModal
+          cards={missingCards}
+          lang={lang}
+          onClose={() => setShowMissing(false)}
         />
       )}
     </div>
@@ -4318,6 +4466,171 @@ function ReconAddModal({
           >
             {saving ? "Adding…" : "Add timecard"}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// View the scheduled crew for a job+date. Missing (didn't log) = soft red; the
+// rest (logged, locked in) are dimmed/disabled.
+function ReconCrewModal({
+  info,
+  crew,
+  lang,
+  onClose,
+}: {
+  info: { jobId: string; date: string; job: string; foreman: string };
+  crew: { worker: string; logged: boolean }[];
+  lang: Lang;
+  onClose: () => void;
+}) {
+  const missing = crew.filter((c) => !c.logged);
+  const logged = crew.filter((c) => c.logged);
+  return (
+    <div className="fixed inset-0 z-[75] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
+      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 border-b border-line">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-concrete font-bold">Scheduled crew</div>
+            <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+              ✕
+            </button>
+          </div>
+          <div className="text-rebar text-xs">
+            {info.job || "(job)"} · {prettyDate(info.date, lang)}
+            {info.foreman ? ` · ${info.foreman}` : ""}
+          </div>
+        </div>
+        <div className="p-3 overflow-y-auto overscroll-contain space-y-2">
+          {missing.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1" style={{ color: "#e5533c" }}>
+              Missing ({missing.length})
+            </div>
+          )}
+          {missing.map((c) => (
+            <div
+              key={c.worker}
+              className="rounded-xl px-3 py-2.5 text-sm font-semibold text-concrete"
+              style={{ border: "1px solid rgba(229,83,60,.5)", background: "rgba(229,83,60,.08)" }}
+            >
+              {c.worker}
+            </div>
+          ))}
+          {logged.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2 text-rebar">
+              Logged ({logged.length})
+            </div>
+          )}
+          {logged.map((c) => (
+            <div
+              key={c.worker}
+              className="rounded-xl px-3 py-2.5 text-sm font-semibold bg-steel/40 text-rebar opacity-60 flex items-center justify-between"
+            >
+              {c.worker}
+              <span className="text-[10px]" style={{ color: "#4a9e63" }}>✓ logged</span>
+            </div>
+          ))}
+          {crew.length === 0 && (
+            <div className="text-rebar text-sm px-2 py-3">No scheduled crew found.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Bulk-dismiss safety: requires ticking a checkbox before Confirm enables.
+function ReconDismissAllModal({
+  count,
+  onClose,
+  onConfirm,
+}: {
+  count: number;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-2">Dismiss whole crew?</div>
+        <div className="text-rebar text-sm mb-4">
+          This dismisses all {count} scheduled {count === 1 ? "worker" : "workers"} for this job —
+          use it only when the job was cancelled and the crew was sent home. It can't be batch-undone.
+        </div>
+        <label className="flex items-start gap-2 mb-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={(e) => setChecked(e.target.checked)}
+            className="mt-0.5 w-5 h-5 shrink-0"
+          />
+          <span className="text-concrete text-sm">
+            I understand this dismisses all {count} and the job was cancelled.
+          </span>
+        </label>
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!checked}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Dismiss all
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Quick-reference: foremen who haven't submitted a card (whole crew blank).
+function ReconMissingCardsModal({
+  cards,
+  lang,
+  onClose,
+}: {
+  cards: { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[];
+  lang: Lang;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[75] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
+      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 border-b border-line">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-concrete font-bold">Missing cards</div>
+            <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+              ✕
+            </button>
+          </div>
+          <div className="text-rebar text-xs">Foremen who haven't submitted a card yet — chase these.</div>
+        </div>
+        <div className="p-3 overflow-y-auto overscroll-contain space-y-2">
+          {cards.map((c, i) => {
+            const short = prettyDate(c.date, lang).split(",")[0];
+            return (
+              <div
+                key={`${c.jobId}|${c.date}|${i}`}
+                className="rounded-xl px-3 py-3"
+                style={{ border: "1px solid rgba(229,83,60,.4)", background: "rgba(229,83,60,.06)" }}
+              >
+                <div className="text-concrete font-bold text-sm">{c.foreman || "(no foreman)"}</div>
+                <div className="text-rebar text-xs mt-0.5">
+                  {c.jobName} · {short} · {c.crewCount} crew
+                </div>
+              </div>
+            );
+          })}
+          {cards.length === 0 && (
+            <div className="text-rebar text-sm px-2 py-3">No missing cards.</div>
+          )}
         </div>
       </div>
     </div>

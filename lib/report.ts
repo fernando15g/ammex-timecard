@@ -166,7 +166,8 @@ export function buildReport(
   overHoursThreshold: number,
   weekEndOverrideISO?: string, // span end; defaults to start + 6 (a week)
   foremanFilter?: string, // if set, grid shows only this foreman's entries
-  lang: ReportLang = "en"
+  lang: ReportLang = "en",
+  confirmedFlagKeys?: Set<string> // worker|dateISO|kindlabel confirmed in the cockpit
 ): ReportData {
   const weekEndISO = weekEndOverrideISO || addDaysISO(weekStartISO, 6);
   const nDays = Math.max(1, spanDays(weekStartISO, weekEndISO));
@@ -448,6 +449,24 @@ export function buildReport(
     outFlags = flags.filter((f) =>
       (f.foremen || []).some((fm) => fm.trim().toLowerCase() === ff)
     );
+  }
+
+  // Remove flags the user already confirmed ("Looks OK") in the reconciliation
+  // cockpit. Report flag kinds are mapped to the same labels the cockpit writes
+  // to the Reconciliation Log, then matched on worker|date|label.
+  if (confirmedFlagKeys && confirmedFlagKeys.size > 0) {
+    const KIND_TO_LABEL: Record<string, string> = {
+      double_entry: "duplicate",
+      multi_job: "two jobs same day",
+      over_hours: "over 11 hrs that day",
+      single_high: "high hours",
+    };
+    outFlags = outFlags.filter((f) => {
+      const label = KIND_TO_LABEL[f.kind];
+      if (!label) return true; // off_roster etc. — not confirmable in cockpit
+      const key = `${f.worker.trim().toLowerCase()}|${f.dateISO}|${label}`;
+      return !confirmedFlagKeys.has(key);
+    });
   }
 
   outFlags.sort(

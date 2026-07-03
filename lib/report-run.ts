@@ -7,6 +7,8 @@ import {
   TIMECARD_PROPS,
   ROSTER_PROPS,
   PAYROLL_RECIPIENT,
+  RECON_LOG_DB_ID,
+  RECON_PROPS,
 } from "./notion";
 import { buildReport, RawRow } from "./report";
 import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
@@ -205,6 +207,42 @@ export async function loadRowsAndRoster(
   return { rows, activeRoster };
 }
 
+// Confirmed-OK flags from the Reconciliation Log for [start,end] as a set of
+// `worker|dateISO|kindlabel` — used to hide already-reviewed flags on reports.
+async function loadConfirmedFlagKeys(
+  notion: Client,
+  startISO: string,
+  endISO: string
+): Promise<Set<string>> {
+  const keys = new Set<string>();
+  try {
+    let fc: string | undefined = undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: RECON_LOG_DB_ID,
+        filter: {
+          and: [
+            { property: RECON_PROPS.date, date: { on_or_after: startISO } },
+            { property: RECON_PROPS.date, date: { on_or_before: endISO } },
+            { property: RECON_PROPS.status, select: { equals: "Confirmed OK" } },
+          ],
+        },
+        start_cursor: fc,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const p = pg.properties || {};
+        const w = (p[RECON_PROPS.worker]?.title || []).map((t: any) => t.plain_text).join("").trim();
+        const d = p[RECON_PROPS.date]?.date?.start?.slice(0, 10) || "";
+        const k = p[RECON_PROPS.kind]?.select?.name || "";
+        if (w && d && k) keys.add(`${w.toLowerCase()}|${d}|${k.toLowerCase()}`);
+      }
+      fc = res.has_more ? res.next_cursor : undefined;
+    } while (fc);
+  } catch { /* log may be empty */ }
+  return keys;
+}
+
 // Weekly auto-send bundle: Master report, Payroll Grid, and Owner Review —
 // Daily, all as PDF, in one email. Used by the Monday cron.
 export async function runWeeklyBundle(
@@ -212,9 +250,11 @@ export async function runWeeklyBundle(
   endISO: string
 ): Promise<{ ok: boolean; attachments: number }> {
   const { rows, activeRoster } = await loadRowsAndRoster(startISO, endISO);
+  const bundleNotion = new Client({ auth: NOTION_TOKEN });
+  const confirmedFlagKeys = await loadConfirmedFlagKeys(bundleNotion, startISO, endISO);
 
   // Master report (job-grouped grid)
-  const masterRd = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, "en");
+  const masterRd = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, "en", confirmedFlagKeys);
   const masterPdf = await buildReportPdf(masterRd);
 
   // Payroll Grid
@@ -348,6 +388,9 @@ export async function runReport(
     rc = res.has_more ? res.next_cursor : undefined;
   } while (rc);
 
+  // 4b) Confirmed-OK flags from the cockpit — removed from the report's flags.
+  const confirmedFlagKeys = await loadConfirmedFlagKeys(notion, startISO, endISO);
+
   // 5) Build report + files
 
   // 5-PG) Payroll Grid: every worker × day, PDF only.
@@ -405,7 +448,7 @@ export async function runReport(
     const usedNames = new Set<string>();
 
     for (const fm of foremen) {
-      const rdf = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, fm, lang);
+      const rdf = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, fm, lang, confirmedFlagKeys);
       if (!flagsOn) rdf.flags = [];
       pdfParts.push(await buildReportPdf(rdf));
       if (mode === "email") {
@@ -420,7 +463,7 @@ export async function runReport(
       pdfParts.length > 0
         ? await mergePdfs(pdfParts)
         : await buildReportPdf(
-            buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, lang)
+            buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, lang, confirmedFlagKeys)
           );
     const pdfB64All = Buffer.from(mergedPdf).toString("base64");
     const fnameAll = `Ammex_Payroll_${startISO}_to_${endISO}_allForemen`;
@@ -444,7 +487,7 @@ export async function runReport(
       foremen.length > 0
         ? (XLSX.write(wbCombined, { type: "buffer", bookType: "xlsx" }) as Buffer)
         : buildReportXlsx(
-            buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, lang)
+            buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, lang, confirmedFlagKeys)
           );
     const resendAll = new Resend(process.env.RESEND_API_KEY);
     await resendAll.emails.send({
@@ -479,7 +522,8 @@ export async function runReport(
     THRESHOLD,
     endISO,
     foreman || undefined,
-    lang
+    lang,
+    confirmedFlagKeys
   );
   if (!flagsOn) rd.flags = [];
 

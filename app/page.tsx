@@ -2671,10 +2671,45 @@ function ReconPanel({
   const [editEntry, setEditEntry] = useState<ReconEntry | null>(null);
   const [voidEntry, setVoidEntry] = useState<ReconEntry | null>(null);
   const [splitEntry, setSplitEntry] = useState<ReconEntry | null>(null);
+  const [recentSplits, setRecentSplits] = useState<
+    {
+      origId: string;
+      origPriorHours: number;
+      origPriorProjectId: string;
+      newId: string;
+      worker: string;
+      date: string;
+      label: string;
+    }[]
+  >([]);
 
   function refreshAfterWrite() {
     search();
     loadFlagsOverview();
+  }
+
+  async function undoSplit(s: {
+    origId: string;
+    origPriorHours: number;
+    origPriorProjectId: string;
+    newId: string;
+    worker: string;
+    date: string;
+    label: string;
+  }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "undo_split",
+        origId: s.origId,
+        origPriorHours: s.origPriorHours,
+        origPriorProjectId: s.origPriorProjectId,
+        newId: s.newId,
+      }),
+    });
+    setRecentSplits((cur) => cur.filter((x) => x.newId !== s.newId));
+    refreshAfterWrite();
   }
 
   const flagLabel = (f: string) => FLAG_LABEL[f] || f;
@@ -3061,6 +3096,34 @@ function ReconPanel({
                   ))}
               </div>
             )}
+
+            {/* Recently split — session undo */}
+            {recentSplits.length > 0 && (
+              <div className="mt-5 pt-4 border-t border-line">
+                <div className="text-rebar text-xs font-bold uppercase tracking-wider mb-2 px-1">
+                  Recently split
+                </div>
+                {recentSplits.map((s) => (
+                  <div
+                    key={s.newId || `${s.origId}-${s.date}`}
+                    className="flex items-center justify-between gap-3 bg-graphite border border-line rounded-xl px-3 py-2 mb-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-concrete text-sm font-semibold truncate">{s.worker}</div>
+                      <div className="text-rebar text-xs truncate">
+                        {prettyDate(s.date, lang).split(",")[0]} · {s.label}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => undoSplit(s)}
+                      className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                    >
+                      Undo
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         ) : (
           <ReconReviewView tr={tr} lang={lang} start={start} end={end} />
@@ -3147,8 +3210,9 @@ function ReconPanel({
           entry={splitEntry}
           lang={lang}
           onClose={() => setSplitEntry(null)}
-          onSaved={() => {
+          onSaved={(undo) => {
             setSplitEntry(null);
+            setRecentSplits((cur) => [undo, ...cur].slice(0, 20));
             refreshAfterWrite();
           }}
         />
@@ -3542,7 +3606,15 @@ function ReconSplitModal({
   entry: ReconEntry;
   lang: Lang;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (undo: {
+    origId: string;
+    origPriorHours: number;
+    origPriorProjectId: string;
+    newId: string;
+    worker: string;
+    date: string;
+    label: string;
+  }) => void;
 }) {
   const total = entry.hours;
   const [origHours, setOrigHours] = useState(String(total));
@@ -3585,7 +3657,7 @@ function ReconSplitModal({
 
   async function save() {
     setSaving(true);
-    await fetch("/api/recon", {
+    const res = await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3602,9 +3674,17 @@ function ReconSplitModal({
         foreman: entry.foreman,
         job: entry.job,
       }),
-    });
+    }).then((r) => r.json()).catch(() => null);
     setSaving(false);
-    onSaved();
+    onSaved({
+      origId: entry.id,
+      origPriorHours: total,
+      origPriorProjectId: entry.projectId || "",
+      newId: res?.id || "",
+      worker: entry.worker,
+      date: entry.date,
+      label: `${oh}h ${origName} + ${nh}h ${newProjectName}`,
+    });
   }
 
   const origName = entry.projectName || entry.job || "—";

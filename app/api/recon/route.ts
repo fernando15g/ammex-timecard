@@ -662,6 +662,24 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, id: (created as any).id });
     }
 
+    if (op === "undo_split") {
+      // Reverse a split: restore the original's hours/project, void the new entry.
+      const { origId, origPriorHours, origPriorProjectId, newId } = body;
+      const origProps: any = { [TIMECARD_PROPS.hours]: { number: origPriorHours } };
+      origProps[TIMECARD_PROPS.projectHelper] = {
+        relation: origPriorProjectId ? [{ id: origPriorProjectId }] : [],
+      };
+      await notion.pages.update({ page_id: origId, properties: origProps });
+      if (newId) {
+        await notion.pages.update({
+          page_id: newId,
+          properties: { [TIMECARD_PROPS.voided]: { checkbox: true },
+            [TIMECARD_PROPS.voidNote]: { rich_text: [{ text: { content: "split undone" } }] } },
+        });
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     if (op === "void") {
       const { id, voided, note } = body;
       const props: any = { [TIMECARD_PROPS.voided]: { checkbox: !!voided } };

@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { Client } from "@notionhq/client";
 import { NOTION_TOKEN } from "@/lib/notion";
 
-// Read-only diagnostic: hit /api/notion-check?db=<DATABASE_ID> to confirm the
-// integration can reach a database, and to see its exact property names/types
-// plus a couple of sample rows. Used to verify the Schedule + Projects DBs
-// before wiring the Schedule feature. Touches nothing — pure read.
+// Read-only diagnostic: hit /api/notion-check?db=<DATABASE_ID>&pin=<PIN> to
+// confirm the integration can reach a database and see its property names/types
+// plus sample rows. PIN-gated so it isn't an open endpoint. Pure read.
+const DIAG_PIN = "5314";
+
 export async function GET(req: NextRequest) {
+  if (req.nextUrl.searchParams.get("pin")?.trim() !== DIAG_PIN) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
+  }
   const db = req.nextUrl.searchParams.get("db")?.trim();
   if (!db) {
     return NextResponse.json(

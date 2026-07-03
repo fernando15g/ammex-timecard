@@ -211,6 +211,21 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     if (s.isLead) leadByJobDate.set(`${s.jobId}|${s.date}`, s.worker);
   }
 
+  // crew context: for each job+date, how many scheduled workers logged ANY hours
+  const crewByJobDate = new Map<string, { total: number; logged: number }>();
+  {
+    // index: did a worker log anything that date?
+    const loggedWD = new Set<string>();
+    for (const c of live) loggedWD.add(`${c.worker.toLowerCase()}|${c.date}`);
+    for (const s of sched) {
+      const jk = `${s.jobId}|${s.date}`;
+      if (!crewByJobDate.has(jk)) crewByJobDate.set(jk, { total: 0, logged: 0 });
+      const rec = crewByJobDate.get(jk)!;
+      rec.total += 1;
+      if (loggedWD.has(`${s.worker.toLowerCase()}|${s.date}`)) rec.logged += 1;
+    }
+  }
+
   // index timecards by worker+date
   const tcByWD = new Map<string, typeof live>();
   for (const c of live) {
@@ -232,10 +247,13 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     worker: string;
     date: string;
     scheduledJob: string;
+    scheduledJobId: string;
     scheduledForeman: string;
     loggedJob: string;
     loggedForeman: string;
     hours: number;
+    crewLogged: number;
+    crewTotal: number;
   };
   const discs: Disc[] = [];
 
@@ -250,16 +268,20 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
       const ago = daysAgo(s.date, todayISO);
       if (ago < 0) continue;
       const scheduledForeman = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
+      const crew = crewByJobDate.get(`${s.jobId}|${s.date}`) || { total: 0, logged: 0 };
       discs.push({
         kind: "No timecard",
         severity: ago >= 2 ? "attention" : "pending",
         worker: s.worker,
         date: s.date,
         scheduledJob: s.jobName || "(job)",
+        scheduledJobId: s.jobId,
         scheduledForeman,
         loggedJob: "",
         loggedForeman: "",
         hours: 0,
+        crewLogged: crew.logged,
+        crewTotal: crew.total,
       });
       continue;
     }
@@ -276,10 +298,13 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
           worker: tc.worker,
           date: tc.date,
           scheduledJob: rows.map((r) => r.jobName).filter(Boolean).join(", ") || "(job)",
+          scheduledJobId: s.jobId,
           scheduledForeman,
           loggedJob: tc.projectName || tc.job,
           loggedForeman: tc.foreman,
           hours: tc.hours,
+          crewLogged: 0,
+          crewTotal: 0,
         });
       } else {
         // same job (or unverifiable) — check foreman
@@ -294,10 +319,13 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
             worker: tc.worker,
             date: tc.date,
             scheduledJob: tc.projectName || tc.job || (s.jobName || "(job)"),
+            scheduledJobId: s.jobId,
             scheduledForeman,
             loggedJob: tc.projectName || tc.job,
             loggedForeman: tc.foreman,
             hours: tc.hours,
+            crewLogged: 0,
+            crewTotal: 0,
           });
         }
       }
@@ -314,10 +342,13 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         worker: tc.worker,
         date: tc.date,
         scheduledJob: "",
+        scheduledJobId: "",
         scheduledForeman: "",
         loggedJob: tc.projectName || tc.job,
         loggedForeman: tc.foreman,
         hours: tc.hours,
+        crewLogged: 0,
+        crewTotal: 0,
       });
     }
   }

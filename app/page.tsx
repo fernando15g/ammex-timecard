@@ -3998,20 +3998,51 @@ function ReconReviewView({
                 {sev === "pending"
                   ? // PENDING: group by scheduled job + date (crew)
                     (() => {
-                      const crews = new Map<string, typeof items>();
+                      const groupsByCrew = new Map<string, typeof items>();
                       for (const d of items) {
                         const k = `${d.scheduledJobId}|${d.date}`;
-                        if (!crews.has(k)) crews.set(k, [] as any);
-                        crews.get(k)!.push(d);
+                        if (!groupsByCrew.has(k)) groupsByCrew.set(k, [] as any);
+                        groupsByCrew.get(k)!.push(d);
                       }
-                      const crewArr = Array.from(crews.entries()).sort((a, b) =>
+                      const crewArr = Array.from(groupsByCrew.entries()).sort((a, b) =>
                         a[1][0].date.localeCompare(b[1][0].date)
                       );
                       return crewArr.map(([k, crew]) => {
                         const first = crew[0];
                         const open = !!crewOpen[k];
-                        const total = first.crewTotal || crew.length;
-                        const logged = first.crewLogged || 0;
+                        // full scheduled roster for this job+date
+                        const roster = crews[k] || [];
+                        const outNames = new Set(crew.map((d) => d.worker.toLowerCase()));
+                        // classify each scheduled member
+                        const rows = (roster.length
+                          ? roster.map((m) => m.worker)
+                          : crew.map((d) => d.worker)
+                        ).map((wname) => {
+                          const lw = wname.toLowerCase();
+                          if (outNames.has(lw)) {
+                            return { worker: wname, state: "out" as const, disc: crew.find((d) => d.worker.toLowerCase() === lw)! };
+                          }
+                          const rosterHit = roster.find((m) => m.worker.toLowerCase() === lw);
+                          if (rosterHit?.logged) return { worker: wname, state: "here" as const, disc: null };
+                          // logged elsewhere → find their different-job disc
+                          const elsewhere = discs.find(
+                            (x) =>
+                              x.worker.toLowerCase() === lw &&
+                              x.date === first.date &&
+                              x.kind === "Different job"
+                          );
+                          return { worker: wname, state: "elsewhere" as const, disc: elsewhere || null };
+                        });
+                        const cOut = rows.filter((r) => r.state === "out").length;
+                        const cHere = rows.filter((r) => r.state === "here").length;
+                        const cElse = rows.filter((r) => r.state === "elsewhere").length;
+                        const summary = [
+                          `${cHere} logged`,
+                          cElse ? `${cElse} elsewhere` : "",
+                          `${cOut} still out`,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ");
                         return (
                           <div
                             key={k}
@@ -4033,22 +4064,71 @@ function ReconReviewView({
                                 <div className="text-rebar text-xs mt-0.5">
                                   {first.scheduledForeman || "—"}
                                 </div>
-                                <div className="text-rebar text-xs mt-0.5">
-                                  {logged} of {total} scheduled logged · {crew.length} still out
-                                </div>
+                                <div className="text-rebar text-xs mt-0.5">{summary}</div>
                               </button>
                             </div>
 
                             {open && (
                               <div className="mt-3 pt-3 border-t border-line space-y-2">
-                                {crew.map((d) => {
+                                {rows.map((r) => {
+                                  if (r.state === "here") {
+                                    return (
+                                      <div
+                                        key={r.worker}
+                                        className="bg-steel/40 rounded-xl px-3 py-2 opacity-60 flex items-center justify-between"
+                                      >
+                                        <span className="text-rebar text-sm font-semibold">{r.worker}</span>
+                                        <span className="text-[10px]" style={{ color: "#4a9e63" }}>✓ logged</span>
+                                      </div>
+                                    );
+                                  }
+                                  if (r.state === "elsewhere") {
+                                    const ed = r.disc as Disc | null;
+                                    const bk = ed ? `${ed.worker}|${ed.date}|${ed.kind}` : `${r.worker}|else`;
+                                    const busy = busyKey === bk;
+                                    return (
+                                      <div
+                                        key={r.worker}
+                                        className="rounded-xl px-3 py-2"
+                                        style={{ background: "rgba(28,33,39,.4)", opacity: 0.85 }}
+                                      >
+                                        <div className="text-concrete text-sm font-semibold mb-0.5 flex items-center gap-2">
+                                          {r.worker}
+                                          {busy && (
+                                            <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />
+                                          )}
+                                        </div>
+                                        <div className="text-rebar text-xs mb-1.5">
+                                          → logged on {ed?.loggedJob || "another job"}
+                                        </div>
+                                        {ed && (
+                                          <div className="flex gap-2 flex-wrap">
+                                            <button
+                                              onClick={() => resolveDisc(ed, "Confirmed OK", "", bk)}
+                                              disabled={busy}
+                                              className="border border-line rounded-lg px-3 py-1.5 text-xs font-bold disabled:opacity-60"
+                                              style={{ color: "#9fdcb4" }}
+                                            >
+                                              Looks right
+                                            </button>
+                                            <button
+                                              onClick={() => setDismissNoteFor(ed)}
+                                              disabled={busy}
+                                              className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
+                                            >
+                                              Dismiss
+                                            </button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  }
+                                  // out
+                                  const d = r.disc as Disc;
                                   const bk = `${d.worker}|${d.date}|${d.kind}`;
                                   const busy = busyKey === bk;
                                   return (
-                                    <div
-                                      key={`${d.worker}|${d.date}`}
-                                      className="bg-steel/40 rounded-xl px-3 py-2"
-                                    >
+                                    <div key={r.worker} className="bg-steel/40 rounded-xl px-3 py-2">
                                       <div className="text-concrete text-sm font-semibold mb-1.5 flex items-center gap-2">
                                         {d.worker}
                                         {busy && (

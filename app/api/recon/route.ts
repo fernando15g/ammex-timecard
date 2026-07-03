@@ -503,6 +503,41 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, projects: jobs });
     }
 
+    if (action === "all_flags") {
+      // Every worker with an open data-sanity flag in the range (for the Lookup
+      // flags overview). Returns per-worker flag summary + confirmed keys.
+      const s = url.searchParams.get("start") || "";
+      const e2 = url.searchParams.get("end") || s;
+      if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
+      const all = await queryEntries(s, e2);
+      const flags = computeFlags(all);
+      const confirmed = await confirmedReviews(s, e2);
+      // build per (worker|date) flag groups, excluding fully-confirmed ones
+      const byWorker = new Map<
+        string,
+        { worker: string; date: string; flags: string[]; job: string }[]
+      >();
+      for (const e of all) {
+        const efl = flags[e.id];
+        if (!efl || !efl.length) continue;
+        const key = e.worker;
+        if (!byWorker.has(key)) byWorker.set(key, []);
+        // dedupe by worker+date (a person+day shows once with its flag set)
+        const list = byWorker.get(key)!;
+        const existing = list.find((x) => x.date === e.date);
+        const label = e.projectName || e.job;
+        if (existing) {
+          for (const f of efl) if (!existing.flags.includes(f)) existing.flags.push(f);
+        } else {
+          list.push({ worker: e.worker, date: e.date, flags: [...efl], job: label });
+        }
+      }
+      const workers = Array.from(byWorker.entries())
+        .map(([worker, days]) => ({ worker, days }))
+        .sort((a, b) => a.worker.localeCompare(b.worker));
+      return NextResponse.json({ ok: true, workers, confirmed });
+    }
+
     if (action === "needs_project") {
       // Non-voided timecards in range missing a Project Helper — for bulk fix.
       const s = url.searchParams.get("start") || "";

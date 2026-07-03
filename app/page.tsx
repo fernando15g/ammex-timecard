@@ -2596,6 +2596,13 @@ function ReconPanel({
   const [msg, setMsg] = useState("");
   const [showVoided, setShowVoided] = useState(false);
 
+  // Lookup flags overview — everyone with an open data-sanity flag in the range
+  const [flagWorkers, setFlagWorkers] = useState<
+    { worker: string; days: { worker: string; date: string; flags: string[]; job: string }[] }[]
+  >([]);
+  const [flagConfirmed, setFlagConfirmed] = useState<{ key: string; refs: string; pageId: string }[]>([]);
+  const [flagsLoading, setFlagsLoading] = useState(false);
+
   // load roster once
   useEffect(() => {
     fetch("/api/recon?action=roster")
@@ -2606,11 +2613,31 @@ function ReconPanel({
       .catch(() => {});
   }, []);
 
-  const search = useCallback(() => {
-    if (!worker) return;
+  // Flags overview — refresh when on Lookup tab or the range changes.
+  const loadFlagsOverview = useCallback(() => {
+    setFlagsLoading(true);
+    fetch(`/api/recon?action=all_flags&start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setFlagWorkers(d.workers || []);
+          setFlagConfirmed(d.confirmed || []);
+        }
+        setFlagsLoading(false);
+      })
+      .catch(() => setFlagsLoading(false));
+  }, [start, end]);
+
+  useEffect(() => {
+    if (view === "find") loadFlagsOverview();
+  }, [view, loadFlagsOverview]);
+
+  const search = useCallback((override?: string) => {
+    const w = override || worker;
+    if (!w) return;
     setLoading(true);
     setMsg("");
-    const url = `/api/recon?start=${start}&end=${end}&worker=${encodeURIComponent(worker)}`;
+    const url = `/api/recon?start=${start}&end=${end}&worker=${encodeURIComponent(w)}`;
     fetch(url)
       .then((r) => r.json())
       .then((d) => {
@@ -2646,6 +2673,7 @@ function ReconPanel({
 
   function refreshAfterWrite() {
     search();
+    loadFlagsOverview();
   }
 
   const flagLabel = (f: string) => FLAG_LABEL[f] || f;
@@ -2694,7 +2722,7 @@ function ReconPanel({
               view === "review" ? "bg-safety text-steel" : "text-rebar"
             }`}
           >
-            Review
+            Reconcile
           </button>
           <button
             onClick={() => setView("find")}
@@ -2702,7 +2730,7 @@ function ReconPanel({
               view === "find" ? "bg-safety text-steel" : "text-rebar"
             }`}
           >
-            Find
+            Lookup
           </button>
         </div>
 
@@ -2744,19 +2772,83 @@ function ReconPanel({
 
         {view === "find" ? (
           <>
+            {/* Flags to review — everyone with an open flag in this range */}
+            {(() => {
+              const isOpen = (wname: string, date: string, f: string) => {
+                const key = `${wname.toLowerCase()}|${date}|${(FLAG_LABEL[f] || f).toLowerCase()}`;
+                return !flagConfirmed.some((c) => c.key === key);
+              };
+              // keep only worker-days that still have at least one open flag
+              const openWorkers = flagWorkers
+                .map((w) => ({
+                  worker: w.worker,
+                  days: w.days.filter((d) => d.flags.some((f) => isOpen(w.worker, d.date, f))),
+                }))
+                .filter((w) => w.days.length > 0);
+              const total = openWorkers.reduce((s, w) => s + w.days.length, 0);
+              return (
+                <div className="mb-4">
+                  {flagsLoading ? (
+                    <div className="text-rebar text-sm px-1">Checking flags…</div>
+                  ) : total === 0 ? (
+                    <div className="flex items-center gap-2 text-sm px-1">
+                      <span style={{ color: "#4a9e63" }} className="font-bold">✓</span>
+                      <span className="text-rebar">All flags clear in this range.</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2 mb-2 px-1">
+                        <span className="text-xs font-bold uppercase tracking-wider" style={{ color: "#e0a63b" }}>
+                          Flags to review
+                        </span>
+                        <span className="text-rebar text-xs">{total}</span>
+                      </div>
+                      {openWorkers.map((w) => (
+                        <button
+                          key={w.worker}
+                          onClick={() => {
+                            setWorker(w.worker);
+                            search(w.worker);
+                          }}
+                          className="w-full text-left bg-graphite border border-line rounded-2xl p-3.5 mb-2"
+                          style={{ borderLeft: "4px solid #e0a63b" }}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-concrete font-bold text-[15px]">{w.worker}</span>
+                            <span className="text-rebar text-xs">
+                              {w.days.length} {w.days.length === 1 ? "day" : "days"} ›
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 mt-1.5">
+                            {Array.from(
+                              new Set(w.days.flatMap((d) => d.flags.filter((f) => isOpen(w.worker, d.date, f))))
+                            ).map((f) => (
+                              <span
+                                key={f}
+                                className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+                                style={{ color: "#f0cf8f", background: "rgba(224,166,59,.16)" }}
+                              >
+                                ⚑ {FLAG_LABEL[f] || f}
+                              </span>
+                            ))}
+                          </div>
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              );
+            })()}
 
-            {/* Worker picker */}
+            {/* Look up a specific worker */}
             <button
               onClick={() => {
                 setPickerOpen(true);
                 setWorkerQuery("");
               }}
-              className="w-full bg-graphite border border-line rounded-xl h-12 px-4 text-left mb-4 flex items-center justify-between"
+              className="w-full bg-safety text-steel rounded-xl py-3.5 font-bold mb-4"
             >
-              <span className={worker ? "text-concrete font-semibold" : "text-rebar"}>
-                {worker || "Search a worker…"}
-              </span>
-              <span className="text-rebar">▾</span>
+              {worker ? `Looking up: ${worker}` : "Find a worker"}
             </button>
 
             {/* Results */}
@@ -2866,6 +2958,7 @@ function ReconPanel({
                                 });
                               }
                               setConfirmed((c) => [...c, ...optimistic]);
+                              loadFlagsOverview();
                             }}
                             className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
                           >

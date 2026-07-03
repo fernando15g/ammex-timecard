@@ -2763,8 +2763,17 @@ function ReconPanel({
             {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
             {!loading && msg && <div className="text-rebar text-sm px-1 py-2">{msg}</div>}
             {!loading && worker && entries.length > 0 && (
-              <div className="text-rebar text-xs mb-2 px-1">
-                {entries.length} {entries.length === 1 ? "entry" : "entries"} · {prettyDate(start, lang).split(",")[1]?.trim() || start} – {prettyDate(end, lang).split(",")[1]?.trim() || end}
+              <div className="flex items-center justify-between mb-2 px-1">
+                <span className="text-rebar text-xs">
+                  {entries.length} {entries.length === 1 ? "entry" : "entries"} · {prettyDate(start, lang).split(",")[1]?.trim() || start} – {prettyDate(end, lang).split(",")[1]?.trim() || end}
+                </span>
+                <button
+                  onClick={() => search()}
+                  aria-label="Refresh"
+                  className="w-8 h-8 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center active:text-safety shrink-0"
+                >
+                  ↻
+                </button>
               </div>
             )}
 
@@ -3603,7 +3612,7 @@ function ReconReviewView({
   const [noShowFor, setNoShowFor] = useState<Disc | null>(null);
   const [addFor, setAddFor] = useState<Disc | null>(null);
   const [crewOpen, setCrewOpen] = useState<Record<string, boolean>>({});
-  const [viewCrew, setViewCrew] = useState<{ jobId: string; date: string; job: string; foreman: string } | null>(null);
+  const [viewCrew, setViewCrew] = useState<{ jobId: string; date: string; job: string; foreman: string; worker: string } | null>(null);
   const [dismissAllFor, setDismissAllFor] = useState<Disc[] | null>(null);
   const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
   const [showMissing, setShowMissing] = useState(false);
@@ -4110,6 +4119,7 @@ function ReconReviewView({
                                             date: d.date,
                                             job: d.scheduledJob,
                                             foreman: d.scheduledForeman,
+                                            worker: d.worker,
                                           })
                                       : undefined
                                   }
@@ -4396,6 +4406,7 @@ function ReconAddModal({
     worker: string;
     date: string;
     scheduledJob: string;
+    scheduledJobId: string;
     scheduledForeman: string;
   };
   lang: Lang;
@@ -4404,6 +4415,25 @@ function ReconAddModal({
 }) {
   const [hours, setHours] = useState("");
   const [saving, setSaving] = useState(false);
+  // project — pre-filled from the schedule, changeable
+  const [projectId, setProjectId] = useState(disc.scheduledJobId || "");
+  const [projectName, setProjectName] = useState(disc.scheduledJob || "");
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
 
   async function add() {
     const h = parseFloat(hours);
@@ -4416,9 +4446,10 @@ function ReconAddModal({
         op: "add",
         worker: disc.worker,
         date: disc.date,
-        job: disc.scheduledJob,
+        job: projectName || disc.scheduledJob,
         hours: h,
         foreman: disc.scheduledForeman,
+        projectId: projectId || undefined,
       }),
     });
     setSaving(false);
@@ -4436,13 +4467,25 @@ function ReconAddModal({
         </div>
         <div className="text-rebar text-xs mb-4">
           {disc.worker} · {prettyDate(disc.date, lang)}
+          {disc.scheduledForeman ? ` · ${disc.scheduledForeman}` : ""}
         </div>
-        <div className="bg-steel/40 rounded-xl p-3 mb-4 text-sm">
-          <div className="text-rebar text-xs">Job (from schedule)</div>
-          <div className="text-concrete font-semibold">{disc.scheduledJob || "—"}</div>
-          <div className="text-rebar text-xs mt-2">Foreman</div>
-          <div className="text-concrete font-semibold">{disc.scheduledForeman || "—"}</div>
-        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Project {projectId === disc.scheduledJobId && disc.scheduledJobId ? "(from schedule)" : ""}
+        </label>
+        <button
+          onClick={() => {
+            setPickerOpen(true);
+            setQuery("");
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+        >
+          <span className={projectName ? "text-concrete" : "text-rebar"}>
+            {projectName || "Pick a project…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
         <input
           type="number"
@@ -4468,6 +4511,56 @@ function ReconAddModal({
           </button>
         </div>
       </div>
+
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setProjectId(p.id);
+                    setProjectName(p.name);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4480,13 +4573,15 @@ function ReconCrewModal({
   lang,
   onClose,
 }: {
-  info: { jobId: string; date: string; job: string; foreman: string };
+  info: { jobId: string; date: string; job: string; foreman: string; worker: string };
   crew: { worker: string; logged: boolean }[];
   lang: Lang;
   onClose: () => void;
 }) {
-  const missing = crew.filter((c) => !c.logged);
-  const logged = crew.filter((c) => c.logged);
+  const clickedLower = (info.worker || "").toLowerCase();
+  const clicked = crew.find((c) => c.worker.toLowerCase() === clickedLower);
+  const otherMissing = crew.filter((c) => !c.logged && c.worker.toLowerCase() !== clickedLower);
+  const logged = crew.filter((c) => c.logged && c.worker.toLowerCase() !== clickedLower);
   return (
     <div className="fixed inset-0 z-[75] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
       <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
@@ -4503,12 +4598,34 @@ function ReconCrewModal({
           </div>
         </div>
         <div className="p-3 overflow-y-auto overscroll-contain space-y-2">
-          {missing.length > 0 && (
-            <div className="text-[11px] font-bold uppercase tracking-wide px-1" style={{ color: "#e5533c" }}>
-              Missing ({missing.length})
+          {/* the card you opened */}
+          {clicked && (
+            <>
+              <div className="text-[11px] font-bold uppercase tracking-wide px-1" style={{ color: "#8fbcff" }}>
+                This card
+              </div>
+              <div
+                className="rounded-xl px-3 py-2.5 text-sm font-semibold text-concrete flex items-center justify-between"
+                style={
+                  clicked.logged
+                    ? { border: "1px solid rgba(47,115,216,.5)", background: "rgba(47,115,216,.08)" }
+                    : { border: "1px solid rgba(229,83,60,.6)", background: "rgba(229,83,60,.1)" }
+                }
+              >
+                {clicked.worker}
+                <span className="text-[10px]" style={{ color: clicked.logged ? "#4a9e63" : "#e5533c" }}>
+                  {clicked.logged ? "✓ logged" : "missing"}
+                </span>
+              </div>
+            </>
+          )}
+
+          {otherMissing.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2" style={{ color: "#e5533c" }}>
+              Other missing ({otherMissing.length})
             </div>
           )}
-          {missing.map((c) => (
+          {otherMissing.map((c) => (
             <div
               key={c.worker}
               className="rounded-xl px-3 py-2.5 text-sm font-semibold text-concrete"
@@ -4517,6 +4634,7 @@ function ReconCrewModal({
               {c.worker}
             </div>
           ))}
+
           {logged.length > 0 && (
             <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2 text-rebar">
               Logged ({logged.length})

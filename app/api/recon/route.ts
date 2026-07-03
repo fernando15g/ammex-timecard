@@ -582,7 +582,7 @@ export async function POST(req: Request) {
     }
 
     if (op === "add") {
-      const { worker, date, job, hours, foreman } = body;
+      const { worker, date, job, hours, foreman, projectId } = body;
       const props: any = {
         [TIMECARD_PROPS.worker]: { title: [{ text: { content: worker } }] },
         [TIMECARD_PROPS.date]: { date: { start: date } },
@@ -590,6 +590,7 @@ export async function POST(req: Request) {
       };
       if (job) props[TIMECARD_PROPS.job] = { rich_text: [{ text: { content: job } }] };
       if (foreman) props[TIMECARD_PROPS.foreman] = { rich_text: [{ text: { content: foreman } }] };
+      if (projectId) props[TIMECARD_PROPS.projectHelper] = { relation: [{ id: projectId }] };
       const created = await notion.pages.create({
         parent: { database_id: TIMECARDS_DB_ID },
         properties: props,

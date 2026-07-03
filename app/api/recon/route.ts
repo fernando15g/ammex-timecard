@@ -629,8 +629,11 @@ export async function POST(req: Request) {
       if (date) props[RECON_PROPS.date] = { date: { start: date } };
       if (note) props[RECON_PROPS.note] = { rich_text: [{ text: { content: note } }] };
       if (refs) props[RECON_PROPS.refs] = { rich_text: [{ text: { content: refs } }] };
-      await notion.pages.create({ parent: { database_id: RECON_LOG_DB_ID }, properties: props });
-      return NextResponse.json({ ok: true });
+      const created = await notion.pages.create({
+        parent: { database_id: RECON_LOG_DB_ID },
+        properties: props,
+      });
+      return NextResponse.json({ ok: true, id: (created as any).id });
     }
 
     if (op === "unlog") {

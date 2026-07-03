@@ -3616,6 +3616,12 @@ function ReconReviewView({
   const [dismissAllFor, setDismissAllFor] = useState<Disc[] | null>(null);
   const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
   const [showMissing, setShowMissing] = useState(false);
+  // session undo log — recently resolved discrepancies
+  const [resolvedLog, setResolvedLog] = useState<
+    { disc: Disc; status: string; pageId: string }[]
+  >([]);
+  const [showResolved, setShowResolved] = useState(false);
+  const [dismissNoteFor, setDismissNoteFor] = useState<Disc | null>(null);
 
   const today = (() => {
     const d = new Date();
@@ -3712,28 +3718,49 @@ function ReconReviewView({
   // resolve a discrepancy: log outcome + drop it from the list
   async function resolveDisc(d: Disc, status: string, note: string, key: string) {
     setBusyKey(key);
-    await fetch("/api/recon", {
+    const res = await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note }),
-    });
+    }).then((r) => r.json()).catch(() => null);
     setDiscs((cur) =>
       cur.filter((x) => !(x.worker === d.worker && x.date === d.date && x.kind === d.kind))
     );
+    if (res?.id) setResolvedLog((cur) => [{ disc: d, status, pageId: res.id }, ...cur].slice(0, 20));
     setBusyKey("");
   }
 
   // resolve many at once (bulk dismiss — job cancelled)
   async function resolveMany(items: Disc[], status: string, note: string) {
+    const added: { disc: Disc; status: string; pageId: string }[] = [];
     for (const d of items) {
-      await fetch("/api/recon", {
+      const res = await fetch("/api/recon", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note }),
-      });
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.id) added.push({ disc: d, status, pageId: res.id });
     }
     const keys = new Set(items.map((d) => `${d.worker}|${d.date}|${d.kind}`));
     setDiscs((cur) => cur.filter((x) => !keys.has(`${x.worker}|${x.date}|${x.kind}`)));
+    if (added.length) setResolvedLog((cur) => [...added, ...cur].slice(0, 20));
+  }
+
+  // undo a resolution: archive the log record + bring the item back
+  async function undoResolve(entry: { disc: Disc; status: string; pageId: string }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "unlog", pageId: entry.pageId }),
+    });
+    setResolvedLog((cur) => cur.filter((x) => x.pageId !== entry.pageId));
+    setDiscs((cur) =>
+      cur.some(
+        (x) => x.worker === entry.disc.worker && x.date === entry.disc.date && x.kind === entry.disc.kind
+      )
+        ? cur
+        : [...cur, entry.disc]
+    );
   }
 
   // One card per JOB NAME + DATE. Sorted by date, then job name.
@@ -4044,7 +4071,7 @@ function ReconReviewView({
                                           No-show
                                         </button>
                                         <button
-                                          onClick={() => resolveDisc(d, "Dismissed", "", bk)}
+                                          onClick={() => setDismissNoteFor(d)}
                                           disabled={busy}
                                           className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
                                         >
@@ -4109,7 +4136,7 @@ function ReconReviewView({
                                   busy={busyKey === bk}
                                   onAdd={() => setAddFor(d)}
                                   onNoShow={() => setNoShowFor(d)}
-                                  onDismiss={() => resolveDisc(d, "Dismissed", "", bk)}
+                                  onDismiss={() => setDismissNoteFor(d)}
                                   onLooksRight={() => resolveDisc(d, "Confirmed OK", "", bk)}
                                   onViewCrew={
                                     d.kind === "No timecard" && d.scheduledJobId
@@ -4134,6 +4161,43 @@ function ReconReviewView({
             );
           })}
         </>
+      )}
+
+      {/* Recently resolved — session undo strip */}
+      {ranCheck && resolvedLog.length > 0 && (
+        <div className="mt-6 pt-4 border-t border-line">
+          <button
+            onClick={() => setShowResolved((v) => !v)}
+            className="w-full flex items-center justify-between text-rebar text-xs font-bold py-1 px-1"
+          >
+            <span>Recently resolved ({resolvedLog.length})</span>
+            <span>{showResolved ? "▾" : "▸"}</span>
+          </button>
+          {showResolved && (
+            <div className="mt-2 space-y-2">
+              {resolvedLog.map((r) => (
+                <div
+                  key={r.pageId}
+                  className="flex items-center justify-between gap-3 bg-graphite border border-line rounded-xl px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-concrete text-sm font-semibold truncate">{r.disc.worker}</div>
+                    <div className="text-rebar text-xs">
+                      {r.status} · {prettyDate(r.disc.date, lang).split(",")[0]} ·{" "}
+                      {r.disc.scheduledJob || r.disc.loggedJob || r.disc.kind}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => undoResolve(r)}
+                    className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                  >
+                    Undo
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {bulkGroup && (
@@ -4210,6 +4274,19 @@ function ReconReviewView({
           cards={missingCards}
           lang={lang}
           onClose={() => setShowMissing(false)}
+        />
+      )}
+
+      {dismissNoteFor && (
+        <ReconDismissNoteModal
+          disc={dismissNoteFor}
+          lang={lang}
+          onClose={() => setDismissNoteFor(null)}
+          onConfirm={(note) => {
+            const d = dismissNoteFor;
+            resolveDisc(d, "Dismissed", note, `${d.worker}|${d.date}|${d.kind}`);
+            setDismissNoteFor(null);
+          }}
         />
       )}
     </div>
@@ -4749,6 +4826,64 @@ function ReconMissingCardsModal({
           {cards.length === 0 && (
             <div className="text-rebar text-sm px-2 py-3">No missing cards.</div>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Individual dismiss — light confirmation with an optional reason.
+function ReconDismissNoteModal({
+  disc,
+  lang,
+  onClose,
+  onConfirm,
+}: {
+  disc: { worker: string; date: string; kind: string; scheduledJob?: string; loggedJob?: string };
+  lang: Lang;
+  onClose: () => void;
+  onConfirm: (note: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Dismiss</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {disc.worker} · {prettyDate(disc.date, lang)} ·{" "}
+          {disc.scheduledJob || disc.loggedJob || disc.kind}
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason (optional)
+        </label>
+        <input
+          autoFocus
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. listed by mistake, never called in"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-1"
+        />
+        <div className="text-rebar text-[11px] mb-4">
+          It's logged either way; this just records why.
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onConfirm(note.trim())}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+          >
+            Dismiss
+          </button>
         </div>
       </div>
     </div>

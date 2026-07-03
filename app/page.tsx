@@ -2670,6 +2670,7 @@ function ReconPanel({
   // ---- edit / void / note modals ----
   const [editEntry, setEditEntry] = useState<ReconEntry | null>(null);
   const [voidEntry, setVoidEntry] = useState<ReconEntry | null>(null);
+  const [splitEntry, setSplitEntry] = useState<ReconEntry | null>(null);
 
   function refreshAfterWrite() {
     search();
@@ -2998,6 +2999,12 @@ function ReconPanel({
                         Edit
                       </button>
                       <button
+                        onClick={() => setSplitEntry(e)}
+                        className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Split
+                      </button>
+                      <button
                         onClick={() => setVoidEntry(e)}
                         className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
                       >
@@ -3130,6 +3137,18 @@ function ReconPanel({
           onClose={() => setVoidEntry(null)}
           onSaved={() => {
             setVoidEntry(null);
+            refreshAfterWrite();
+          }}
+        />
+      )}
+
+      {splitEntry && (
+        <ReconSplitModal
+          entry={splitEntry}
+          lang={lang}
+          onClose={() => setSplitEntry(null)}
+          onSaved={() => {
+            setSplitEntry(null);
             refreshAfterWrite();
           }}
         />
@@ -3508,6 +3527,232 @@ function ReconVoidModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Split one timecard across two jobs. Enforces that the parts equal the
+// original total (to change the total, edit the entry first, then split).
+function ReconSplitModal({
+  entry,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  entry: ReconEntry;
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const total = entry.hours;
+  const [origHours, setOrigHours] = useState(String(total));
+  const [newHours, setNewHours] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+
+  // new-job project picker
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [newProjectId, setNewProjectId] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  const oh = parseFloat(origHours);
+  const nh = parseFloat(newHours);
+  const sum = (isNaN(oh) ? 0 : oh) + (isNaN(nh) ? 0 : nh);
+  const balanced = !isNaN(oh) && !isNaN(nh) && Math.abs(sum - total) < 0.001 && oh > 0 && nh > 0;
+  const canSave = balanced && !!newProjectId;
+
+  // auto-fill new hours as (total - orig) when orig changes
+  function onOrigChange(v: string) {
+    setOrigHours(v);
+    const o = parseFloat(v);
+    if (!isNaN(o) && o >= 0 && o <= total) setNewHours(String(+(total - o).toFixed(2)));
+  }
+
+  async function save() {
+    setSaving(true);
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "split",
+        id: entry.id,
+        origHours: oh,
+        origProjectId: entry.projectId || "",
+        origProjectName: entry.projectName || entry.job,
+        newHours: nh,
+        newProjectId,
+        newProjectName,
+        worker: entry.worker,
+        date: entry.date,
+        foreman: entry.foreman,
+        job: entry.job,
+      }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  const origName = entry.projectName || entry.job || "—";
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Split timecard</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {prettyDate(entry.date, lang)} · total {total}h
+        </div>
+
+        {/* Original job */}
+        <div className="bg-steel/40 rounded-xl p-3 mb-3">
+          <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-1">Keep on</div>
+          <div className="text-concrete font-semibold text-sm mb-2">{origName}</div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              value={origHours}
+              onChange={(e) => onOrigChange(e.target.value)}
+              className="w-24 bg-steel border border-line rounded-lg h-10 px-3 text-concrete"
+            />
+            <span className="text-rebar text-sm">hours</span>
+          </div>
+        </div>
+
+        {/* New job */}
+        <div className="bg-steel/40 rounded-xl p-3 mb-3">
+          <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-1">Move to</div>
+          <button
+            onClick={() => {
+              setPickerOpen(true);
+              setQuery("");
+            }}
+            className="w-full bg-steel border border-line rounded-lg h-10 px-3 text-left mb-2 flex items-center justify-between"
+          >
+            <span className={newProjectName ? "text-concrete text-sm" : "text-rebar text-sm"}>
+              {newProjectName || "Pick the other project…"}
+            </span>
+            <span className="text-rebar">▾</span>
+          </button>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              value={newHours}
+              onChange={(e) => setNewHours(e.target.value)}
+              className="w-24 bg-steel border border-line rounded-lg h-10 px-3 text-concrete"
+            />
+            <span className="text-rebar text-sm">hours</span>
+          </div>
+        </div>
+
+        {/* Balance indicator */}
+        <div
+          className="text-center text-sm font-bold mb-4"
+          style={{ color: balanced ? "#4a9e63" : "#e5533c" }}
+        >
+          {origHours || 0} + {newHours || 0} = {sum || 0}h{" "}
+          {balanced ? "✓" : `(must equal ${total}h)`}
+        </div>
+
+        {!confirm ? (
+          <button
+            disabled={!canSave}
+            onClick={() => setConfirm(true)}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Split
+          </button>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">
+              Split into {oh}h {origName} + {nh}h {newProjectName}?
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirm(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={saving}
+                onClick={save}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Splitting…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setNewProjectId(p.id);
+                    setNewProjectName(p.name);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

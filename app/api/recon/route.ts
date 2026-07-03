@@ -607,6 +607,61 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true });
     }
 
+    if (op === "split") {
+      // Split one timecard into two jobs. Updates the original (hours + optional
+      // project), creates a new entry for the remainder, logs both.
+      const {
+        id,
+        origHours,
+        origProjectId,
+        origProjectName,
+        newHours,
+        newProjectId,
+        newProjectName,
+        worker,
+        date,
+        foreman,
+        job,
+      } = body;
+
+      // 1) update original hours (+ project if changed)
+      const origProps: any = { [TIMECARD_PROPS.hours]: { number: origHours } };
+      if (typeof origProjectId === "string")
+        origProps[TIMECARD_PROPS.projectHelper] = { relation: origProjectId ? [{ id: origProjectId }] : [] };
+      await notion.pages.update({ page_id: id, properties: origProps });
+
+      // 2) create the new entry for the remainder
+      const newProps: any = {
+        [TIMECARD_PROPS.worker]: { title: [{ text: { content: worker } }] },
+        [TIMECARD_PROPS.date]: { date: { start: date } },
+        [TIMECARD_PROPS.hours]: { number: newHours },
+      };
+      if (foreman) newProps[TIMECARD_PROPS.foreman] = { rich_text: [{ text: { content: foreman } }] };
+      if (job) newProps[TIMECARD_PROPS.job] = { rich_text: [{ text: { content: job } }] };
+      if (newProjectId) newProps[TIMECARD_PROPS.projectHelper] = { relation: [{ id: newProjectId }] };
+      const created = await notion.pages.create({
+        parent: { database_id: TIMECARDS_DB_ID },
+        properties: newProps,
+      });
+
+      // 3) log the split
+      try {
+        const desc = `Split ${origHours + newHours}h → ${origHours}h ${origProjectName || "job"} + ${newHours}h ${newProjectName || "job"}`;
+        await notion.pages.create({
+          parent: { database_id: RECON_LOG_DB_ID },
+          properties: {
+            [RECON_PROPS.worker]: { title: [{ text: { content: worker } }] },
+            [RECON_PROPS.status]: { select: { name: "Fixed" } },
+            [RECON_PROPS.note]: { rich_text: [{ text: { content: desc } }] },
+            [RECON_PROPS.refs]: { rich_text: [{ text: { content: `${id},${(created as any).id}` } }] },
+            ...(date ? { [RECON_PROPS.date]: { date: { start: date } } } : {}),
+          },
+        });
+      } catch { /* logging shouldn't block the split */ }
+
+      return NextResponse.json({ ok: true, id: (created as any).id });
+    }
+
     if (op === "void") {
       const { id, voided, note } = body;
       const props: any = { [TIMECARD_PROPS.voided]: { checkbox: !!voided } };

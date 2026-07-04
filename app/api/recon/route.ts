@@ -216,7 +216,9 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   // real project (projectId) = the scheduled jobId.
   const loggedOnJobDate = new Set<string>(); // `${jobId}|${date}`
   const loggedWorkerOnJobDate = new Set<string>(); // `${worker}|${jobId}|${date}`
+  const loggedWorkerAnyDate = new Set<string>(); // `${worker}|${date}` (any job)
   for (const c of live) {
+    loggedWorkerAnyDate.add(`${c.worker.toLowerCase()}|${c.date}`);
     if (c.projectId) {
       loggedOnJobDate.add(`${c.projectId}|${c.date}`);
       loggedWorkerOnJobDate.add(`${c.worker.toLowerCase()}|${c.projectId}|${c.date}`);
@@ -227,22 +229,24 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   // Also collect the scheduled crew names + who's still missing (for the popup).
   const crewByJobDate = new Map<
     string,
-    { total: number; logged: number; foreman: string; jobName: string; date: string; jobId: string;
+    { total: number; logged: number; elsewhere: number; foreman: string; jobName: string; date: string; jobId: string;
       crew: { worker: string; logged: boolean }[] }
   >();
   for (const s of sched) {
     const jk = `${s.jobId}|${s.date}`;
     if (!crewByJobDate.has(jk)) {
       crewByJobDate.set(jk, {
-        total: 0, logged: 0,
+        total: 0, logged: 0, elsewhere: 0,
         foreman: leadByJobDate.get(jk) || "",
         jobName: s.jobName, date: s.date, jobId: s.jobId, crew: [],
       });
     }
     const rec = crewByJobDate.get(jk)!;
     const didLog = loggedWorkerOnJobDate.has(`${s.worker.toLowerCase()}|${s.jobId}|${s.date}`);
+    const loggedAnywhere = loggedWorkerAnyDate.has(`${s.worker.toLowerCase()}|${s.date}`);
     rec.total += 1;
     if (didLog) rec.logged += 1;
+    else if (loggedAnywhere) rec.elsewhere += 1; // logged, but on another job
     rec.crew.push({ worker: s.worker, logged: didLog });
     if (s.jobName && !rec.jobName) rec.jobName = s.jobName;
   }
@@ -293,6 +297,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     hours: number;
     crewLogged: number;
     crewTotal: number;
+    crewElsewhere: number;
   };
   const discs: Disc[] = [];
 
@@ -307,7 +312,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
       const ago = daysAgo(s.date, todayISO);
       if (ago < 0) continue;
       const scheduledForeman = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
-      const crew = crewByJobDate.get(`${s.jobId}|${s.date}`) || { total: 0, logged: 0 };
+      const crew = crewByJobDate.get(`${s.jobId}|${s.date}`) || { total: 0, logged: 0, elsewhere: 0 };
       discs.push({
         kind: "No timecard",
         severity: ago >= 2 ? "attention" : "pending",
@@ -321,6 +326,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         hours: 0,
         crewLogged: crew.logged,
         crewTotal: crew.total,
+        crewElsewhere: crew.elsewhere,
       });
       continue;
     }
@@ -344,6 +350,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
           hours: tc.hours,
           crewLogged: 0,
           crewTotal: 0,
+          crewElsewhere: 0,
         });
       } else {
         // same job (or unverifiable) — check foreman
@@ -365,6 +372,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
             hours: tc.hours,
             crewLogged: 0,
             crewTotal: 0,
+            crewElsewhere: 0,
           });
         }
       }
@@ -388,6 +396,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         hours: tc.hours,
         crewLogged: 0,
         crewTotal: 0,
+        crewElsewhere: 0,
       });
     }
   }
@@ -503,6 +512,43 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: true, projects: jobs });
     }
 
+    if (action === "cards") {
+      // Card browser: all crew cards for the range — submitted (grouped by
+      // job+foreman+date) and missing (whole crew blank). Read-only.
+      const s = url.searchParams.get("start") || "";
+      const e2 = url.searchParams.get("end") || s;
+      const today = url.searchParams.get("today") || s;
+      if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
+      const result = await reconcile(s, e2, today); // gives missingCards
+      const all = await queryEntries(s, e2);
+      const live = all.filter((e) => !e.voided);
+      // group submitted entries by project+foreman+date
+      const map = new Map<
+        string,
+        { job: string; projectId: string; foreman: string; date: string; entries: any[] }
+      >();
+      for (const e of live) {
+        const key = `${e.projectId || e.job}|${e.foreman}|${e.date}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            job: e.projectName || e.job || "(no job)",
+            projectId: e.projectId || "",
+            foreman: e.foreman || "",
+            date: e.date,
+            entries: [],
+          });
+        }
+        map.get(key)!.entries.push({
+          id: e.id, worker: e.worker, hours: e.hours, job: e.job,
+          projectName: e.projectName, projectId: e.projectId, foreman: e.foreman, date: e.date,
+        });
+      }
+      const submitted = Array.from(map.values()).sort(
+        (a, b) => b.date.localeCompare(a.date) || a.job.localeCompare(b.job)
+      );
+      return NextResponse.json({ ok: true, submitted, missing: result.missingCards });
+    }
+
     if (action === "all_flags") {
       // Every worker with an open data-sanity flag in the range (for the Lookup
       // flags overview). Returns per-worker flag summary + confirmed keys.
@@ -579,13 +625,14 @@ export async function POST(req: Request) {
     const { op } = body;
 
     if (op === "edit") {
-      const { id, hours, job, foreman, projectId } = body;
+      const { id, hours, job, foreman, projectId, date } = body;
       const props: any = {};
       if (typeof hours === "number") props[TIMECARD_PROPS.hours] = { number: hours };
       if (typeof job === "string") props[TIMECARD_PROPS.job] = { rich_text: [{ text: { content: job } }] };
       if (typeof foreman === "string") props[TIMECARD_PROPS.foreman] = { rich_text: [{ text: { content: foreman } }] };
       if (typeof projectId === "string")
         props[TIMECARD_PROPS.projectHelper] = { relation: projectId ? [{ id: projectId }] : [] };
+      if (typeof date === "string" && date) props[TIMECARD_PROPS.date] = { date: { start: date } };
       await notion.pages.update({ page_id: id, properties: props });
 
       // Always log the change (auto description + optional note) to the
@@ -605,6 +652,28 @@ export async function POST(req: Request) {
         } catch { /* logging failure shouldn't block the edit */ }
       }
       return NextResponse.json({ ok: true });
+    }
+
+    if (op === "bulk_edit") {
+      // Set date and/or project on many entries at once (card-level fix).
+      const { ids, date, projectId } = body;
+      if (!Array.isArray(ids) || ids.length === 0)
+        return NextResponse.json({ ok: false, error: "ids required" }, { status: 400 });
+      const props: any = {};
+      if (typeof date === "string" && date) props[TIMECARD_PROPS.date] = { date: { start: date } };
+      if (typeof projectId === "string")
+        props[TIMECARD_PROPS.projectHelper] = { relation: projectId ? [{ id: projectId }] : [] };
+      let done = 0;
+      const failed: string[] = [];
+      for (const id of ids) {
+        try {
+          await notion.pages.update({ page_id: id, properties: props });
+          done++;
+        } catch {
+          failed.push(id);
+        }
+      }
+      return NextResponse.json({ ok: true, done, failed: failed.length });
     }
 
     if (op === "split") {

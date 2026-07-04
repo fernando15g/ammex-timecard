@@ -3237,6 +3237,7 @@ function ReconEditModal({
   const [foreman, setForeman] = useState(entry.foreman);
   const [projectId, setProjectId] = useState(entry.projectId);
   const [projectName, setProjectName] = useState(entry.projectName);
+  const [dateVal, setDateVal] = useState(entry.date);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(false);
@@ -3276,7 +3277,8 @@ function ReconEditModal({
     parseFloat(hours) !== entry.hours ||
     job !== entry.job ||
     foreman !== entry.foreman ||
-    projectId !== entry.projectId;
+    projectId !== entry.projectId ||
+    dateVal !== entry.date;
 
   async function save() {
     setSaving(true);
@@ -3286,6 +3288,10 @@ function ReconEditModal({
     if (!isNaN(h) && h !== entry.hours) {
       body.hours = h;
       changes.push(`Hours ${entry.hours} → ${h}`);
+    }
+    if (dateVal !== entry.date) {
+      body.date = dateVal;
+      changes.push(`Date ${entry.date} → ${dateVal}`);
     }
     if (job !== entry.job) {
       body.job = job;
@@ -3301,7 +3307,7 @@ function ReconEditModal({
     }
     // change-logging fields (always logs the auto description; note optional)
     body.logWorker = entry.worker;
-    body.logDate = entry.date;
+    body.logDate = dateVal || entry.date;
     body.changeDesc = changes.join("; ");
     if (note.trim()) body.note = note.trim();
     await fetch("/api/recon", {
@@ -3351,6 +3357,14 @@ function ReconEditModal({
           </button>
         )}
         <div className="mb-3" />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Date</label>
+        <input
+          type="date"
+          value={dateVal}
+          onChange={(e) => setDateVal(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
 
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
         <input
@@ -3916,7 +3930,14 @@ function DiscCard({
 
       {isNoTimecard && d.crewTotal > 1 && (
         <div className="text-rebar text-xs mt-2 italic">
-          {d.crewLogged} of {d.crewTotal} scheduled crew logged this job
+          {[
+            `${d.crewLogged} logged`,
+            d.crewElsewhere ? `${d.crewElsewhere} elsewhere` : "",
+            `${d.crewTotal - d.crewLogged - (d.crewElsewhere || 0)} still out`,
+          ]
+            .filter(Boolean)
+            .join(" · ")}{" "}
+          <span className="not-italic">· of {d.crewTotal} scheduled</span>
         </div>
       )}
 
@@ -4034,6 +4055,7 @@ function ReconReviewView({
   const [dismissAllFor, setDismissAllFor] = useState<Disc[] | null>(null);
   const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
   const [showMissing, setShowMissing] = useState(false);
+  const [showCards, setShowCards] = useState(false);
   // session undo log — recently resolved discrepancies
   const [resolvedLog, setResolvedLog] = useState<
     { disc: Disc; status: string; pageId: string }[]
@@ -4366,16 +4388,26 @@ function ReconReviewView({
 
       {discLoading && <div className="text-rebar text-sm px-1 py-3">Checking…</div>}
 
-      {ranCheck && !discLoading && missingCards.length > 0 && (
+      {ranCheck && !discLoading && (
         <button
-          onClick={() => setShowMissing(true)}
+          onClick={() => setShowCards(true)}
           className="w-full flex items-center gap-2 rounded-xl px-4 py-3 mb-4 text-left"
-          style={{ background: "rgba(229,83,60,.12)", border: "1px solid rgba(229,83,60,.4)" }}
+          style={
+            missingCards.length > 0
+              ? { background: "rgba(229,83,60,.12)", border: "1px solid rgba(229,83,60,.4)" }
+              : { background: "var(--graphite,#272d35)", border: "1px solid #39414c" }
+          }
         >
-          <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
-          <span className="text-concrete font-bold text-sm">
-            {missingCards.length} missing {missingCards.length === 1 ? "card" : "cards"}
-          </span>
+          {missingCards.length > 0 ? (
+            <>
+              <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+              <span className="text-concrete font-bold text-sm">
+                {missingCards.length} missing {missingCards.length === 1 ? "card" : "cards"}
+              </span>
+            </>
+          ) : (
+            <span className="text-concrete font-bold text-sm">View timecards</span>
+          )}
           <span className="text-rebar text-xs ml-auto">tap to view →</span>
         </button>
       )}
@@ -4767,11 +4799,14 @@ function ReconReviewView({
         />
       )}
 
-      {showMissing && (
-        <ReconMissingCardsModal
-          cards={missingCards}
+      {showCards && (
+        <ReconCardBrowser
+          start={start}
+          end={end}
+          today={today}
           lang={lang}
-          onClose={() => setShowMissing(false)}
+          onClose={() => setShowCards(false)}
+          onChanged={() => loadDiscs()}
         />
       )}
 
@@ -5384,6 +5419,351 @@ function ReconDismissNoteModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Card browser — all crew cards for the range. Missing (whole crew blank) shown
+// red at top; submitted cards below, tappable to see/edit the crew inside.
+function ReconCardBrowser({
+  start,
+  end,
+  today,
+  lang,
+  onClose,
+  onChanged,
+}: {
+  start: string;
+  end: string;
+  today: string;
+  lang: Lang;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  type Entry = {
+    id: string;
+    worker: string;
+    hours: number;
+    job: string;
+    projectName: string;
+    projectId: string;
+    foreman: string;
+    date: string;
+    voided?: boolean;
+    voidNote?: string;
+  };
+  type Card = { job: string; projectId: string; foreman: string; date: string; entries: Entry[] };
+  const [submitted, setSubmitted] = useState<Card[]>([]);
+  const [missing, setMissing] = useState<
+    { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[]
+  >([]);
+  const [loading, setLoading] = useState(true);
+  const [openKey, setOpenKey] = useState<string>("");
+  const [editEntry, setEditEntry] = useState<Entry | null>(null);
+  const [bulkCard, setBulkCard] = useState<Card | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    fetch(`/api/recon?action=cards&start=${start}&end=${end}&today=${today}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setSubmitted(d.submitted || []);
+          setMissing(d.missing || []);
+        }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [start, end, today]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  function afterWrite() {
+    load();
+    onChanged();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
+      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[85vh] sm:rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 border-b border-line flex items-center justify-between">
+          <div className="text-concrete font-bold">Timecards</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+        </div>
+
+        <div className="p-3 overflow-y-auto overscroll-contain">
+          {loading && <div className="text-rebar text-sm px-2 py-3">Loading…</div>}
+
+          {/* Missing cards (red) */}
+          {!loading && missing.length > 0 && (
+            <>
+              <div className="text-[11px] font-bold uppercase tracking-wide px-1 mb-2" style={{ color: "#e5533c" }}>
+                Missing ({missing.length})
+              </div>
+              {missing.map((m, i) => (
+                <div
+                  key={`${m.jobId}|${m.date}|${i}`}
+                  className="rounded-xl px-3 py-3 mb-2"
+                  style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
+                >
+                  <div className="flex items-center gap-2">
+                    <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+                    <span className="text-concrete font-bold text-sm">{m.jobName}</span>
+                  </div>
+                  <div className="text-rebar text-xs mt-0.5">
+                    {prettyDate(m.date, lang).split(",")[0]} · {m.foreman || "no foreman"} · {m.crewCount} crew — nothing submitted
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* Submitted cards */}
+          {!loading && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 mb-2 mt-2 text-rebar">
+              Submitted ({submitted.length})
+            </div>
+          )}
+          {!loading &&
+            submitted.map((c) => {
+              const key = `${c.projectId || c.job}|${c.foreman}|${c.date}`;
+              const open = openKey === key;
+              return (
+                <div key={key} className="bg-graphite border border-line rounded-xl mb-2">
+                  <button
+                    onClick={() => setOpenKey(open ? "" : key)}
+                    className="w-full text-left px-3 py-3 flex items-start justify-between gap-2"
+                  >
+                    <div>
+                      <div className="text-concrete font-bold text-sm">
+                        {c.job} <span className="text-rebar">{open ? "▾" : "▸"}</span>
+                      </div>
+                      <div className="text-rebar text-xs mt-0.5">
+                        {prettyDate(c.date, lang).split(",")[0]} · {c.foreman || "—"} · {c.entries.length}{" "}
+                        {c.entries.length === 1 ? "entry" : "entries"}
+                      </div>
+                    </div>
+                  </button>
+                  {open && (
+                    <div className="px-3 pb-3">
+                      <button
+                        onClick={() => setBulkCard(c)}
+                        className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mb-2 active:text-safety"
+                      >
+                        Bulk edit date / project
+                      </button>
+                      <div className="space-y-1.5">
+                        {c.entries.map((e) => (
+                          <div
+                            key={e.id}
+                            className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-concrete text-sm font-semibold truncate">{e.worker}</div>
+                              <div className="text-rebar text-[11px]">{e.hours}h</div>
+                            </div>
+                            <button
+                              onClick={() => setEditEntry(e)}
+                              className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+          {!loading && submitted.length === 0 && missing.length === 0 && (
+            <div className="text-rebar text-sm px-2 py-3">No cards in this range.</div>
+          )}
+        </div>
+      </div>
+
+      {editEntry && (
+        <ReconEditModal
+          entry={editEntry as any}
+          lang={lang}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => {
+            setEditEntry(null);
+            afterWrite();
+          }}
+        />
+      )}
+
+      {bulkCard && (
+        <ReconBulkEditModal
+          card={bulkCard}
+          lang={lang}
+          onClose={() => setBulkCard(null)}
+          onSaved={() => {
+            setBulkCard(null);
+            afterWrite();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Bulk-edit a card's date and/or project (with confirm).
+function ReconBulkEditModal({
+  card,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  card: { job: string; projectId: string; foreman: string; date: string; entries: { id: string }[] };
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [dateVal, setDateVal] = useState(card.date);
+  const [projectId, setProjectId] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) => p.name.toLowerCase().includes(query.toLowerCase()) || (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+  const dateChanged = dateVal !== card.date;
+  const projChanged = !!projectId;
+  const canSave = dateChanged || projChanged;
+
+  async function save() {
+    setSaving(true);
+    const body: any = { op: "bulk_edit", ids: card.entries.map((e) => e.id) };
+    if (dateChanged) body.date = dateVal;
+    if (projChanged) body.projectId = projectId;
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[76] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Bulk edit card</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {card.job} · {prettyDate(card.date, lang).split(",")[0]} · {card.entries.length} entries
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Date</label>
+        <input
+          type="date"
+          value={dateVal}
+          onChange={(e) => setDateVal(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Project (optional)
+        </label>
+        <button
+          onClick={() => { setPickerOpen(true); setQuery(""); }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+        >
+          <span className={projectName ? "text-concrete" : "text-rebar"}>
+            {projectName || "Leave as-is / pick to change…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+
+        {!confirm ? (
+          <button
+            disabled={!canSave}
+            onClick={() => setConfirm(true)}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Apply to {card.entries.length} entries
+          </button>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">
+              Apply {dateChanged ? `date ${dateVal}` : ""}{dateChanged && projChanged ? " + " : ""}
+              {projChanged ? `project ${projectName}` : ""} to all {card.entries.length}?
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirm(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={saving}
+                onClick={save}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Applying…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 z-[80] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button onClick={() => setPickerOpen(false)} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => { setProjectId(p.id); setProjectName(p.name); setPickerOpen(false); }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

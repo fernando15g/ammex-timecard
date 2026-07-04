@@ -5184,14 +5184,16 @@ function ReconCrewModal({
   onClose,
 }: {
   info: { jobId: string; date: string; job: string; foreman: string; worker: string };
-  crew: { worker: string; logged: boolean }[];
+  crew: { worker: string; logged: boolean; elsewhereJob?: string }[];
   lang: Lang;
   onClose: () => void;
 }) {
   const clickedLower = (info.worker || "").toLowerCase();
   const clicked = crew.find((c) => c.worker.toLowerCase() === clickedLower);
-  const otherMissing = crew.filter((c) => !c.logged && c.worker.toLowerCase() !== clickedLower);
-  const logged = crew.filter((c) => c.logged && c.worker.toLowerCase() !== clickedLower);
+  const others = crew.filter((c) => c.worker.toLowerCase() !== clickedLower);
+  const otherMissing = others.filter((c) => !c.logged && !c.elsewhereJob);
+  const elsewhere = others.filter((c) => !c.logged && c.elsewhereJob);
+  const logged = others.filter((c) => c.logged);
   return (
     <div className="fixed inset-0 z-[75] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
       <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
@@ -5219,12 +5221,26 @@ function ReconCrewModal({
                 style={
                   clicked.logged
                     ? { border: "1px solid rgba(47,115,216,.5)", background: "rgba(47,115,216,.08)" }
+                    : clicked.elsewhereJob
+                    ? { border: "1px solid rgba(47,115,216,.35)", background: "rgba(47,115,216,.05)" }
                     : { border: "1px solid rgba(229,83,60,.6)", background: "rgba(229,83,60,.1)" }
                 }
               >
-                {clicked.worker}
-                <span className="text-[10px]" style={{ color: clicked.logged ? "#4a9e63" : "#e5533c" }}>
-                  {clicked.logged ? "✓ logged" : "missing"}
+                <span className="min-w-0">
+                  {clicked.worker}
+                  {clicked.elsewhereJob && !clicked.logged && (
+                    <span className="block text-rebar text-[11px] font-normal">
+                      → logged on {clicked.elsewhereJob}
+                    </span>
+                  )}
+                </span>
+                <span
+                  className="text-[10px] shrink-0"
+                  style={{
+                    color: clicked.logged ? "#4a9e63" : clicked.elsewhereJob ? "#8fbcff" : "#e5533c",
+                  }}
+                >
+                  {clicked.logged ? "✓ logged" : clicked.elsewhereJob ? "elsewhere" : "missing"}
                 </span>
               </div>
             </>
@@ -5245,9 +5261,27 @@ function ReconCrewModal({
             </div>
           ))}
 
+          {elsewhere.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2" style={{ color: "#8fbcff" }}>
+              Logged elsewhere ({elsewhere.length})
+            </div>
+          )}
+          {elsewhere.map((c) => (
+            <div
+              key={c.worker}
+              className="rounded-xl px-3 py-2.5 text-sm bg-steel/40 opacity-80 flex items-center justify-between"
+            >
+              <span className="min-w-0">
+                <span className="text-concrete font-semibold">{c.worker}</span>
+                <span className="block text-rebar text-[11px]">→ logged on {c.elsewhereJob}</span>
+              </span>
+              <span className="text-[10px] shrink-0" style={{ color: "#8fbcff" }}>elsewhere</span>
+            </div>
+          ))}
+
           {logged.length > 0 && (
             <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2 text-rebar">
-              Logged ({logged.length})
+              Logged here ({logged.length})
             </div>
           )}
           {logged.map((c) => (
@@ -5542,11 +5576,10 @@ function ReconCardBrowser({
                 // default: latest day expanded, older days collapsed
                 const collapsed = date in collapsedDates ? collapsedDates[date] : date !== latest;
                 return (
-                  <div key={date} className="mb-1">
+                  <div key={date} className="mb-3">
                     <button
                       onClick={() => setCollapsedDates((s) => ({ ...s, [date]: !collapsed }))}
-                      className="w-full flex items-center justify-between text-left sticky top-0 z-10 py-2 px-1"
-                      style={{ background: "#1c2127" }}
+                      className="w-full flex items-center justify-between text-left mb-2 px-1"
                     >
                       <span className="text-safety text-xs font-bold uppercase tracking-wider">
                         {prettyDate(date, lang)}

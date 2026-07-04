@@ -217,8 +217,11 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   const loggedOnJobDate = new Set<string>(); // `${jobId}|${date}`
   const loggedWorkerOnJobDate = new Set<string>(); // `${worker}|${jobId}|${date}`
   const loggedWorkerAnyDate = new Set<string>(); // `${worker}|${date}` (any job)
+  const loggedJobByWorkerDate = new Map<string, string>(); // `${worker}|${date}` → job name logged
   for (const c of live) {
     loggedWorkerAnyDate.add(`${c.worker.toLowerCase()}|${c.date}`);
+    const wd = `${c.worker.toLowerCase()}|${c.date}`;
+    if (!loggedJobByWorkerDate.has(wd)) loggedJobByWorkerDate.set(wd, c.projectName || c.job || "");
     if (c.projectId) {
       loggedOnJobDate.add(`${c.projectId}|${c.date}`);
       loggedWorkerOnJobDate.add(`${c.worker.toLowerCase()}|${c.projectId}|${c.date}`);
@@ -230,7 +233,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   const crewByJobDate = new Map<
     string,
     { total: number; logged: number; elsewhere: number; foreman: string; jobName: string; date: string; jobId: string;
-      crew: { worker: string; logged: boolean }[] }
+      crew: { worker: string; logged: boolean; elsewhereJob: string }[] }
   >();
   for (const s of sched) {
     const jk = `${s.jobId}|${s.date}`;
@@ -247,7 +250,10 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     rec.total += 1;
     if (didLog) rec.logged += 1;
     else if (loggedAnywhere) rec.elsewhere += 1; // logged, but on another job
-    rec.crew.push({ worker: s.worker, logged: didLog });
+    const elsewhereJob = !didLog && loggedAnywhere
+      ? loggedJobByWorkerDate.get(`${s.worker.toLowerCase()}|${s.date}`) || ""
+      : "";
+    rec.crew.push({ worker: s.worker, logged: didLog, elsewhereJob });
     if (s.jobName && !rec.jobName) rec.jobName = s.jobName;
   }
 
@@ -436,7 +442,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
 
   // scheduled crew per job+date (for the "view crew" popup): who was scheduled
   // and whether each logged on that job.
-  const crews: Record<string, { worker: string; logged: boolean }[]> = {};
+  const crews: Record<string, { worker: string; logged: boolean; elsewhereJob: string }[]> = {};
   for (const [jk, rec] of crewByJobDate) {
     crews[jk] = rec.crew.slice().sort((a, b) => a.worker.localeCompare(b.worker));
   }

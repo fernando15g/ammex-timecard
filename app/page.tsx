@@ -5459,6 +5459,7 @@ function ReconCardBrowser({
   >([]);
   const [loading, setLoading] = useState(true);
   const [openKey, setOpenKey] = useState<string>("");
+  const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Entry | null>(null);
   const [bulkCard, setBulkCard] = useState<Card | null>(null);
 
@@ -5520,64 +5521,96 @@ function ReconCardBrowser({
             </>
           )}
 
-          {/* Submitted cards */}
+          {/* Submitted cards — grouped by date, newest first, collapsible */}
           {!loading && (
             <div className="text-[11px] font-bold uppercase tracking-wide px-1 mb-2 mt-2 text-rebar">
               Submitted ({submitted.length})
             </div>
           )}
           {!loading &&
-            submitted.map((c) => {
-              const key = `${c.projectId || c.job}|${c.foreman}|${c.date}`;
-              const open = openKey === key;
-              return (
-                <div key={key} className="bg-graphite border border-line rounded-xl mb-2">
-                  <button
-                    onClick={() => setOpenKey(open ? "" : key)}
-                    className="w-full text-left px-3 py-3 flex items-start justify-between gap-2"
-                  >
-                    <div>
-                      <div className="text-concrete font-bold text-sm">
-                        {c.job} <span className="text-rebar">{open ? "▾" : "▸"}</span>
-                      </div>
-                      <div className="text-rebar text-xs mt-0.5">
-                        {prettyDate(c.date, lang).split(",")[0]} · {c.foreman || "—"} · {c.entries.length}{" "}
-                        {c.entries.length === 1 ? "entry" : "entries"}
-                      </div>
-                    </div>
-                  </button>
-                  {open && (
-                    <div className="px-3 pb-3">
-                      <button
-                        onClick={() => setBulkCard(c)}
-                        className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mb-2 active:text-safety"
-                      >
-                        Bulk edit date / project
-                      </button>
-                      <div className="space-y-1.5">
-                        {c.entries.map((e) => (
-                          <div
-                            key={e.id}
-                            className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
-                          >
-                            <div className="min-w-0">
-                              <div className="text-concrete text-sm font-semibold truncate">{e.worker}</div>
-                              <div className="text-rebar text-[11px]">{e.hours}h</div>
-                            </div>
+            (() => {
+              // group submitted cards by date, newest first
+              const byDate = new Map<string, typeof submitted>();
+              for (const c of submitted) {
+                if (!byDate.has(c.date)) byDate.set(c.date, [] as any);
+                byDate.get(c.date)!.push(c);
+              }
+              const dates = Array.from(byDate.keys()).sort((a, b) => b.localeCompare(a)); // newest first
+              const latest = dates[0];
+              return dates.map((date) => {
+                const cards = byDate.get(date)!;
+                // default: latest day expanded, older days collapsed
+                const collapsed = date in collapsedDates ? collapsedDates[date] : date !== latest;
+                return (
+                  <div key={date} className="mb-1">
+                    <button
+                      onClick={() => setCollapsedDates((s) => ({ ...s, [date]: !collapsed }))}
+                      className="w-full flex items-center justify-between text-left sticky top-0 z-10 py-2 px-1"
+                      style={{ background: "#1c2127" }}
+                    >
+                      <span className="text-safety text-xs font-bold uppercase tracking-wider">
+                        {prettyDate(date, lang)}
+                      </span>
+                      <span className="text-rebar text-xs">
+                        {cards.length} {collapsed ? "▸" : "▾"}
+                      </span>
+                    </button>
+                    {!collapsed &&
+                      cards.map((c) => {
+                        const key = `${c.projectId || c.job}|${c.foreman}|${c.date}`;
+                        const open = openKey === key;
+                        return (
+                          <div key={key} className="bg-graphite border border-line rounded-xl mb-2">
                             <button
-                              onClick={() => setEditEntry(e)}
-                              className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                              onClick={() => setOpenKey(open ? "" : key)}
+                              className="w-full text-left px-3 py-3 flex items-start justify-between gap-2"
                             >
-                              Edit
+                              <div>
+                                <div className="text-concrete font-bold text-sm">
+                                  {c.job} <span className="text-rebar">{open ? "▾" : "▸"}</span>
+                                </div>
+                                <div className="text-rebar text-xs mt-0.5">
+                                  {c.foreman || "—"} · {c.entries.length}{" "}
+                                  {c.entries.length === 1 ? "entry" : "entries"}
+                                </div>
+                              </div>
                             </button>
+                            {open && (
+                              <div className="px-3 pb-3">
+                                <button
+                                  onClick={() => setBulkCard(c)}
+                                  className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mb-2 active:text-safety"
+                                >
+                                  Bulk edit date / project
+                                </button>
+                                <div className="space-y-1.5">
+                                  {c.entries.map((e) => (
+                                    <div
+                                      key={e.id}
+                                      className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
+                                    >
+                                      <div className="min-w-0">
+                                        <div className="text-concrete text-sm font-semibold truncate">{e.worker}</div>
+                                        <div className="text-rebar text-[11px]">{e.hours}h</div>
+                                      </div>
+                                      <button
+                                        onClick={() => setEditEntry(e)}
+                                        className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                                      >
+                                        Edit
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+                        );
+                      })}
+                  </div>
+                );
+              });
+            })()}
 
           {!loading && submitted.length === 0 && missing.length === 0 && (
             <div className="text-rebar text-sm px-2 py-3">No cards in this range.</div>

@@ -662,7 +662,7 @@ export async function POST(req: Request) {
 
     if (op === "bulk_edit") {
       // Set date and/or project on many entries at once (card-level fix).
-      const { ids, date, projectId } = body;
+      const { ids, date, projectId, logLabel, logDate, priorDate, projectName } = body;
       if (!Array.isArray(ids) || ids.length === 0)
         return NextResponse.json({ ok: false, error: "ids required" }, { status: 400 });
       const props: any = {};
@@ -679,6 +679,25 @@ export async function POST(req: Request) {
           failed.push(id);
         }
       }
+      // One summary log record for the whole card.
+      try {
+        const parts: string[] = [];
+        if (typeof date === "string" && date) parts.push(`Date ${priorDate || "?"} → ${date}`);
+        if (projectId) parts.push(`Project → ${projectName || "(set)"}`);
+        if (parts.length) {
+          const desc = `Bulk: ${parts.join(", ")} · ${done} ${done === 1 ? "entry" : "entries"}`;
+          await notion.pages.create({
+            parent: { database_id: RECON_LOG_DB_ID },
+            properties: {
+              [RECON_PROPS.worker]: { title: [{ text: { content: logLabel || "Card edit" } }] },
+              [RECON_PROPS.status]: { select: { name: "Fixed" } },
+              [RECON_PROPS.note]: { rich_text: [{ text: { content: desc } }] },
+              ...(logDate || date ? { [RECON_PROPS.date]: { date: { start: logDate || date } } } : {}),
+              [RECON_PROPS.refs]: { rich_text: [{ text: { content: ids.join(",") } }] },
+            },
+          });
+        }
+      } catch { /* logging shouldn't block the edit */ }
       return NextResponse.json({ ok: true, done, failed: failed.length });
     }
 
@@ -739,7 +758,7 @@ export async function POST(req: Request) {
 
     if (op === "undo_split") {
       // Reverse a split: restore the original's hours/project, void the new entry.
-      const { origId, origPriorHours, origPriorProjectId, newId } = body;
+      const { origId, origPriorHours, origPriorProjectId, newId, logWorker, logDate } = body;
       const origProps: any = { [TIMECARD_PROPS.hours]: { number: origPriorHours } };
       origProps[TIMECARD_PROPS.projectHelper] = {
         relation: origPriorProjectId ? [{ id: origPriorProjectId }] : [],
@@ -752,15 +771,45 @@ export async function POST(req: Request) {
             [TIMECARD_PROPS.voidNote]: { rich_text: [{ text: { content: "split undone" } }] } },
         });
       }
+      if (logWorker) {
+        try {
+          await notion.pages.create({
+            parent: { database_id: RECON_LOG_DB_ID },
+            properties: {
+              [RECON_PROPS.worker]: { title: [{ text: { content: logWorker } }] },
+              [RECON_PROPS.status]: { select: { name: "Fixed" } },
+              [RECON_PROPS.note]: { rich_text: [{ text: { content: "Split undone — restored original, voided the new entry" } }] },
+              [RECON_PROPS.refs]: { rich_text: [{ text: { content: `${origId}${newId ? "," + newId : ""}` } }] },
+              ...(logDate ? { [RECON_PROPS.date]: { date: { start: logDate } } } : {}),
+            },
+          });
+        } catch { /* logging shouldn't block the undo */ }
+      }
       return NextResponse.json({ ok: true });
     }
 
     if (op === "void") {
-      const { id, voided, note } = body;
+      const { id, voided, note, logWorker, logDate } = body;
       const props: any = { [TIMECARD_PROPS.voided]: { checkbox: !!voided } };
       if (typeof note === "string")
         props[TIMECARD_PROPS.voidNote] = { rich_text: [{ text: { content: note } }] };
       await notion.pages.update({ page_id: id, properties: props });
+      // Log the void (only when voiding, not un-voiding) for the audit trail.
+      if (voided && logWorker) {
+        try {
+          const desc = note ? `Voided — ${note}` : "Voided timecard";
+          await notion.pages.create({
+            parent: { database_id: RECON_LOG_DB_ID },
+            properties: {
+              [RECON_PROPS.worker]: { title: [{ text: { content: logWorker } }] },
+              [RECON_PROPS.status]: { select: { name: "Fixed" } },
+              [RECON_PROPS.note]: { rich_text: [{ text: { content: desc } }] },
+              [RECON_PROPS.refs]: { rich_text: [{ text: { content: id } }] },
+              ...(logDate ? { [RECON_PROPS.date]: { date: { start: logDate } } } : {}),
+            },
+          });
+        } catch { /* logging shouldn't block the void */ }
+      }
       return NextResponse.json({ ok: true });
     }
 

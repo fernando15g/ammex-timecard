@@ -2706,6 +2706,8 @@ function ReconPanel({
         origPriorHours: s.origPriorHours,
         origPriorProjectId: s.origPriorProjectId,
         newId: s.newId,
+        logWorker: s.worker,
+        logDate: s.date,
       }),
     });
     setRecentSplits((cur) => cur.filter((x) => x.newId !== s.newId));
@@ -3559,7 +3561,7 @@ function ReconVoidModal({
     await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "void", id: entry.id, voided: true, note }),
+      body: JSON.stringify({ op: "void", id: entry.id, voided: true, note, logWorker: entry.worker, logDate: entry.date }),
     });
     setSaving(false);
     onSaved();
@@ -5743,6 +5745,11 @@ function ReconBulkEditModal({
     const body: any = { op: "bulk_edit", ids: card.entries.map((e) => e.id) };
     if (dateChanged) body.date = dateVal;
     if (projChanged) body.projectId = projectId;
+    // log context (one summary record on the backend)
+    body.logLabel = `${card.job || "Card"}${card.foreman ? ` · ${card.foreman}` : ""}`;
+    body.priorDate = card.date;
+    body.logDate = dateVal || card.date;
+    if (projChanged) body.projectName = projectName;
     await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

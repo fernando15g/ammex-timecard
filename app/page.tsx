@@ -4023,6 +4023,7 @@ function ReconReviewView({
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
   const [bulkGroup, setBulkGroup] = useState<string | null>(null); // "job|date" key
+  const [editGroup, setEditGroup] = useState<string | null>(null); // full card edit
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Miss | null>(null);
 
@@ -4298,12 +4299,20 @@ function ReconReviewView({
                         {g.workers === 1 ? "worker" : "workers"}
                       </div>
                     </button>
-                    <button
-                      onClick={() => setBulkGroup(g.key)}
-                      className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
-                    >
-                      Set project
-                    </button>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <button
+                        onClick={() => setBulkGroup(g.key)}
+                        className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
+                      >
+                        Set project
+                      </button>
+                      <button
+                        onClick={() => setEditGroup(g.key)}
+                        className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
+                      >
+                        Edit date / details
+                      </button>
+                    </div>
                   </div>
 
                   {open && (
@@ -4742,6 +4751,22 @@ function ReconReviewView({
           }}
         />
       )}
+
+      {editGroup && (() => {
+        const g = groups.find((x) => x.key === editGroup);
+        if (!g) return null;
+        return (
+          <ReconBulkEditModal
+            card={{ job: g.job, projectId: "", foreman: g.foreman, date: g.date, entries: g.items }}
+            lang={lang}
+            onClose={() => setEditGroup(null)}
+            onSaved={() => {
+              setEditGroup(null);
+              load();
+            }}
+          />
+        );
+      })()}
 
       {editEntry && (
         <ReconEditModal

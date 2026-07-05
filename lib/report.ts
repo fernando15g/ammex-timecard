@@ -73,6 +73,7 @@ export interface ReportData {
   foremanName: string; // the foreman's display name (empty for master report)
   workerSummaries: WorkerSummary[]; // per-worker, jobs broken out (worker view)
   grandTotal: number; // total labor hours across all jobs for the week
+  onHold?: { worker: string; dateISO: string; job: string; hours: number }[]; // held-for-review, excluded from totals
 }
 
 // A single readable line for one flag.

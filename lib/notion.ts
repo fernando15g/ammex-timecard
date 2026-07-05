@@ -57,6 +57,7 @@ export const TIMECARD_PROPS = {
   jobIdHelper: "Job ID Helper", // Rollup — clean job ID (text, e.g. "26-4")
   voided: "Voided", // Checkbox — void-not-delete for duplicates/corrections
   voidNote: "Void note", // Text (rich_text) — why it was voided
+  underReview: "Under Review", // Checkbox — held pending owner review; excluded from counts
 };
 
 // Reconciliation Log — durable record of outcomes (no-show / confirmed / fixed).

@@ -35,6 +35,7 @@ type TCEntry = {
   notes: string;
   voided: boolean;
   voidNote: string;
+  underReview: boolean;
 };
 
 function mapRow(page: any): TCEntry {
@@ -51,6 +52,7 @@ function mapRow(page: any): TCEntry {
     notes: rt(p[TIMECARD_PROPS.notes]),
     voided: !!p[TIMECARD_PROPS.voided]?.checkbox,
     voidNote: rt(p[TIMECARD_PROPS.voidNote]),
+    underReview: !!p[TIMECARD_PROPS.underReview]?.checkbox,
   };
 }
 
@@ -547,12 +549,49 @@ export async function GET(req: Request) {
         map.get(key)!.entries.push({
           id: e.id, worker: e.worker, hours: e.hours, job: e.job,
           projectName: e.projectName, projectId: e.projectId, foreman: e.foreman, date: e.date,
+          underReview: e.underReview,
         });
       }
       const submitted = Array.from(map.values()).sort(
         (a, b) => b.date.localeCompare(a.date) || a.job.localeCompare(b.job)
       );
       return NextResponse.json({ ok: true, submitted, missing: result.missingCards });
+    }
+
+    if (action === "held_cards") {
+      // All entries currently Under Review, grouped by card (job+foreman+date).
+      const s = url.searchParams.get("start") || "";
+      const e2 = url.searchParams.get("end") || s;
+      if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
+      const all = await queryEntries(s, e2);
+      const held = all.filter((e) => e.underReview && !e.voided);
+      const map = new Map<
+        string,
+        { job: string; projectId: string; foreman: string; date: string; entries: any[] }
+      >();
+      for (const e of held) {
+        const key = `${e.projectId || e.job}|${e.foreman}|${e.date}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            job: e.projectName || e.job || "(no job)",
+            projectId: e.projectId || "",
+            foreman: e.foreman || "",
+            date: e.date,
+            entries: [],
+          });
+        }
+        map.get(key)!.entries.push({
+          id: e.id, worker: e.worker, hours: e.hours, job: e.job,
+          projectName: e.projectName, projectId: e.projectId, foreman: e.foreman, date: e.date,
+          underReview: true,
+        });
+      }
+      const cards = Array.from(map.values()).sort(
+        (a, b) => b.date.localeCompare(a.date) || a.job.localeCompare(b.job)
+      );
+      const totalHeld = held.length;
+      const totalHours = held.reduce((sum, e) => sum + (e.hours || 0), 0);
+      return NextResponse.json({ ok: true, cards, totalHeld, totalHours });
     }
 
     if (action === "all_flags") {
@@ -562,7 +601,7 @@ export async function GET(req: Request) {
       const e2 = url.searchParams.get("end") || s;
       if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
       const all = await queryEntries(s, e2);
-      const flags = computeFlags(all);
+      const flags = computeFlags(all.filter((e) => !e.underReview && !e.voided));
       const confirmed = await confirmedReviews(s, e2);
       // build per (worker|date) flag groups, excluding fully-confirmed ones
       const byWorker = new Map<
@@ -596,7 +635,7 @@ export async function GET(req: Request) {
       const e2 = url.searchParams.get("end") || s;
       if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
       const all = await queryEntries(s, e2);
-      const missing = all.filter((x) => !x.voided && !x.projectId);
+      const missing = all.filter((x) => !x.voided && !x.underReview && !x.projectId);
       return NextResponse.json({ ok: true, entries: missing });
     }
 
@@ -615,7 +654,7 @@ export async function GET(req: Request) {
     if (!start) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
 
     const entries = await queryEntries(start, end, worker);
-    const flags = computeFlags(entries);
+    const flags = computeFlags(entries.filter((e) => !e.underReview && !e.voided));
     const confirmed = await confirmedReviews(start, end);
     entries.sort((a, b) => a.date.localeCompare(b.date) || a.worker.localeCompare(b.worker));
     return NextResponse.json({ ok: true, entries, flags, confirmed });
@@ -786,6 +825,44 @@ export async function POST(req: Request) {
         } catch { /* logging shouldn't block the undo */ }
       }
       return NextResponse.json({ ok: true });
+    }
+
+    if (op === "hold") {
+      // Set or clear the Under Review hold on one or many entries. Held entries
+      // are excluded from all counted totals (reports/payroll/burn).
+      const { ids, held, logWorker, logDate, note } = body;
+      const list: string[] = Array.isArray(ids) ? ids : ids ? [ids] : [];
+      if (list.length === 0)
+        return NextResponse.json({ ok: false, error: "ids required" }, { status: 400 });
+      let done = 0;
+      for (const id of list) {
+        try {
+          await notion.pages.update({
+            page_id: id,
+            properties: { [TIMECARD_PROPS.underReview]: { checkbox: !!held } },
+          });
+          done++;
+        } catch { /* skip */ }
+      }
+      // Log the hold/release for the audit trail.
+      if (logWorker) {
+        try {
+          const desc = held
+            ? `Held for review${note ? ` — ${note}` : ""}${list.length > 1 ? ` · ${done} entries` : ""}`
+            : `Released from review${list.length > 1 ? ` · ${done} entries` : ""}`;
+          await notion.pages.create({
+            parent: { database_id: RECON_LOG_DB_ID },
+            properties: {
+              [RECON_PROPS.worker]: { title: [{ text: { content: logWorker } }] },
+              [RECON_PROPS.status]: { select: { name: held ? "Under Review" : "Fixed" } },
+              [RECON_PROPS.note]: { rich_text: [{ text: { content: desc } }] },
+              [RECON_PROPS.refs]: { rich_text: [{ text: { content: list.join(",") } }] },
+              ...(logDate ? { [RECON_PROPS.date]: { date: { start: logDate } } } : {}),
+            },
+          });
+        } catch { /* logging shouldn't block */ }
+      }
+      return NextResponse.json({ ok: true, done });
     }
 
     if (op === "void") {

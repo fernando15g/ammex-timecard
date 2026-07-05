@@ -137,6 +137,8 @@ export async function loadRowsAndRoster(
         and: [
           { property: TIMECARD_PROPS.date, date: { on_or_after: startISO } },
           { property: TIMECARD_PROPS.date, date: { on_or_before: endISO } },
+          { property: TIMECARD_PROPS.voided, checkbox: { equals: false } },
+          { property: TIMECARD_PROPS.underReview, checkbox: { equals: false } },
         ],
       },
       start_cursor: cursor,
@@ -243,6 +245,48 @@ async function loadConfirmedFlagKeys(
   return keys;
 }
 
+// Held-for-review rows for [start,end] — excluded from totals but surfaced on
+// the report as an "on hold" callout so a forgotten hold can't slip past.
+async function loadHeldRows(
+  notion: Client,
+  startISO: string,
+  endISO: string,
+  foreman?: string
+): Promise<{ worker: string; dateISO: string; job: string; hours: number }[]> {
+  const out: { worker: string; dateISO: string; job: string; hours: number }[] = [];
+  try {
+    let cursor: string | undefined = undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: TIMECARDS_DB_ID,
+        filter: {
+          and: [
+            { property: TIMECARD_PROPS.date, date: { on_or_after: startISO } },
+            { property: TIMECARD_PROPS.date, date: { on_or_before: endISO } },
+            { property: TIMECARD_PROPS.underReview, checkbox: { equals: true } },
+            { property: TIMECARD_PROPS.voided, checkbox: { equals: false } },
+          ],
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const page of res.results) {
+        const p = page.properties || {};
+        const worker = readText(p[TIMECARD_PROPS.worker]);
+        const dateISO = p[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "";
+        const hours = typeof p[TIMECARD_PROPS.hours]?.number === "number" ? p[TIMECARD_PROPS.hours].number : 0;
+        const fm = readText(p[TIMECARD_PROPS.foreman]);
+        const job = readText(p[TIMECARD_PROPS.projectHelper]) || readText(p[TIMECARD_PROPS.job]);
+        if (!worker || !dateISO) continue;
+        if (foreman && fm.trim().toLowerCase() !== foreman.trim().toLowerCase()) continue;
+        out.push({ worker, dateISO, job, hours });
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch { /* held is optional */ }
+  return out;
+}
+
 // Weekly auto-send bundle: Master report, Payroll Grid, and Owner Review —
 // Daily, all as PDF, in one email. Used by the Monday cron.
 export async function runWeeklyBundle(
@@ -255,6 +299,7 @@ export async function runWeeklyBundle(
 
   // Master report (job-grouped grid)
   const masterRd = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, "en", confirmedFlagKeys);
+  masterRd.onHold = await loadHeldRows(bundleNotion, startISO, endISO);
   const masterPdf = await buildReportPdf(masterRd);
 
   // Payroll Grid
@@ -316,6 +361,8 @@ export async function runReport(
         and: [
           { property: TIMECARD_PROPS.date, date: { on_or_after: startISO } },
           { property: TIMECARD_PROPS.date, date: { on_or_before: endISO } },
+          { property: TIMECARD_PROPS.voided, checkbox: { equals: false } },
+          { property: TIMECARD_PROPS.underReview, checkbox: { equals: false } },
         ],
       },
       start_cursor: cursor,
@@ -526,6 +573,7 @@ export async function runReport(
     confirmedFlagKeys
   );
   if (!flagsOn) rd.flags = [];
+  rd.onHold = await loadHeldRows(notion, startISO, endISO, foreman || undefined);
 
   const isWorker = reportView === "worker";
   const isDaily = reportView === "daily";

@@ -287,6 +287,45 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     }
   }
 
+  // On hold — held-for-review hours, EXCLUDED from the totals above. Down-the-
+  // middle prominence: a labeled amber block so a forgotten hold is noticed.
+  if (rd.onHold && rd.onHold.length > 0) {
+    y -= 14;
+    const held = rd.onHold;
+    const totalHeld = held.reduce((s, h) => s + (h.hours || 0), 0);
+    ensure(30 + held.length * 13 + 10);
+    page.drawRectangle({
+      x: MARGIN,
+      y: y - 18,
+      width: PAGE_W - MARGIN * 2,
+      height: 20,
+      color: rgb(0.98, 0.85, 0.6),
+    });
+    page.drawText(
+      `ON HOLD — NOT INCLUDED ABOVE  (${held.length} ${held.length === 1 ? "entry" : "entries"} · ${totalHeld} hrs)`,
+      { x: MARGIN + 4, y: y - 13, size: 10, font: bold, color: steel }
+    );
+    y -= 28;
+    page.drawText("These hours are held for review and are excluded from the totals above.", {
+      x: MARGIN,
+      y: y - 8,
+      size: 8.5,
+      font,
+      color: gray,
+    });
+    y -= 18;
+    for (const h of held) {
+      ensure(14);
+      const maxW = PAGE_W - MARGIN * 2 - 16;
+      const jobPart = h.job ? ` · ${h.job}` : "";
+      page.drawText(
+        `•  ${clip(`${h.worker} — ${h.dateISO} — ${h.hours} hrs${jobPart}`, font, 9, maxW)}`,
+        { x: MARGIN + 12, y: y - 10, size: 9, font, color: steel }
+      );
+      y -= 13;
+    }
+  }
+
   return pdf.save();
 }
 

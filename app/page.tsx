@@ -2528,6 +2528,7 @@ type ReconEntry = {
   notes: string;
   voided: boolean;
   voidNote: string;
+  underReview?: boolean;
 };
 
 function isoAddDays(iso: string, days: number): string {
@@ -2929,7 +2930,14 @@ function ReconPanel({
                         <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
                           {prettyDate(e.date, lang)}
                         </div>
-                        <div className="text-concrete font-bold text-[15px]">{displayName}</div>
+                        <div className="text-concrete font-bold text-[15px]">
+                          {displayName}
+                          {e.underReview && (
+                            <span className="ml-2 text-[11px] font-bold" style={{ color: "#e0a63b" }}>
+                              ⟳ on hold
+                            </span>
+                          )}
+                        </div>
                         <div className="text-rebar text-xs mt-0.5">
                           Foreman: {e.foreman || "—"}
                           {e.projectName && e.job && e.job !== e.projectName && (
@@ -3023,6 +3031,28 @@ function ReconPanel({
                             className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
                           >
                             Undo OK
+                          </button>
+                        )}
+                        {!e.underReview && (
+                          <button
+                            onClick={async () => {
+                              await fetch("/api/recon", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  op: "hold",
+                                  ids: [e.id],
+                                  held: true,
+                                  logWorker: e.worker,
+                                  logDate: e.date,
+                                }),
+                              });
+                              refreshAfterWrite();
+                            }}
+                            className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border"
+                            style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                          >
+                            Hold for review
                           </button>
                         )}
                       </div>
@@ -4059,6 +4089,9 @@ function ReconReviewView({
   const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
   const [showMissing, setShowMissing] = useState(false);
   const [showCards, setShowCards] = useState(false);
+  const [showHeld, setShowHeld] = useState(false);
+  const [heldCount, setHeldCount] = useState(0);
+  const [heldHours, setHeldHours] = useState(0);
   // session undo log — recently resolved discrepancies
   const [resolvedLog, setResolvedLog] = useState<
     { disc: Disc; status: string; pageId: string }[]
@@ -4076,9 +4109,22 @@ function ReconReviewView({
   const CACHE_MS = 5 * 60 * 1000;
   const cacheTs = useRef(0);
 
+  const loadHeldCount = useCallback(() => {
+    fetch(`/api/recon?action=held_cards&start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setHeldCount(d.totalHeld || 0);
+          setHeldHours(d.totalHours || 0);
+        }
+      })
+      .catch(() => {});
+  }, [start, end]);
+
   const load = useCallback(() => {
     setLoading(true);
     setMsg("");
+    loadHeldCount();
     fetch(`/api/recon?action=needs_project&start=${start}&end=${end}`)
       .then((r) => r.json())
       .then((d) => {
@@ -4090,11 +4136,27 @@ function ReconReviewView({
         setMsg("Failed to load.");
         setLoading(false);
       });
-  }, [start, end]);
+  }, [start, end, loadHeldCount]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // Hold a whole needs-project card for review → moves it to Under review.
+  async function holdGroup(g: { job: string; foreman: string; date: string; items: { id: string }[] }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "hold",
+        ids: g.items.map((e) => e.id),
+        held: true,
+        logWorker: `${g.job || "Card"}${g.foreman ? ` · ${g.foreman}` : ""}`,
+        logDate: g.date,
+      }),
+    });
+    load();
+  }
 
   const applyResult = useCallback((d: any) => {
     setDiscs(d.discrepancies || []);
@@ -4105,6 +4167,7 @@ function ReconReviewView({
   const loadDiscs = useCallback(() => {
     setDiscLoading(true);
     setRanCheck(true);
+    loadHeldCount();
     fetch(`/api/recon?action=reconcile&start=${start}&end=${end}&today=${today}`)
       .then((r) => r.json())
       .then((d) => {
@@ -4121,7 +4184,7 @@ function ReconReviewView({
         setDiscLoading(false);
       })
       .catch(() => setDiscLoading(false));
-  }, [start, end, today, applyResult]);
+  }, [start, end, today, applyResult, loadHeldCount]);
 
   // On mount / range change: use a fresh cache (same range, < 5 min) if present,
   // so the check survives tab switches and quick app re-opens.
@@ -4314,6 +4377,13 @@ function ReconReviewView({
                       >
                         Edit date / details
                       </button>
+                      <button
+                        onClick={() => holdGroup(g)}
+                        className="text-xs font-semibold underline underline-offset-2"
+                        style={{ color: "#e0a63b" }}
+                      >
+                        Hold for review
+                      </button>
                     </div>
                   </div>
 
@@ -4368,6 +4438,27 @@ function ReconReviewView({
             })}
           </div>
         ))}
+
+      {/* Under review — held items, excluded from counts. Inline; checkmark when empty. */}
+      <div className="mt-6">
+        {heldCount > 0 ? (
+          <button
+            onClick={() => setShowHeld(true)}
+            className="w-full flex items-center gap-2 rounded-xl px-4 py-3 text-left"
+            style={{ background: "rgba(224,166,59,.12)", border: "1px solid rgba(224,166,59,.45)" }}
+          >
+            <span style={{ color: "#e0a63b" }} className="font-bold">⟳</span>
+            <span className="text-concrete font-bold text-sm">{heldCount} under review</span>
+            <span className="text-rebar text-xs">· {heldHours} hrs held</span>
+            <span className="text-rebar text-xs ml-auto">tap to resolve →</span>
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 px-1 text-sm">
+            <span style={{ color: "#4a9e63" }} className="font-bold">✓</span>
+            <span className="text-rebar">Nothing under review.</span>
+          </div>
+        )}
+      </div>
 
       {/* ---- Schedule vs. actual reconciliation ---- */}
       <div className="mt-8 mb-3 pt-5 border-t border-line">
@@ -4833,6 +4924,18 @@ function ReconReviewView({
           today={today}
           lang={lang}
           onClose={() => setShowCards(false)}
+          onChanged={() => loadDiscs()}
+        />
+      )}
+
+      {showHeld && (
+        <ReconCardBrowser
+          start={start}
+          end={end}
+          today={today}
+          lang={lang}
+          heldOnly
+          onClose={() => setShowHeld(false)}
           onChanged={() => loadDiscs()}
         />
       )}
@@ -5491,6 +5594,7 @@ function ReconCardBrowser({
   end,
   today,
   lang,
+  heldOnly,
   onClose,
   onChanged,
 }: {
@@ -5498,6 +5602,7 @@ function ReconCardBrowser({
   end: string;
   today: string;
   lang: Lang;
+  heldOnly?: boolean;
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -5512,6 +5617,7 @@ function ReconCardBrowser({
     date: string;
     voided?: boolean;
     voidNote?: string;
+    underReview?: boolean;
   };
   type Card = { job: string; projectId: string; foreman: string; date: string; entries: Entry[] };
   const [submitted, setSubmitted] = useState<Card[]>([]);
@@ -5526,17 +5632,23 @@ function ReconCardBrowser({
 
   const load = useCallback(() => {
     setLoading(true);
-    fetch(`/api/recon?action=cards&start=${start}&end=${end}&today=${today}`)
+    const action = heldOnly ? "held_cards" : "cards";
+    fetch(`/api/recon?action=${action}&start=${start}&end=${end}&today=${today}`)
       .then((r) => r.json())
       .then((d) => {
         if (d?.ok) {
-          setSubmitted(d.submitted || []);
-          setMissing(d.missing || []);
+          if (heldOnly) {
+            setSubmitted(d.cards || []);
+            setMissing([]);
+          } else {
+            setSubmitted(d.submitted || []);
+            setMissing(d.missing || []);
+          }
         }
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [start, end, today]);
+  }, [start, end, today, heldOnly]);
 
   useEffect(() => {
     load();
@@ -5547,11 +5659,44 @@ function ReconCardBrowser({
     onChanged();
   }
 
+  async function holdEntry(e: { id: string; worker: string; date: string }, held: boolean) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "hold", ids: [e.id], held, logWorker: e.worker, logDate: e.date }),
+    });
+    afterWrite();
+  }
+
+  async function holdCard(c: { job: string; foreman: string; date: string; entries: { id: string }[] }, held: boolean) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "hold",
+        ids: c.entries.map((e) => e.id),
+        held,
+        logWorker: `${c.job}${c.foreman ? ` · ${c.foreman}` : ""}`,
+        logDate: c.date,
+      }),
+    });
+    afterWrite();
+  }
+
+  async function voidEntry(e: { id: string; worker: string; date: string }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "void", id: e.id, voided: true, note: "voided from review", logWorker: e.worker, logDate: e.date }),
+    });
+    afterWrite();
+  }
+
   return (
     <div className="fixed inset-0 z-[70] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
       <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[85vh] sm:rounded-2xl border border-line overflow-hidden">
         <div className="p-4 border-b border-line flex items-center justify-between">
-          <div className="text-concrete font-bold">Timecards</div>
+          <div className="text-concrete font-bold">{heldOnly ? "Under review" : "Timecards"}</div>
           <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
         </div>
 
@@ -5637,12 +5782,21 @@ function ReconCardBrowser({
                             </button>
                             {open && (
                               <div className="px-3 pb-3">
-                                <button
-                                  onClick={() => setBulkCard(c)}
-                                  className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mb-2 active:text-safety"
-                                >
-                                  Bulk edit date / project
-                                </button>
+                                <div className="flex gap-2 mb-2">
+                                  <button
+                                    onClick={() => setBulkCard(c)}
+                                    className="flex-1 text-rebar border border-line rounded-lg py-2 text-xs font-bold active:text-safety"
+                                  >
+                                    Bulk edit date / project
+                                  </button>
+                                  <button
+                                    onClick={() => holdCard(c, !heldOnly)}
+                                    className="flex-1 rounded-lg py-2 text-xs font-bold border"
+                                    style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                                  >
+                                    {heldOnly ? "Release all" : "Hold card for review"}
+                                  </button>
+                                </div>
                                 <div className="space-y-1.5">
                                   {c.entries.map((e) => (
                                     <div
@@ -5650,15 +5804,40 @@ function ReconCardBrowser({
                                       className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
                                     >
                                       <div className="min-w-0">
-                                        <div className="text-concrete text-sm font-semibold truncate">{e.worker}</div>
+                                        <div className="text-concrete text-sm font-semibold truncate">
+                                          {e.worker}
+                                          {e.underReview && !heldOnly && (
+                                            <span className="ml-2 text-[10px]" style={{ color: "#e0a63b" }}>
+                                              ⟳ on hold
+                                            </span>
+                                          )}
+                                        </div>
                                         <div className="text-rebar text-[11px]">{e.hours}h</div>
                                       </div>
-                                      <button
-                                        onClick={() => setEditEntry(e)}
-                                        className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
-                                      >
-                                        Edit
-                                      </button>
+                                      <div className="flex gap-1.5 shrink-0">
+                                        <button
+                                          onClick={() => holdEntry(e, !e.underReview)}
+                                          className="border rounded-lg px-2.5 py-1.5 text-xs font-bold"
+                                          style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                                        >
+                                          {e.underReview ? "Release" : "Hold"}
+                                        </button>
+                                        <button
+                                          onClick={() => setEditEntry(e)}
+                                          className="text-rebar border border-line rounded-lg px-2.5 py-1.5 text-xs font-bold active:text-safety"
+                                        >
+                                          Edit
+                                        </button>
+                                        {heldOnly && (
+                                          <button
+                                            onClick={() => voidEntry(e)}
+                                            className="border rounded-lg px-2.5 py-1.5 text-xs font-bold"
+                                            style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                                          >
+                                            Void
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
                                   ))}
                                 </div>

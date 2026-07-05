@@ -712,6 +712,7 @@ export default function Page() {
         refreshing={refreshing}
         justUpdated={justUpdated}
         onMenu={() => setShowMenu(true)}
+        hideTitle
       />
 
       <div className="flex-1 overflow-y-auto px-5 pb-32">
@@ -1113,6 +1114,7 @@ function TopBar({
   refreshing,
   justUpdated,
   onMenu,
+  hideTitle,
 }: {
   tr: ReturnType<typeof t>;
   lang: Lang;
@@ -1121,6 +1123,7 @@ function TopBar({
   refreshing?: boolean;
   justUpdated?: boolean;
   onMenu?: () => void;
+  hideTitle?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between px-5 pt-5 pb-2">
@@ -1142,7 +1145,9 @@ function TopBar({
           alt="AMMEX"
           className="h-[18px] w-auto"
         />
-        <span className="font-extrabold tracking-tight text-concrete leading-none relative top-[2px]">{tr.appTitle}</span>
+        {!hideTitle && (
+          <span className="font-extrabold tracking-tight text-concrete leading-none relative top-[2px]">{tr.appTitle}</span>
+        )}
       </div>
       <div className="flex items-center gap-2">
         {justUpdated && (

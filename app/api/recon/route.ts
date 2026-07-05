@@ -56,14 +56,55 @@ function mapRow(page: any): TCEntry {
   };
 }
 
-async function resolveProjectNames(ids: string[]): Promise<Map<string, string>> {
+// Project id→name map. One Projects-DB query instead of a page-retrieve per id,
+// cached in module memory for a short TTL (warm serverless invocations reuse it).
+let projectNameCache: { map: Map<string, string>; ts: number } | null = null;
+const PROJECT_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function getProjectNameMap(): Promise<Map<string, string>> {
+  if (projectNameCache && Date.now() - projectNameCache.ts < PROJECT_CACHE_TTL_MS) {
+    return projectNameCache.map;
+  }
   const map = new Map<string, string>();
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: PROJECTS_DB_ID,
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const nm = (pg.properties?.[PROJECT_PROPS.name]?.title || [])
+          .map((t: any) => t.plain_text).join("").trim();
+        if (nm) map.set(pg.id, nm);
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+    projectNameCache = { map, ts: Date.now() };
+  } catch { /* fall through with whatever we got */ }
+  return map;
+}
+
+async function resolveProjectNames(ids: string[]): Promise<Map<string, string>> {
+  const all = await getProjectNameMap();
+  const map = new Map<string, string>();
+  const missing: string[] = [];
   for (const id of Array.from(new Set(ids))) {
+    const nm = all.get(id);
+    if (nm) map.set(id, nm);
+    else missing.push(id);
+  }
+  // Rare: a brand-new project created within the cache TTL — fetch just those.
+  for (const id of missing) {
     try {
       const pg: any = await notion.pages.retrieve({ page_id: id });
       const nm = (pg.properties?.[PROJECT_PROPS.name]?.title || [])
         .map((t: any) => t.plain_text).join("").trim();
-      if (nm) map.set(id, nm);
+      if (nm) {
+        map.set(id, nm);
+        projectNameCache?.map.set(id, nm);
+      }
     } catch { /* ignore */ }
   }
   return map;
@@ -527,9 +568,11 @@ export async function GET(req: Request) {
       const e2 = url.searchParams.get("end") || s;
       const today = url.searchParams.get("today") || s;
       if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
-      const result = await reconcile(s, e2, today); // gives missingCards
-      const all = await queryEntries(s, e2);
-      const live = all.filter((e) => !e.voided);
+      const [result, all] = await Promise.all([
+        reconcile(s, e2, today), // gives missingCards
+        queryEntries(s, e2),
+      ]);
+      const live = all.filter((e) => !e.voided && !e.underReview);
       // group submitted entries by project+foreman+date
       const map = new Map<
         string,
@@ -600,9 +643,8 @@ export async function GET(req: Request) {
       const s = url.searchParams.get("start") || "";
       const e2 = url.searchParams.get("end") || s;
       if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
-      const all = await queryEntries(s, e2);
+      const [all, confirmed] = await Promise.all([queryEntries(s, e2), confirmedReviews(s, e2)]);
       const flags = computeFlags(all.filter((e) => !e.underReview && !e.voided));
-      const confirmed = await confirmedReviews(s, e2);
       // build per (worker|date) flag groups, excluding fully-confirmed ones
       const byWorker = new Map<
         string,
@@ -653,9 +695,11 @@ export async function GET(req: Request) {
     const worker = url.searchParams.get("worker") || undefined;
     if (!start) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
 
-    const entries = await queryEntries(start, end, worker);
+    const [entries, confirmed] = await Promise.all([
+      queryEntries(start, end, worker),
+      confirmedReviews(start, end),
+    ]);
     const flags = computeFlags(entries.filter((e) => !e.underReview && !e.voided));
-    const confirmed = await confirmedReviews(start, end);
     entries.sort((a, b) => a.date.localeCompare(b.date) || a.worker.localeCompare(b.worker));
     return NextResponse.json({ ok: true, entries, flags, confirmed });
   } catch (err: any) {

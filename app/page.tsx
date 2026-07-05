@@ -3,6 +3,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Lang, t } from "@/lib/strings";
 
+// Locks the underlying page's scroll while a full-screen panel is open, so
+// touch scrolling can't grab the timesheet page behind Reports/Schedule/Review.
+function useLockBodyScroll() {
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    const prevPosition = document.body.style.position;
+    const prevTop = document.body.style.top;
+    const prevWidth = document.body.style.width;
+    const scrollY = window.scrollY;
+    document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.width = "100%";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.body.style.position = prevPosition;
+      document.body.style.top = prevTop;
+      document.body.style.width = prevWidth;
+      window.scrollTo(0, scrollY);
+    };
+  }, []);
+}
+
 interface Worker {
   name: string;
   hours: number | null;
@@ -1185,6 +1208,7 @@ function ReportsPanel({
   onClose: () => void;
   unlockedPin?: string;
 }) {
+  useLockBodyScroll();
   const [pin, setPin] = useState(unlockedPin);
   const [pinOk, setPinOk] = useState(unlockedPin === "5314");
   const [pinError, setPinError] = useState(false);
@@ -1632,6 +1656,7 @@ function SchedulePanel({
   pin: string;
   onClose: () => void;
 }) {
+  useLockBodyScroll();
   const [date, setDate] = useState(tomorrowISO());
   const [jobs, setJobs] = useState<SchedJob[]>([]);
   const [roster, setRoster] = useState<string[]>([]);
@@ -1990,9 +2015,9 @@ function SchedulePanel({
           <button
             onClick={onClose}
             aria-label="Close"
-            className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center text-lg active:text-safety"
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
           >
-            ✕
+            {tr.close}
           </button>
         </div>
 
@@ -2559,6 +2584,7 @@ function ReconPanel({
   lang: Lang;
   onClose: () => void;
 }) {
+  useLockBodyScroll();
   const today = (() => {
     const d = new Date();
     const off = d.getTimezoneOffset();
@@ -2742,14 +2768,14 @@ function ReconPanel({
       <div className="max-w-3xl mx-auto p-4 pb-28">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
-          <div className="w-9" />
+          <div className="w-14" />
           <div className="font-bold text-concrete text-lg">{tr.reconTitle}</div>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center text-lg active:text-safety"
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
           >
-            ✕
+            {tr.close}
           </button>
         </div>
 
@@ -5704,9 +5730,10 @@ function ReconCardBrowser({
       cur
         .map((c) => ({
           ...c,
-          entries: heldOnly && !held
-            ? c.entries.filter((x: any) => x.id !== e.id)
-            : c.entries.map((x: any) => (x.id === e.id ? { ...x, underReview: held } : x)),
+          entries:
+            held || (heldOnly && !held)
+              ? c.entries.filter((x: any) => x.id !== e.id) // held from normal view, or released from held view → leaves this list
+              : c.entries.map((x: any) => (x.id === e.id ? { ...x, underReview: held } : x)),
         }))
         .filter((c) => c.entries.length > 0)
     );
@@ -5732,9 +5759,10 @@ function ReconCardBrowser({
       cur
         .map((cc) => ({
           ...cc,
-          entries: heldOnly && !held
-            ? cc.entries.filter((x: any) => !ids.has(x.id))
-            : cc.entries.map((x: any) => (ids.has(x.id) ? { ...x, underReview: held } : x)),
+          entries:
+            held || (heldOnly && !held)
+              ? cc.entries.filter((x: any) => !ids.has(x.id))
+              : cc.entries.map((x: any) => (ids.has(x.id) ? { ...x, underReview: held } : x)),
         }))
         .filter((cc) => cc.entries.length > 0)
     );
@@ -5772,7 +5800,12 @@ function ReconCardBrowser({
       <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[85vh] sm:rounded-2xl border border-line overflow-hidden">
         <div className="p-4 border-b border-line flex items-center justify-between">
           <div className="text-concrete font-bold">{heldOnly ? "Under review" : "Timecards"}</div>
-          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite border border-line px-3 py-2 rounded-full"
+          >
+            Close
+          </button>
         </div>
 
         <div className="p-3 overflow-y-auto overscroll-contain">
@@ -5886,7 +5919,16 @@ function ReconCardBrowser({
                                         <div className="min-w-0">
                                           <div className="text-concrete text-sm font-semibold truncate flex items-center gap-1.5 flex-wrap">
                                             {e.worker}
-                                            {isFm && (
+                                            {isFm && heldOnly && (
+                                              <span
+                                                className="inline-flex items-center justify-center w-4 h-4 rounded-full text-[9px] font-bold shrink-0"
+                                                style={{ color: "#8fbcff", border: "1.5px solid rgba(143,188,255,.7)" }}
+                                                title="Foreman"
+                                              >
+                                                F
+                                              </span>
+                                            )}
+                                            {isFm && !heldOnly && (
                                               <span
                                                 className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
                                                 style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}

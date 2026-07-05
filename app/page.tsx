@@ -106,6 +106,7 @@ export default function Page() {
   const [adminPin, setAdminPin] = useState("");
   const [adminPinError, setAdminPinError] = useState(false);
   const [query, setQuery] = useState("");
+  const [addPickerOpen, setAddPickerOpen] = useState(false);
 
   const [screen, setScreen] = useState<"form" | "review">("form");
   const [submitState, setSubmitState] = useState<
@@ -804,50 +805,86 @@ export default function Page() {
           ))}
         </div>
 
-        {/* Add / search box */}
-        <div ref={addBoxRef} className="bg-graphite rounded-2xl p-2 scroll-mt-3">
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onFocus={() => {
-              setSearchFocused(true);
-              liftSearchBox();
+        {/* Add worker — opens a popup picker (search + list) */}
+        <div ref={addBoxRef} className="scroll-mt-3">
+          <button
+            onClick={() => {
+              setQuery("");
+              setAddPickerOpen(true);
             }}
-            onBlur={() => setSearchFocused(false)}
-            placeholder={tr.addWorkerSearch}
-            className="w-full bg-transparent px-2 py-2 text-concrete placeholder:text-rebar/60 outline-none"
-          />
+            className="w-full bg-graphite rounded-2xl px-4 py-3.5 text-left text-rebar/80 font-semibold"
+          >
+            + {tr.addWorkerSearch}
+          </button>
+        </div>
 
-          {(query.trim() || suggestions.length > 0) && (
-            <div className="max-h-[46vh] overflow-y-auto mt-1">
-              {/* Matching people first — all shown equally, none pre-picked */}
-              {suggestions.map((n) => (
-                <button
-                  key={n}
-                  onClick={() => addWorker(n)}
-                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel/60 text-concrete border-b border-line/40 last:border-0"
-                >
-                  {n}
-                </button>
-              ))}
-
-              {!rosterLoaded && (
-                <div className="px-3 py-3 text-rebar text-sm">{tr.loading}</div>
-              )}
-
-              {/* Create-new option LAST, so it's never an accidental tap */}
-              {!exactExists && query.trim() && (
-                <button
-                  onClick={() => addWorker(query, true)}
-                  className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mt-1"
-                >
-                  + {tr.addNew} “{query.trim()}”
-                </button>
+        {addPickerOpen && (
+          <div
+            className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
+            onClick={() => {
+              setAddPickerOpen(false);
+              setQuery("");
+            }}
+          >
+            <div
+              className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="p-4 pb-2 border-b border-line">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-concrete font-bold">{tr.addWorkerSearch}</div>
+                  <button
+                    onClick={() => {
+                      setAddPickerOpen(false);
+                      setQuery("");
+                    }}
+                    className="text-rebar text-sm font-bold bg-steel px-3 py-1.5 rounded-full"
+                  >
+                    {tr.close}
+                  </button>
+                </div>
+                <input
+                  autoFocus
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={tr.addWorkerSearch}
+                  className="w-full bg-steel rounded-xl px-3 h-11 text-concrete placeholder:text-rebar/60"
+                />
+              </div>
+              <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+                {suggestions.map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => addWorker(n)}
+                    className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete border-b border-line/40 last:border-0"
+                  >
+                    {n}
+                  </button>
+                ))}
+                {!rosterLoaded && (
+                  <div className="px-3 py-3 text-rebar text-sm">{tr.loading}</div>
+                )}
+                {!exactExists && query.trim() && (
+                  <button
+                    onClick={() => addWorker(query, true)}
+                    className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mt-1"
+                  >
+                    + {tr.addNew} “{query.trim()}”
+                  </button>
+                )}
+                {suggestions.length === 0 && !query.trim() && rosterLoaded && (
+                  <div className="px-3 py-3 text-rebar text-sm">{tr.loading ? "" : ""}</div>
+                )}
+              </div>
+              {workers.length > 0 && (
+                <div className="px-4 py-2.5 border-t border-line text-rebar text-xs">
+                  {workers.length} {workers.length === 1 ? "worker" : "workers"} added — tap more or close.
+                </div>
               )}
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Work done + notes */}
         <div className="mt-5 space-y-4">
@@ -1334,39 +1371,53 @@ function ReportsPanel({
     return base;
   }
 
-  async function sharePdf(b64: string, filename: string) {
+  // Last generated PDF, kept so "Share / send" can reuse it without regenerating.
+  const lastPdf = useRef<{ b64: string; filename: string } | null>(null);
+
+  function b64ToBlobUrl(b64: string): string {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  }
+
+  // Share sheet (send / copy / save to Files) — reuses the cached PDF.
+  async function sharePdf() {
+    const cached = lastPdf.current;
+    if (!cached) return;
     try {
-      const bin = atob(b64);
+      const bin = atob(cached.b64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const blob = new Blob([bytes], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-
-      // On touch devices (iPhone/iPad) the native share sheet is the natural
-      // way to handle a file. On desktop (Mac/PC) that share sheet is a
-      // nuisance for a "view" action, so just open the PDF in a new tab.
-      const isTouch =
-        typeof navigator !== "undefined" && (navigator.maxTouchPoints || 0) > 0;
-
-      if (isTouch) {
-        const nav: any = navigator;
-        const file = new File([blob], filename, { type: "application/pdf" });
-        if (nav.canShare && nav.canShare({ files: [file] })) {
-          await nav.share({ files: [file], title: filename });
-          URL.revokeObjectURL(url);
-          return;
-        }
+      const nav: any = navigator;
+      const file = new File([blob], cached.filename, { type: "application/pdf" });
+      if (nav.canShare && nav.canShare({ files: [file] })) {
+        await nav.share({ files: [file], title: cached.filename });
+        return;
       }
-
-      // Desktop (and any non-shareable case): open the PDF to review it.
+      // no share support → just open it
+      const url = URL.createObjectURL(blob);
       window.open(url, "_blank");
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-    } catch {
-      /* sharing/opening may be blocked; ignore */
-    }
+    } catch { /* user cancelled or blocked; ignore */ }
   }
 
   async function generate(mode: "view" | "email") {
+    // For "view": open the window SYNCHRONOUSLY (same tap) so iOS never
+    // blocks it, then point it at the PDF when ready. This is the reliable
+    // one-tap preview — no share sheet involved.
+    let win: Window | null = null;
+    if (mode === "view" && typeof window !== "undefined") {
+      win = window.open("", "_blank");
+      if (win) {
+        try {
+          win.document.write(
+            '<body style="background:#1c2127;color:#9aa3af;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Generating report…</body>'
+          );
+        } catch { /* ignore */ }
+      }
+    }
     setState("sending");
     setResultMsg("");
     setDebugText("");
@@ -1384,9 +1435,19 @@ function ReportsPanel({
       );
       if (d.debug) setDebugText(JSON.stringify(d.debug, null, 2));
       if (mode === "view" && d.pdfBase64) {
-        await sharePdf(d.pdfBase64, d.filename || "Ammex_Payroll.pdf");
+        lastPdf.current = { b64: d.pdfBase64, filename: d.filename || "Ammex_Payroll.pdf" };
+        const url = b64ToBlobUrl(d.pdfBase64);
+        if (win) {
+          win.location.href = url; // preview in the tab we already opened
+        } else {
+          window.open(url, "_blank"); // fallback (desktop / popup allowed)
+        }
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      } else if (win) {
+        win.close();
       }
     } catch (e: any) {
+      if (win) { try { win.close(); } catch {} }
       setState("error");
       setResultMsg(e?.message || "");
     }
@@ -1594,6 +1655,14 @@ function ReportsPanel({
           <div className="bg-safety/15 border border-safety/40 rounded-2xl p-4">
             <div className="font-bold text-safety">{tr.reportSent}</div>
             <div className="text-sm text-rebar mt-1">{resultMsg}</div>
+            {lastPdf.current && (
+              <button
+                onClick={() => sharePdf()}
+                className="mt-3 w-full py-3 rounded-xl bg-graphite border border-line text-concrete font-bold active:bg-steel"
+              >
+                Share / save PDF…
+              </button>
+            )}
           </div>
         )}
         {debugText && (
@@ -2162,11 +2231,11 @@ function SchedulePanel({
       {/* Job picker modal */}
       {showJobPicker && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setShowJobPicker(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Sticky header: title + close, then the search box stays on top */}
@@ -2215,14 +2284,14 @@ function SchedulePanel({
       {/* Worker picker modal — search on top, list below, multi-add */}
       {workerFor !== null && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
           onClick={() => {
             setWorkerFor(null);
             setWorkerQuery("");
           }}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -2929,15 +2998,31 @@ function ReconPanel({
             })()}
 
             {/* Look up a specific worker */}
-            <button
-              onClick={() => {
-                setPickerOpen(true);
-                setWorkerQuery("");
-              }}
-              className="w-full bg-safety text-steel rounded-xl py-3.5 font-bold mb-4"
-            >
-              {worker ? `Looking up: ${worker}` : "Find a worker"}
-            </button>
+            <div className="flex gap-2 mb-4">
+              <button
+                onClick={() => {
+                  setPickerOpen(true);
+                  setWorkerQuery("");
+                }}
+                className="flex-1 bg-safety text-steel rounded-xl py-3.5 font-bold"
+              >
+                {worker ? `Looking up: ${worker}` : "Find a worker"}
+              </button>
+              {worker && (
+                <button
+                  onClick={() => {
+                    setWorker("");
+                    setEntries([]);
+                    setFlags({});
+                    setMsg("");
+                  }}
+                  aria-label="Clear worker"
+                  className="w-12 rounded-xl bg-graphite border border-line text-rebar font-bold active:text-safety shrink-0"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
 
             {/* Results */}
             {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
@@ -3228,11 +3313,11 @@ function ReconPanel({
       {/* Worker picker modal */}
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -3535,11 +3620,11 @@ function ReconEditModal({
       {/* Project picker (searchable) */}
       {projPickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setProjPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -3586,11 +3671,11 @@ function ReconEditModal({
       {/* Foreman picker (roster, excluding rodbusters) */}
       {fmPickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setFmPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -3895,11 +3980,11 @@ function ReconSplitModal({
 
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -5093,8 +5178,8 @@ function ReconBulkProjectModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
-      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[80vh] rounded-2xl border border-line overflow-hidden">
         <div className="p-4 pb-2 border-b border-line">
           <div className="flex items-center justify-between mb-1">
             <div className="text-concrete font-bold">Set project</div>
@@ -5338,11 +5423,11 @@ function ReconAddModal({
 
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -5409,8 +5494,8 @@ function ReconCrewModal({
   const elsewhere = others.filter((c) => !c.logged && c.elsewhereJob);
   const logged = others.filter((c) => c.logged);
   return (
-    <div className="fixed inset-0 z-[75] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
-      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
+    <div className="fixed inset-0 z-[75] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[80vh] rounded-2xl border border-line overflow-hidden">
         <div className="p-4 border-b border-line">
           <div className="flex items-center justify-between mb-1">
             <div className="text-concrete font-bold">Scheduled crew</div>
@@ -5577,8 +5662,8 @@ function ReconMissingCardsModal({
   onClose: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-[75] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
-      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[80vh] sm:rounded-2xl border border-line overflow-hidden">
+    <div className="fixed inset-0 z-[75] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[80vh] rounded-2xl border border-line overflow-hidden">
         <div className="p-4 border-b border-line">
           <div className="flex items-center justify-between mb-1">
             <div className="text-concrete font-bold">Missing cards</div>
@@ -5819,8 +5904,8 @@ function ReconCardBrowser({
   }
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/60 flex items-stretch sm:items-center sm:justify-center sm:p-4">
-      <div className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[85vh] sm:rounded-2xl border border-line overflow-hidden">
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[85vh] rounded-2xl border border-line overflow-hidden">
         <div className="p-4 border-b border-line flex items-center justify-between">
           <div className="text-concrete font-bold">{heldOnly ? "Under review" : "Timecards"}</div>
           <button
@@ -6174,11 +6259,11 @@ function ReconBulkEditModal({
 
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[80] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">
@@ -6469,11 +6554,11 @@ function SiteVisitsPanel({
       {/* Job picker */}
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
           onClick={() => setPickerOpen(false)}
         >
           <div
-            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="p-4 pb-2 border-b border-line">

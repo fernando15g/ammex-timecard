@@ -6280,26 +6280,47 @@ function SiteVisitsPanel({
   const [logging, setLogging] = useState(false);
   const [editVisit, setEditVisit] = useState<Visit | null>(null);
 
+  // range: default to This week
+  const today = localISO(new Date()).slice(0, 10);
+  const [rangeMode, setRangeMode] = useState<"this" | "last" | "custom">("this");
+  const [customStart, setCustomStart] = useState(today);
+  const [customEnd, setCustomEnd] = useState(today);
+  const { start, end } = useMemo(() => {
+    if (rangeMode === "this") {
+      const mon = mondayOf(today);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    if (rangeMode === "last") {
+      const mon = isoAddDays(mondayOf(today), -7);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    return { start: customStart, end: customEnd };
+  }, [rangeMode, customStart, customEnd, today]);
+
   const load = useCallback(() => {
     setLoading(true);
-    fetch("/api/visits")
+    fetch(`/api/visits?start=${start}&end=${end}`)
       .then((r) => r.json())
       .then((d) => {
         if (d?.ok) setVisits(d.visits || []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [start, end]);
 
   useEffect(() => {
     load();
+  }, [load]);
+
+  // projects load once (parallel to first visit load, cached server-side)
+  useEffect(() => {
     fetch("/api/visits?action=projects")
       .then((r) => r.json())
       .then((d) => {
         if (Array.isArray(d?.projects)) setProjects(d.projects);
       })
       .catch(() => {});
-  }, [load]);
+  }, []);
 
   async function logVisit(p: { id: string; name: string }) {
     setPickerOpen(false);
@@ -6373,9 +6394,42 @@ function SiteVisitsPanel({
           )}
         </button>
 
+        {/* Range selector */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+          {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setRangeMode(k)}
+              className={`flex-1 rounded-full py-2 text-xs font-bold ${
+                rangeMode === k ? "bg-steel text-concrete border border-line" : "text-rebar"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {rangeMode === "custom" && (
+          <div className="flex items-center gap-2 mb-4 px-1">
+            <input
+              type="date"
+              value={customStart}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="flex-1 min-w-0 bg-graphite border border-line rounded-lg h-10 px-2 text-concrete text-sm"
+            />
+            <span className="text-rebar text-xs">to</span>
+            <input
+              type="date"
+              value={customEnd}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="flex-1 min-w-0 bg-graphite border border-line rounded-lg h-10 px-2 text-concrete text-sm"
+            />
+          </div>
+        )}
+        {rangeMode !== "custom" && <div className="mb-3" />}
+
         {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
         {!loading && visits.length === 0 && (
-          <div className="text-rebar text-sm px-1">No visits logged yet. Tap “Log a visit” when you get to a job.</div>
+          <div className="text-rebar text-sm px-1">No visits in this range. Tap “Log a visit” when you get to a job.</div>
         )}
 
         {byDay.map(([day, dayVisits]) => (
@@ -6530,7 +6584,8 @@ function VisitEditModal({
           type="datetime-local"
           value={arrival}
           onChange={(e) => setArrival(e.target.value)}
-          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+          className="block w-full max-w-full box-border bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3 text-left appearance-none"
+          style={{ minWidth: 0 }}
         />
 
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
@@ -6541,7 +6596,7 @@ function VisitEditModal({
             type="datetime-local"
             value={departure}
             onChange={(e) => setDeparture(e.target.value)}
-            className="flex-1 bg-steel border border-line rounded-xl h-11 px-3 text-concrete"
+            className="flex-1 min-w-0 box-border bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-left appearance-none"
           />
           <button
             onClick={() => setDeparture(toLocalInput(localISO(new Date())))}

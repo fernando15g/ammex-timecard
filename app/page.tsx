@@ -3036,18 +3036,32 @@ function ReconPanel({
                         {!e.underReview && (
                           <button
                             onClick={async () => {
-                              await fetch("/api/recon", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                  op: "hold",
-                                  ids: [e.id],
-                                  held: true,
-                                  logWorker: e.worker,
-                                  logDate: e.date,
-                                }),
+                              // optimistic: mark held locally so the flag drops instantly
+                              setEntries((cur) =>
+                                cur.map((x) => (x.id === e.id ? { ...x, underReview: true } : x))
+                              );
+                              setFlags((cur) => {
+                                const next = { ...cur };
+                                delete next[e.id];
+                                return next;
                               });
-                              refreshAfterWrite();
+                              try {
+                                const res = await fetch("/api/recon", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    op: "hold",
+                                    ids: [e.id],
+                                    held: true,
+                                    logWorker: e.worker,
+                                    logDate: e.date,
+                                  }),
+                                }).then((r) => r.json());
+                                if (!res?.ok) throw new Error("hold failed");
+                                loadFlagsOverview();
+                              } catch {
+                                refreshAfterWrite(); // rollback via refetch
+                              }
                             }}
                             className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border"
                             style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
@@ -4143,19 +4157,36 @@ function ReconReviewView({
   }, [load]);
 
   // Hold a whole needs-project card for review → moves it to Under review.
-  async function holdGroup(g: { job: string; foreman: string; date: string; items: { id: string }[] }) {
-    await fetch("/api/recon", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        op: "hold",
-        ids: g.items.map((e) => e.id),
-        held: true,
-        logWorker: `${g.job || "Card"}${g.foreman ? ` · ${g.foreman}` : ""}`,
-        logDate: g.date,
-      }),
-    });
-    load();
+  // Optimistic: the card leaves the list instantly; rolls back if the write fails.
+  const [holdingKey, setHoldingKey] = useState<string>("");
+  async function holdGroup(g: { key: string; job: string; foreman: string; date: string; items: { id: string }[] }) {
+    setHoldingKey(g.key);
+    const ids = new Set(g.items.map((e) => e.id));
+    const prevMissing = missing;
+    // optimistic: remove these entries + bump held counters
+    setMissing((cur) => cur.filter((e: any) => !ids.has(e.id)));
+    setHeldCount((c) => c + g.items.length);
+    setHeldHours((h) => h + g.items.reduce((s: number, e: any) => s + (e.hours || 0), 0));
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "hold",
+          ids: g.items.map((e) => e.id),
+          held: true,
+          logWorker: `${g.job || "Card"}${g.foreman ? ` · ${g.foreman}` : ""}`,
+          logDate: g.date,
+        }),
+      }).then((r) => r.json());
+      if (!res?.ok) throw new Error("hold failed");
+    } catch {
+      // rollback
+      setMissing(prevMissing);
+      setHeldCount((c) => Math.max(0, c - g.items.length));
+      setHeldHours((h) => Math.max(0, h - g.items.reduce((s: number, e: any) => s + (e.hours || 0), 0)));
+    }
+    setHoldingKey("");
   }
 
   const applyResult = useCallback((d: any) => {
@@ -4363,6 +4394,22 @@ function ReconReviewView({
                         {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
                         {g.workers === 1 ? "worker" : "workers"}
                       </div>
+                      <span
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          if (holdingKey !== g.key) holdGroup(g);
+                        }}
+                        className="inline-flex items-center gap-1.5 mt-2 text-xs font-bold px-3 py-1 rounded-full border"
+                        style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                      >
+                        {holdingKey === g.key && (
+                          <span
+                            className="inline-block w-3 h-3 border-2 rounded-full animate-spin"
+                            style={{ borderColor: "#e0a63b", borderTopColor: "transparent" }}
+                          />
+                        )}
+                        Hold for review
+                      </span>
                     </button>
                     <div className="flex flex-col items-end gap-1 shrink-0">
                       <button
@@ -4376,13 +4423,6 @@ function ReconReviewView({
                         className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
                       >
                         Edit date / details
-                      </button>
-                      <button
-                        onClick={() => holdGroup(g)}
-                        className="text-xs font-semibold underline underline-offset-2"
-                        style={{ color: "#e0a63b" }}
-                      >
-                        Hold for review
                       </button>
                     </div>
                   </div>
@@ -4439,9 +4479,9 @@ function ReconReviewView({
           </div>
         ))}
 
-      {/* Under review — held items, excluded from counts. Inline; checkmark when empty. */}
-      <div className="mt-6">
-        {heldCount > 0 ? (
+      {/* Under review — held items, excluded from counts. Only shows when something's held. */}
+      {heldCount > 0 && (
+        <div className="mt-6">
           <button
             onClick={() => setShowHeld(true)}
             className="w-full flex items-center gap-2 rounded-xl px-4 py-3 text-left"
@@ -4452,13 +4492,8 @@ function ReconReviewView({
             <span className="text-rebar text-xs">· {heldHours} hrs held</span>
             <span className="text-rebar text-xs ml-auto">tap to resolve →</span>
           </button>
-        ) : (
-          <div className="flex items-center gap-2 px-1 text-sm">
-            <span style={{ color: "#4a9e63" }} className="font-bold">✓</span>
-            <span className="text-rebar">Nothing under review.</span>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* ---- Schedule vs. actual reconciliation ---- */}
       <div className="mt-8 mb-3 pt-5 border-t border-line">
@@ -5659,28 +5694,68 @@ function ReconCardBrowser({
     onChanged();
   }
 
+  const [busyId, setBusyId] = useState<string>("");
+
   async function holdEntry(e: { id: string; worker: string; date: string }, held: boolean) {
-    await fetch("/api/recon", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "hold", ids: [e.id], held, logWorker: e.worker, logDate: e.date }),
-    });
-    afterWrite();
+    setBusyId(e.id);
+    // optimistic: flip the flag locally (in heldOnly mode, remove the entry)
+    const prev = submitted;
+    setSubmitted((cur) =>
+      cur
+        .map((c) => ({
+          ...c,
+          entries: heldOnly && !held
+            ? c.entries.filter((x: any) => x.id !== e.id)
+            : c.entries.map((x: any) => (x.id === e.id ? { ...x, underReview: held } : x)),
+        }))
+        .filter((c) => c.entries.length > 0)
+    );
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "hold", ids: [e.id], held, logWorker: e.worker, logDate: e.date }),
+      }).then((r) => r.json());
+      if (!res?.ok) throw new Error("hold failed");
+      onChanged();
+    } catch {
+      setSubmitted(prev); // rollback
+    }
+    setBusyId("");
   }
 
   async function holdCard(c: { job: string; foreman: string; date: string; entries: { id: string }[] }, held: boolean) {
-    await fetch("/api/recon", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        op: "hold",
-        ids: c.entries.map((e) => e.id),
-        held,
-        logWorker: `${c.job}${c.foreman ? ` · ${c.foreman}` : ""}`,
-        logDate: c.date,
-      }),
-    });
-    afterWrite();
+    const ids = new Set(c.entries.map((e) => e.id));
+    setBusyId(`card:${c.job}|${c.date}`);
+    const prev = submitted;
+    setSubmitted((cur) =>
+      cur
+        .map((cc) => ({
+          ...cc,
+          entries: heldOnly && !held
+            ? cc.entries.filter((x: any) => !ids.has(x.id))
+            : cc.entries.map((x: any) => (ids.has(x.id) ? { ...x, underReview: held } : x)),
+        }))
+        .filter((cc) => cc.entries.length > 0)
+    );
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "hold",
+          ids: c.entries.map((e) => e.id),
+          held,
+          logWorker: `${c.job}${c.foreman ? ` · ${c.foreman}` : ""}`,
+          logDate: c.date,
+        }),
+      }).then((r) => r.json());
+      if (!res?.ok) throw new Error("hold failed");
+      onChanged();
+    } catch {
+      setSubmitted(prev); // rollback
+    }
+    setBusyId("");
   }
 
   async function voidEntry(e: { id: string; worker: string; date: string }) {
@@ -5798,48 +5873,77 @@ function ReconCardBrowser({
                                   </button>
                                 </div>
                                 <div className="space-y-1.5">
-                                  {c.entries.map((e) => (
-                                    <div
-                                      key={e.id}
-                                      className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
-                                    >
-                                      <div className="min-w-0">
-                                        <div className="text-concrete text-sm font-semibold truncate">
-                                          {e.worker}
-                                          {e.underReview && !heldOnly && (
-                                            <span className="ml-2 text-[10px]" style={{ color: "#e0a63b" }}>
-                                              ⟳ on hold
-                                            </span>
+                                  {c.entries.map((e) => {
+                                    const isFm =
+                                      (c.foreman || "").trim() !== "" &&
+                                      e.worker.trim().toLowerCase() === (c.foreman || "").trim().toLowerCase();
+                                    const busy = busyId === e.id;
+                                    return (
+                                      <div
+                                        key={e.id}
+                                        className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="text-concrete text-sm font-semibold truncate flex items-center gap-1.5 flex-wrap">
+                                            {e.worker}
+                                            {isFm && (
+                                              <span
+                                                className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                                                style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                                              >
+                                                FOREMAN
+                                              </span>
+                                            )}
+                                            {e.underReview && !heldOnly && (
+                                              <span className="text-[10px]" style={{ color: "#e0a63b" }}>
+                                                ⟳ on hold
+                                              </span>
+                                            )}
+                                            {busy && (
+                                              <span
+                                                className="inline-block w-3 h-3 border-2 rounded-full animate-spin"
+                                                style={{ borderColor: "#e0a63b", borderTopColor: "transparent" }}
+                                              />
+                                            )}
+                                          </div>
+                                          {heldOnly ? (
+                                            <div className="font-bold text-[15px]" style={{ color: "#f0cf8f" }}>
+                                              {e.hours}h
+                                            </div>
+                                          ) : (
+                                            <div className="text-rebar text-[11px]">{e.hours}h</div>
                                           )}
                                         </div>
-                                        <div className="text-rebar text-[11px]">{e.hours}h</div>
-                                      </div>
-                                      <div className="flex gap-1.5 shrink-0">
-                                        <button
-                                          onClick={() => holdEntry(e, !e.underReview)}
-                                          className="border rounded-lg px-2.5 py-1.5 text-xs font-bold"
-                                          style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
-                                        >
-                                          {e.underReview ? "Release" : "Hold"}
-                                        </button>
-                                        <button
-                                          onClick={() => setEditEntry(e)}
-                                          className="text-rebar border border-line rounded-lg px-2.5 py-1.5 text-xs font-bold active:text-safety"
-                                        >
-                                          Edit
-                                        </button>
-                                        {heldOnly && (
+                                        <div className="flex gap-1.5 shrink-0">
                                           <button
-                                            onClick={() => voidEntry(e)}
-                                            className="border rounded-lg px-2.5 py-1.5 text-xs font-bold"
-                                            style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                                            onClick={() => holdEntry(e, !e.underReview)}
+                                            disabled={busy}
+                                            className="border rounded-lg px-2.5 py-1.5 text-xs font-bold disabled:opacity-50"
+                                            style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
                                           >
-                                            Void
+                                            {e.underReview ? "Release" : "Hold"}
                                           </button>
-                                        )}
+                                          <button
+                                            onClick={() => setEditEntry(e)}
+                                            disabled={busy}
+                                            className="text-rebar border border-line rounded-lg px-2.5 py-1.5 text-xs font-bold active:text-safety disabled:opacity-50"
+                                          >
+                                            Edit
+                                          </button>
+                                          {heldOnly && (
+                                            <button
+                                              onClick={() => voidEntry(e)}
+                                              disabled={busy}
+                                              className="border rounded-lg px-2.5 py-1.5 text-xs font-bold disabled:opacity-50"
+                                              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                                            >
+                                              Void
+                                            </button>
+                                          )}
+                                        </div>
                                       </div>
-                                    </div>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}

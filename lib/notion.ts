@@ -62,6 +62,18 @@ export const TIMECARD_PROPS = {
 
 // Reconciliation Log — durable record of outcomes (no-show / confirmed / fixed).
 export const RECON_LOG_DB_ID = "3919aeba538380cbab67c636dcdb5b32";
+
+// Site Visit Log — owner's personal record of jobsite visits (arrival time,
+// optional departure). Owner-only; not employee-facing.
+export const SITE_VISIT_DB_ID = "3949aeba5383806dad38e0e3b1b1c193";
+export const VISIT_PROPS = {
+  title: "Visit", // title — auto-labeled "Job — Mon D"
+  job: "Job", // relation → Projects
+  arrival: "Arrival", // date (with time)
+  departure: "Departure", // date (with time) — optional
+  notes: "Notes", // rich_text
+  loggedBy: "Logged by", // text (or select) — resolved from schema at runtime
+};
 export const RECON_PROPS = {
   worker: "Worker", // Title
   date: "Date", // Date

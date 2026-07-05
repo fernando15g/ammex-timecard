@@ -98,6 +98,7 @@ export default function Page() {
   const [showReports, setShowReports] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [showRecon, setShowRecon] = useState(false);
+  const [showVisits, setShowVisits] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   // PIN gates the hamburger (admin area); unlock lasts the session so Reports
   // and Schedule share one entry.
@@ -1042,6 +1043,19 @@ export default function Page() {
                   </svg>
                   {tr.reconTitle}
                 </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowVisits(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z" />
+                    <circle cx="12" cy="10" r="3" />
+                  </svg>
+                  Site visits
+                </button>
               </>
             )}
           </div>
@@ -1072,6 +1086,15 @@ export default function Page() {
           tr={tr}
           lang={lang}
           onClose={() => setShowRecon(false)}
+        />
+      )}
+
+      {/* Site visits panel */}
+      {showVisits && (
+        <SiteVisitsPanel
+          tr={tr}
+          lang={lang}
+          onClose={() => setShowVisits(false)}
         />
       )}
     </div>
@@ -6187,6 +6210,394 @@ function ReconBulkEditModal({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Site Visits — owner's one-tap "I was here" logger with an editable history.
+// ============================================================================
+function fmtTime(iso: string): string {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+function fmtDayHeader(iso: string, lang: Lang): string {
+  if (!iso) return "";
+  return prettyDate(iso.slice(0, 10), lang);
+}
+// Build a local ISO string (with timezone offset) for "now" or an edited time.
+function localISO(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const oh = pad(Math.floor(Math.abs(off) / 60));
+  const om = pad(Math.abs(off) % 60);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes()
+  )}:00${sign}${oh}:${om}`;
+}
+// datetime-local value (no tz) ⇄ ISO
+function toLocalInput(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes()
+  )}`;
+}
+function fromLocalInput(v: string): string {
+  if (!v) return "";
+  return localISO(new Date(v));
+}
+
+function SiteVisitsPanel({
+  tr,
+  lang,
+  onClose,
+}: {
+  tr: any;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  type Visit = {
+    id: string;
+    jobId: string;
+    jobName: string;
+    arrival: string;
+    departure: string;
+    notes: string;
+  };
+  const [visits, setVisits] = useState<Visit[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId?: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [logging, setLogging] = useState(false);
+  const [editVisit, setEditVisit] = useState<Visit | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    fetch("/api/visits")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) setVisits(d.visits || []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    load();
+    fetch("/api/visits?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, [load]);
+
+  async function logVisit(p: { id: string; name: string }) {
+    setPickerOpen(false);
+    setLogging(true);
+    const arrival = localISO(new Date());
+    // optimistic
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: Visit = {
+      id: tempId, jobId: p.id, jobName: p.name, arrival, departure: "", notes: "",
+    };
+    setVisits((cur) => [optimistic, ...cur]);
+    try {
+      const res = await fetch("/api/visits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "log", jobId: p.id, jobName: p.name, arrival }),
+      }).then((r) => r.json());
+      if (res?.id) {
+        setVisits((cur) => cur.map((v) => (v.id === tempId ? { ...v, id: res.id } : v)));
+      } else throw new Error("log failed");
+    } catch {
+      setVisits((cur) => cur.filter((v) => v.id !== tempId)); // rollback
+    }
+    setLogging(false);
+  }
+
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  // group visits by day (already sorted newest-first from the API)
+  const byDay: [string, Visit[]][] = [];
+  const dayMap = new Map<string, Visit[]>();
+  for (const v of visits) {
+    const day = v.arrival.slice(0, 10);
+    if (!dayMap.has(day)) {
+      dayMap.set(day, []);
+      byDay.push([day, dayMap.get(day)!]);
+    }
+    dayMap.get(day)!.push(v);
+  }
+
+  return (
+    <div className="fixed inset-0 bg-steel z-[60] flex flex-col">
+      <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-line">
+        <span className="font-extrabold text-lg text-concrete">Site visits</span>
+        <button
+          onClick={onClose}
+          className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+        >
+          {tr.close}
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto overscroll-contain px-5 py-5">
+        {/* Primary action */}
+        <button
+          onClick={() => {
+            setPickerOpen(true);
+            setQuery("");
+          }}
+          disabled={logging}
+          className="w-full bg-safety text-steel rounded-2xl py-4 font-extrabold text-lg mb-6 flex items-center justify-center gap-2 disabled:opacity-60"
+        >
+          {logging ? (
+            <span className="inline-block w-5 h-5 border-2 border-steel border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <>+ Log a visit</>
+          )}
+        </button>
+
+        {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
+        {!loading && visits.length === 0 && (
+          <div className="text-rebar text-sm px-1">No visits logged yet. Tap “Log a visit” when you get to a job.</div>
+        )}
+
+        {byDay.map(([day, dayVisits]) => (
+          <div key={day} className="mb-5">
+            <div className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1">
+              {fmtDayHeader(day, lang)}
+            </div>
+            {dayVisits.map((v) => (
+              <button
+                key={v.id}
+                onClick={() => setEditVisit(v)}
+                className="w-full text-left bg-graphite border border-line rounded-2xl p-4 mb-2"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-concrete font-bold text-[15px] truncate">{v.jobName}</div>
+                    <div className="text-rebar text-sm mt-1">
+                      <span className="text-concrete font-semibold">{fmtTime(v.arrival)}</span>
+                      {v.departure ? (
+                        <>
+                          {" "}→ <span className="text-concrete font-semibold">{fmtTime(v.departure)}</span>
+                        </>
+                      ) : (
+                        <span className="text-rebar"> · arrived</span>
+                      )}
+                    </div>
+                    {v.notes && <div className="text-rebar text-xs mt-1 italic">{v.notes}</div>}
+                  </div>
+                  <span className="text-rebar text-xs shrink-0 mt-1">edit ›</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/* Job picker */}
+      {pickerOpen && (
+        <div
+          className="fixed inset-0 z-[75] bg-black/50 flex items-stretch sm:items-center sm:justify-center sm:p-4"
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full sm:max-w-md flex flex-col h-full sm:h-auto sm:max-h-[75vh] sm:rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Which job?</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-sm font-bold bg-steel px-3 py-1.5 rounded-full"
+                >
+                  {tr.close}
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => logVisit(p)}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editVisit && (
+        <VisitEditModal
+          visit={editVisit}
+          onClose={() => setEditVisit(null)}
+          onSaved={() => {
+            setEditVisit(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function VisitEditModal({
+  visit,
+  onClose,
+  onSaved,
+}: {
+  visit: { id: string; jobName: string; arrival: string; departure: string; notes: string };
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [arrival, setArrival] = useState(toLocalInput(visit.arrival));
+  const [departure, setDeparture] = useState(toLocalInput(visit.departure));
+  const [notes, setNotes] = useState(visit.notes || "");
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    await fetch("/api/visits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "update",
+        id: visit.id,
+        arrival: fromLocalInput(arrival),
+        departure: departure ? fromLocalInput(departure) : "",
+        clearDeparture: !departure,
+        notes,
+      }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  async function del() {
+    setSaving(true);
+    await fetch("/api/visits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "delete", id: visit.id }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">{visit.jobName}</div>
+          <button onClick={onClose} className="text-rebar text-sm font-bold bg-steel px-3 py-1.5 rounded-full">
+            Close
+          </button>
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1 mt-3">Arrived</label>
+        <input
+          type="datetime-local"
+          value={arrival}
+          onChange={(e) => setArrival(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Left <span className="text-rebar font-normal normal-case">(optional)</span>
+        </label>
+        <div className="flex gap-2 mb-3">
+          <input
+            type="datetime-local"
+            value={departure}
+            onChange={(e) => setDeparture(e.target.value)}
+            className="flex-1 bg-steel border border-line rounded-xl h-11 px-3 text-concrete"
+          />
+          <button
+            onClick={() => setDeparture(toLocalInput(localISO(new Date())))}
+            className="bg-steel border border-line text-concrete rounded-xl px-3 text-sm font-bold shrink-0"
+          >
+            Now
+          </button>
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Notes</label>
+        <input
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="optional"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+
+        {!confirmDelete ? (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="text-rebar border border-line rounded-xl px-3 py-3 text-sm font-bold"
+              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.4)" }}
+            >
+              Delete
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">Delete this visit permanently?</div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={del}
+                disabled={saving}
+                className="flex-1 rounded-xl py-3 font-bold text-white disabled:opacity-60"
+                style={{ background: "#e5533c" }}
+              >
+                {saving ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -1137,7 +1137,12 @@ function TopBar({
           </button>
         )}
         <div className="w-2.5 h-6 bg-safety rounded-sm" />
-        <span className="font-extrabold tracking-tight">{tr.appTitle}</span>
+        <img
+          src="/ammex-wordmark-white.png"
+          alt="AMMEX"
+          className="h-[18px] w-auto"
+        />
+        <span className="font-extrabold tracking-tight text-concrete leading-none relative top-[2px]">{tr.appTitle}</span>
       </div>
       <div className="flex items-center gap-2">
         {justUpdated && (

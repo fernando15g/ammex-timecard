@@ -106,7 +106,6 @@ export default function Page() {
   const [adminPin, setAdminPin] = useState("");
   const [adminPinError, setAdminPinError] = useState(false);
   const [query, setQuery] = useState("");
-  const [addPickerOpen, setAddPickerOpen] = useState(false);
 
   const [screen, setScreen] = useState<"form" | "review">("form");
   const [submitState, setSubmitState] = useState<
@@ -805,86 +804,52 @@ export default function Page() {
           ))}
         </div>
 
-        {/* Add worker — opens a popup picker (search + list) */}
-        <div ref={addBoxRef} className="scroll-mt-3">
-          <button
-            onClick={() => {
-              setQuery("");
-              setAddPickerOpen(true);
+        {/* Add / search box — visible inline so a foreman can add the whole
+            crew quickly: type to filter, tap names from the list below. */}
+        <div ref={addBoxRef} className="bg-graphite rounded-2xl border border-line overflow-hidden scroll-mt-3">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => {
+              setSearchFocused(true);
+              liftSearchBox();
             }}
-            className="w-full bg-graphite rounded-2xl px-4 py-3.5 text-left text-rebar/80 font-semibold"
-          >
-            + {tr.addWorkerSearch}
-          </button>
-        </div>
+            onBlur={() => setSearchFocused(false)}
+            placeholder={tr.addWorkerSearch}
+            className="w-full bg-transparent px-4 py-3.5 text-concrete placeholder:text-rebar/60 outline-none border-b border-line/60"
+          />
 
-        {addPickerOpen && (
-          <div
-            className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
-            onClick={() => {
-              setAddPickerOpen(false);
-              setQuery("");
-            }}
-          >
-            <div
-              className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="p-4 pb-2 border-b border-line">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-concrete font-bold">{tr.addWorkerSearch}</div>
-                  <button
-                    onClick={() => {
-                      setAddPickerOpen(false);
-                      setQuery("");
-                    }}
-                    className="text-rebar text-sm font-bold bg-steel px-3 py-1.5 rounded-full"
-                  >
-                    {tr.close}
-                  </button>
-                </div>
-                <input
-                  autoFocus
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={tr.addWorkerSearch}
-                  className="w-full bg-steel rounded-xl px-3 h-11 text-concrete placeholder:text-rebar/60"
-                />
-              </div>
-              <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
-                {suggestions.map((n) => (
-                  <button
-                    key={n}
-                    onClick={() => addWorker(n)}
-                    className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete border-b border-line/40 last:border-0"
-                  >
-                    {n}
-                  </button>
-                ))}
-                {!rosterLoaded && (
-                  <div className="px-3 py-3 text-rebar text-sm">{tr.loading}</div>
-                )}
-                {!exactExists && query.trim() && (
-                  <button
-                    onClick={() => addWorker(query, true)}
-                    className="w-full text-left px-3 py-3 rounded-xl bg-safety/15 text-safety font-semibold mt-1"
-                  >
-                    + {tr.addNew} “{query.trim()}”
-                  </button>
-                )}
-                {suggestions.length === 0 && !query.trim() && rosterLoaded && (
-                  <div className="px-3 py-3 text-rebar text-sm">{tr.loading ? "" : ""}</div>
-                )}
-              </div>
-              {workers.length > 0 && (
-                <div className="px-4 py-2.5 border-t border-line text-rebar text-xs">
-                  {workers.length} {workers.length === 1 ? "worker" : "workers"} added — tap more or close.
-                </div>
-              )}
-            </div>
+          <div className="max-h-[46vh] overflow-y-auto overscroll-contain">
+            {suggestions.map((n) => (
+              <button
+                key={n}
+                onClick={() => addWorker(n)}
+                className="w-full text-left px-4 py-3 active:bg-steel text-concrete border-b border-line/30 last:border-0"
+              >
+                {n}
+              </button>
+            ))}
+
+            {!rosterLoaded && (
+              <div className="px-4 py-3 text-rebar text-sm">{tr.loading}</div>
+            )}
+
+            {rosterLoaded && suggestions.length === 0 && !query.trim() && (
+              <div className="px-4 py-3 text-rebar text-sm">Start typing a name…</div>
+            )}
+
+            {/* Create-new option LAST, so it's never an accidental tap */}
+            {!exactExists && query.trim() && (
+              <button
+                onClick={() => addWorker(query, true)}
+                className="w-full text-left px-4 py-3 bg-safety/15 text-safety font-semibold"
+              >
+                + {tr.addNew} “{query.trim()}”
+              </button>
+            )}
           </div>
-        )}
+        </div>
 
         {/* Work done + notes */}
         <div className="mt-5 space-y-4">

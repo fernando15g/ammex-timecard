@@ -6,6 +6,7 @@ import {
   SCHEDULE_DB_ID,
   SCHEDULE_PROPS,
   PROJECT_PROPS,
+  PROJECTS_DB_ID,
   PAYROLL_RECIPIENT,
 } from "@/lib/notion";
 import { buildSchedulePdf, ScheduleData, ScheduleJob } from "@/lib/schedule-pdf";
@@ -24,27 +25,56 @@ interface Assignment {
 }
 
 // Resolve a Projects page id -> { name, jobId }, cached per request.
+// Job id → {name, jobId}. One cached Projects-DB query instead of a sequential
+// page-retrieve per id (same speed pattern as the recon route).
+let schedProjCache: { map: Map<string, { name: string; jobId: string }>; ts: number } | null = null;
+const SCHED_PROJ_TTL = 5 * 60 * 1000;
+
 async function jobLookup(notion: Client, ids: string[]) {
-  const map = new Map<string, { name: string; jobId: string }>();
   const unique = Array.from(new Set(ids));
+  if (!schedProjCache || Date.now() - schedProjCache.ts > SCHED_PROJ_TTL) {
+    const map = new Map<string, { name: string; jobId: string }>();
+    try {
+      let cursor: string | undefined;
+      do {
+        const res: any = await notion.databases.query({
+          database_id: PROJECTS_DB_ID,
+          start_cursor: cursor,
+          page_size: 100,
+        });
+        for (const pg of res.results) {
+          const props = pg.properties || {};
+          const name = (props[PROJECT_PROPS.name]?.title || [])
+            .map((t: any) => t.plain_text).join("") || "";
+          const jobId = (props[PROJECT_PROPS.jobId]?.rich_text || [])
+            .map((t: any) => t.plain_text).join("") || "";
+          if (name) map.set(pg.id, { name, jobId });
+        }
+        cursor = res.has_more ? res.next_cursor : undefined;
+      } while (cursor);
+      schedProjCache = { map, ts: Date.now() };
+    } catch { /* fall through */ }
+  }
+  const all = schedProjCache?.map || new Map();
+  const out = new Map<string, { name: string; jobId: string }>();
   for (const id of unique) {
+    const hit = all.get(id);
+    if (hit) { out.set(id, hit); continue; }
+    // Rare: brand-new project inside the TTL window — fetch just that one.
     try {
       const pg: any = await notion.pages.retrieve({ page_id: id });
       const props = pg.properties || {};
-      const name =
-        (props[PROJECT_PROPS.name]?.title || [])
-          .map((t: any) => t.plain_text)
-          .join("") || "";
-      const jobId =
-        (props[PROJECT_PROPS.jobId]?.rich_text || [])
-          .map((t: any) => t.plain_text)
-          .join("") || "";
-      map.set(id, { name, jobId });
+      const name = (props[PROJECT_PROPS.name]?.title || [])
+        .map((t: any) => t.plain_text).join("") || "";
+      const jobId = (props[PROJECT_PROPS.jobId]?.rich_text || [])
+        .map((t: any) => t.plain_text).join("") || "";
+      out.set(id, { name: name || "(unknown job)", jobId });
+      if (name) schedProjCache?.map.set(id, { name, jobId });
     } catch {
-      map.set(id, { name: "(unknown job)", jobId: "" });
+      out.set(id, { name: "(unknown job)", jobId: "" });
     }
   }
-  return map;
+  return out;
 }
 
 // GET ?date=ISO  -> that day's schedule (for reopen/edit)

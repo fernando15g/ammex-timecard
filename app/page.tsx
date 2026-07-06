@@ -2001,11 +2001,29 @@ function SchedulePanel({
     return (
       <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
         <div className="max-w-2xl mx-auto p-5 pb-24">
-          <div className="flex items-center justify-between mb-5">
-            <button onClick={() => setHistoryMode(false)} className="text-rebar font-semibold active:text-safety">
-              ← Back to planning
+          <div className="flex items-center justify-between mb-4">
+            <div className="w-14" />
+            <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+            >
+              {tr.close}
             </button>
-            <div className="text-rebar text-sm font-bold">Past schedules</div>
+          </div>
+
+          {/* Plan / Past toggle — Past active */}
+          <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-6">
+            <button
+              onClick={() => setHistoryMode(false)}
+              className="flex-1 rounded-full py-2.5 text-sm font-bold text-rebar"
+            >
+              Plan schedule
+            </button>
+            <button className="flex-1 rounded-full py-2.5 text-sm font-bold bg-safety text-steel">
+              Past schedules
+            </button>
           </div>
 
           {/* Prominent date */}
@@ -2016,12 +2034,12 @@ function SchedulePanel({
             <div className="text-rebar text-xs mt-1">read-only</div>
           </div>
 
-          {/* Day navigation */}
-          <div className="flex items-center justify-center gap-2 mb-5">
+          {/* Day navigation — fixed sides, centered picker, no wrapping */}
+          <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 max-w-sm mx-auto mb-6">
             <button
               onClick={histPrev}
               disabled={histLoading}
-              className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
+              className="whitespace-nowrap bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
             >
               ‹ Prev
             </button>
@@ -2029,12 +2047,12 @@ function SchedulePanel({
               type="date"
               value={histDate}
               onChange={(e) => histJump(e.target.value)}
-              className="bg-graphite border border-line rounded-full px-3 h-10 text-concrete text-sm w-[150px] text-center"
+              className="w-full min-w-0 box-border bg-graphite border border-line rounded-full px-3 h-10 text-concrete text-sm text-center appearance-none"
             />
             <button
               onClick={histNext}
               disabled={histLoading}
-              className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
+              className="whitespace-nowrap bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
             >
               Next ›
             </button>
@@ -2244,6 +2262,19 @@ function SchedulePanel({
           </button>
         </div>
 
+        {/* Plan / Past toggle */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-4">
+          <button className="flex-1 rounded-full py-2.5 text-sm font-bold bg-safety text-steel">
+            Plan schedule
+          </button>
+          <button
+            onClick={openHistory}
+            className="flex-1 rounded-full py-2.5 text-sm font-bold text-rebar"
+          >
+            Past schedules
+          </button>
+        </div>
+
         {/* Controls — wrap instead of overflowing. All inline on iPad; on a
             narrow phone the actions wrap to the next line (never off-screen). */}
         <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -2262,16 +2293,6 @@ function SchedulePanel({
               <path d="M3 3v5h5" />
             </svg>
             Carry over
-          </button>
-          <button
-            onClick={openHistory}
-            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-semibold text-sm inline-flex items-center gap-1.5 active:text-safety shrink-0"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v5l3 2" />
-            </svg>
-            Past schedules
           </button>
           {jobs.length > 0 && (
             <button

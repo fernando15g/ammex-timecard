@@ -888,23 +888,55 @@ export async function POST(req: Request) {
           done++;
         } catch { /* skip */ }
       }
-      // Log the hold/release for the audit trail.
-      if (logWorker) {
+      // Audit trail. On HOLD: create a "Held for review" row (Status "Under Review").
+      // On RELEASE: update the original hold row(s) in place → Status "Fixed",
+      // so the log reflects final state instead of leaving stale "Under Review" rows.
+      if (logWorker && held) {
         try {
-          const desc = held
-            ? `Held for review${note ? ` — ${note}` : ""}${list.length > 1 ? ` · ${done} entries` : ""}`
-            : `Released from review${list.length > 1 ? ` · ${done} entries` : ""}`;
+          const desc = `Held for review${note ? ` — ${note}` : ""}${list.length > 1 ? ` · ${done} entries` : ""}`;
           await notion.pages.create({
             parent: { database_id: RECON_LOG_DB_ID },
             properties: {
               [RECON_PROPS.worker]: { title: [{ text: { content: logWorker } }] },
-              [RECON_PROPS.status]: { select: { name: held ? "Under Review" : "Fixed" } },
+              [RECON_PROPS.status]: { select: { name: "Under Review" } },
               [RECON_PROPS.note]: { rich_text: [{ text: { content: desc } }] },
               [RECON_PROPS.refs]: { rich_text: [{ text: { content: list.join(",") } }] },
               ...(logDate ? { [RECON_PROPS.date]: { date: { start: logDate } } } : {}),
             },
           });
         } catch { /* logging shouldn't block */ }
+      } else if (!held) {
+        // Release: flip the matching still-open hold row(s) to Fixed in place.
+        try {
+          const res: any = await notion.databases.query({
+            database_id: RECON_LOG_DB_ID,
+            filter: {
+              property: RECON_PROPS.status,
+              select: { equals: "Under Review" },
+            },
+            page_size: 100,
+          });
+          const idSet = new Set(list);
+          for (const row of res.results) {
+            const refsText = (row.properties?.[RECON_PROPS.refs]?.rich_text || [])
+              .map((t: any) => t.plain_text).join("");
+            const rowIds = refsText.split(",").map((s: string) => s.trim()).filter(Boolean);
+            // match if this hold row references any of the released timecard ids
+            if (rowIds.some((rid: string) => idSet.has(rid))) {
+              const prevNote = (row.properties?.[RECON_PROPS.note]?.rich_text || [])
+                .map((t: any) => t.plain_text).join("");
+              await notion.pages.update({
+                page_id: row.id,
+                properties: {
+                  [RECON_PROPS.status]: { select: { name: "Fixed" } },
+                  [RECON_PROPS.note]: {
+                    rich_text: [{ text: { content: `${prevNote} · released`.trim() } }],
+                  },
+                },
+              });
+            }
+          }
+        } catch { /* audit update shouldn't block the release */ }
       }
       return NextResponse.json({ ok: true, done });
     }

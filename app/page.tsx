@@ -1736,6 +1736,12 @@ function SchedulePanel({
   const [workerFor, setWorkerFor] = useState<string | null>(null); // jobPageId
   const [workerQuery, setWorkerQuery] = useState("");
   const [showReview, setShowReview] = useState(false);
+  // Past-schedules review mode (read-only history)
+  const [historyMode, setHistoryMode] = useState(false);
+  const [histDate, setHistDate] = useState<string>("");
+  const [histJobs, setHistJobs] = useState<SchedJob[]>([]);
+  const [histLoading, setHistLoading] = useState(false);
+  const [histEmpty, setHistEmpty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState<"idle" | "saved" | "error">("idle");
   const [resultMsg, setResultMsg] = useState("");
@@ -1821,6 +1827,63 @@ function SchedulePanel({
         }
       })
       .catch(() => {});
+  }
+
+  // ---- Past-schedules review mode (read-only) ----
+  const [histMsg, setHistMsg] = useState("");
+  function applyHist(d: any, jumpedDate?: string) {
+    if (d?.date) {
+      setHistDate(d.date);
+      setHistJobs(
+        (d.jobs || []).map((j: any) => ({
+          jobPageId: j.jobPageId,
+          name: j.name,
+          jobId: j.jobId,
+          crew: [...(j.crew || [])].sort(
+            (a: any, b: any) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0)
+          ),
+        }))
+      );
+      setHistEmpty((d.jobs || []).length === 0);
+    } else if (jumpedDate) {
+      // Specific date with no rows — show the date with an empty state.
+      setHistDate(jumpedDate);
+      setHistJobs([]);
+      setHistEmpty(true);
+    } else {
+      // Prev/Next found nothing further in that direction — stay put.
+      setHistMsg("No more scheduled days in that direction.");
+      setTimeout(() => setHistMsg(""), 2500);
+    }
+  }
+  function loadHist(url: string, jumpedDate?: string) {
+    setHistLoading(true);
+    fetch(url)
+      .then((r) => r.json())
+      .then((d) => {
+        applyHist(d, jumpedDate);
+        setHistLoading(false);
+      })
+      .catch(() => setHistLoading(false));
+  }
+  function openHistory() {
+    setHistoryMode(true);
+    setHistMsg("");
+    const today = localISO(new Date()).slice(0, 10);
+    // Default: today; if today has nothing, walk back to the last scheduled day.
+    loadHist(`/api/schedule?recent=1&before=${today}`);
+  }
+  function histPrev() {
+    if (!histDate) return;
+    loadHist(`/api/schedule?recent=1&before=${isoAddDays(histDate, -1)}`);
+  }
+  function histNext() {
+    if (!histDate) return;
+    loadHist(`/api/schedule?recent=1&after=${isoAddDays(histDate, 1)}`);
+  }
+  function histJump(d: string) {
+    if (!d) return;
+    loadHist(`/api/schedule?date=${d}`, d);
   }
 
   function addJob(j: { id: string; name: string; jobId: string }) {
@@ -1933,6 +1996,99 @@ function SchedulePanel({
   }
 
   // Review screen
+  // ---- Past schedules (read-only review mode) ----
+  if (historyMode) {
+    return (
+      <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+        <div className="max-w-2xl mx-auto p-5 pb-24">
+          <div className="flex items-center justify-between mb-5">
+            <button onClick={() => setHistoryMode(false)} className="text-rebar font-semibold active:text-safety">
+              ← Back to planning
+            </button>
+            <div className="text-rebar text-sm font-bold">Past schedules</div>
+          </div>
+
+          {/* Prominent date */}
+          <div className="text-center mb-4">
+            <div className="text-safety text-2xl font-extrabold tracking-tight">
+              {histDate ? prettyScheduleDate(histDate) : "—"}
+            </div>
+            <div className="text-rebar text-xs mt-1">read-only</div>
+          </div>
+
+          {/* Day navigation */}
+          <div className="flex items-center justify-center gap-2 mb-5">
+            <button
+              onClick={histPrev}
+              disabled={histLoading}
+              className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
+            >
+              ‹ Prev
+            </button>
+            <input
+              type="date"
+              value={histDate}
+              onChange={(e) => histJump(e.target.value)}
+              className="bg-graphite border border-line rounded-full px-3 h-10 text-concrete text-sm w-[150px] text-center"
+            />
+            <button
+              onClick={histNext}
+              disabled={histLoading}
+              className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
+            >
+              Next ›
+            </button>
+          </div>
+
+          {histMsg && (
+            <div className="text-center text-rebar text-sm mb-4">{histMsg}</div>
+          )}
+
+          {histLoading && <div className="text-rebar text-sm text-center py-8">Loading…</div>}
+
+          {!histLoading && histEmpty && (
+            <div className="text-center py-12">
+              <div className="text-rebar text-sm">No schedule saved for this day.</div>
+            </div>
+          )}
+
+          {!histLoading && !histEmpty &&
+            histJobs.map((j) => (
+              <div key={j.jobPageId} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="text-concrete font-bold text-[15px] truncate">{j.name}</div>
+                  {j.jobId && (
+                    <span className="text-rebar text-xs bg-steel border border-line rounded-full px-2.5 py-1 shrink-0">
+                      {j.jobId}
+                    </span>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  {j.crew.map((c, i) => (
+                    <div key={i} className="flex items-center gap-2 text-sm">
+                      <span className="text-concrete">{c.worker}</span>
+                      {c.isLead && (
+                        <span
+                          className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                          style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                        >
+                          FOREMAN
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                  {j.crew.length === 0 && <div className="text-rebar text-xs">No crew listed.</div>}
+                </div>
+                <div className="text-rebar text-[11px] mt-2">
+                  {j.crew.length} {j.crew.length === 1 ? "worker" : "workers"}
+                </div>
+              </div>
+            ))}
+        </div>
+      </div>
+    );
+  }
+
   if (showReview) {
     const warnings: string[] = [];
     for (const j of jobs) {
@@ -2106,6 +2262,16 @@ function SchedulePanel({
               <path d="M3 3v5h5" />
             </svg>
             Carry over
+          </button>
+          <button
+            onClick={openHistory}
+            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-semibold text-sm inline-flex items-center gap-1.5 active:text-safety shrink-0"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3 2" />
+            </svg>
+            Past schedules
           </button>
           {jobs.length > 0 && (
             <button

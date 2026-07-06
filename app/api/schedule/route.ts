@@ -56,15 +56,25 @@ export async function GET(req: NextRequest) {
   const notion = new Client({ auth: NOTION_TOKEN });
   const date = req.nextUrl.searchParams.get("date")?.trim();
   const recent = req.nextUrl.searchParams.get("recent");
+  const before = req.nextUrl.searchParams.get("before")?.trim(); // review mode: most recent day <= this
+  const after = req.nextUrl.searchParams.get("after")?.trim(); // review mode: earliest day >= this
 
   try {
     let targetDate = date || "";
 
     if (recent === "1" && !date) {
       // Find the most recent date that has any schedule rows.
+      // With ?before=<ISO> (review mode), only look at days on or before it —
+      // "open to today; if empty, walk back to the last day with a schedule."
+      // With ?after=<ISO>, find the earliest scheduled day on or after it (Next ›).
       const r: any = await notion.databases.query({
         database_id: SCHEDULE_DB_ID,
-        sorts: [{ property: SCHEDULE_PROPS.date, direction: "descending" }],
+        ...(before
+          ? { filter: { property: SCHEDULE_PROPS.date, date: { on_or_before: before } } }
+          : after
+          ? { filter: { property: SCHEDULE_PROPS.date, date: { on_or_after: after } } }
+          : {}),
+        sorts: [{ property: SCHEDULE_PROPS.date, direction: after ? "ascending" : "descending" }],
         page_size: 1,
       });
       if (r.results.length === 0) {

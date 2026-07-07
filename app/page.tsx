@@ -4205,6 +4205,8 @@ function DiscCard({
   onDismiss,
   onLooksRight,
   onViewCrew,
+  unconfirmedTag,
+  onUnconfirmedTap,
 }: {
   d: any;
   lang: Lang;
@@ -4216,6 +4218,8 @@ function DiscCard({
   onDismiss: () => void;
   onLooksRight: () => void;
   onViewCrew?: () => void;
+  unconfirmedTag?: boolean;
+  onUnconfirmedTap?: () => void;
 }) {
   const isNoTimecard = d.kind === "No timecard";
   const kindLabel = isNoTimecard ? (sev === "pending" ? "No hours yet" : "No timecard") : d.kind;
@@ -4229,7 +4233,25 @@ function DiscCard({
     >
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-concrete font-bold text-[15px]">{d.worker}</div>
+          <div className="text-concrete font-bold text-[15px] flex items-center gap-2 flex-wrap">
+            {d.worker}
+            {unconfirmedTag && (
+              <button
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onUnconfirmedTap && onUnconfirmedTap();
+                }}
+                className="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+                style={{
+                  color: "#e5533c",
+                  borderColor: "rgba(229,83,60,.55)",
+                  background: "rgba(229,83,60,.10)",
+                }}
+              >
+                UNCONFIRMED
+              </button>
+            )}
+          </div>
           <div
             className="inline-block text-[11px] font-bold px-2 py-0.5 rounded-full mt-1"
             style={{ color, background: `${color}22` }}
@@ -4400,6 +4422,8 @@ function ReconReviewView({
   const [showMissing, setShowMissing] = useState(false);
   const [showCards, setShowCards] = useState(false);
   const [showHeld, setShowHeld] = useState(false);
+  const [unconfirmed, setUnconfirmed] = useState<{ id: string; name: string }[]>([]);
+  const [confirmWorker, setConfirmWorker] = useState<{ id: string; name: string } | null>(null);
   const [heldCount, setHeldCount] = useState(0);
   const [heldHours, setHeldHours] = useState(0);
   // session undo log — recently resolved discrepancies
@@ -4489,6 +4513,7 @@ function ReconReviewView({
     setDiscs(d.discrepancies || []);
     setMissingCards(d.missingCards || []);
     setCrews(d.crews || {});
+    setUnconfirmed(d.unconfirmedWorkers || []);
   }, []);
 
   const loadDiscs = useCallback(() => {
@@ -5113,6 +5138,15 @@ function ReconReviewView({
                                           })
                                       : undefined
                                   }
+                                  unconfirmedTag={unconfirmed.some(
+                                    (u) => u.name.trim().toLowerCase() === (d.worker || "").trim().toLowerCase()
+                                  )}
+                                  onUnconfirmedTap={() => {
+                                    const u = unconfirmed.find(
+                                      (x) => x.name.trim().toLowerCase() === (d.worker || "").trim().toLowerCase()
+                                    );
+                                    if (u) setConfirmWorker(u);
+                                  }}
                                 />
                               );
                             })}
@@ -5268,6 +5302,17 @@ function ReconReviewView({
           heldOnly
           onClose={() => setShowHeld(false)}
           onChanged={() => loadDiscs()}
+        />
+      )}
+
+      {confirmWorker && (
+        <ConfirmWorkerModal
+          worker={confirmWorker}
+          onClose={() => setConfirmWorker(null)}
+          onDone={() => {
+            setUnconfirmed((cur) => cur.filter((u) => u.id !== confirmWorker.id));
+            setConfirmWorker(null);
+          }}
         />
       )}
 
@@ -6920,6 +6965,102 @@ function VisitEditModal({
               </button>
             </div>
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Confirm/reject a foreman-added roster row (Status = "Unconfirmed").
+// Confirm: Active checked + Status cleared. Reject: archives the roster row
+// (their submitted timecards stay; void separately if needed).
+function ConfirmWorkerModal({
+  worker,
+  onClose,
+  onDone,
+}: {
+  worker: { id: string; name: string };
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+
+  async function act(op: "confirm_worker" | "reject_worker") {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op, rosterId: worker.id, worker: worker.name }),
+      }).then((r) => r.json());
+      if (res?.ok) onDone();
+      else setBusy(false);
+    } catch {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        {!rejecting ? (
+          <>
+            <div className="text-concrete font-bold text-lg mb-1">{worker.name}</div>
+            <div className="text-rebar text-sm mb-4">
+              This person was added by a foreman and isn&apos;t confirmed on the roster yet.
+              Confirm to make them an active worker, or reject if they shouldn&apos;t be on the roster.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setRejecting(true)}
+                disabled={busy}
+                className="border rounded-xl px-3 py-3 text-sm font-bold disabled:opacity-50"
+                style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.4)" }}
+              >
+                Reject
+              </button>
+              <button
+                onClick={() => act("confirm_worker")}
+                disabled={busy}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {busy ? "Confirming…" : "Confirm worker"}
+              </button>
+            </div>
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="w-full mt-2 text-rebar text-sm font-bold py-2"
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="text-concrete font-bold text-lg mb-1">Reject {worker.name}?</div>
+            <div className="text-rebar text-sm mb-4">
+              This removes them from the roster. Any hours already submitted under their
+              name stay on the timecards — void those separately if they shouldn&apos;t count.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setRejecting(false)}
+                disabled={busy}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => act("reject_worker")}
+                disabled={busy}
+                className="flex-1 rounded-xl py-3 font-bold text-white disabled:opacity-60"
+                style={{ background: "#e5533c" }}
+              >
+                {busy ? "Rejecting…" : "Yes, reject"}
+              </button>
+            </div>
+          </>
         )}
       </div>
     </div>

@@ -240,11 +240,39 @@ function daysAgo(dateISO: string, todayISO: string): number {
   return Math.round((b - a) / 86400000);
 }
 
+// Roster rows a foreman created that the owner hasn't confirmed yet
+// (Status = "Unconfirmed"). Surfaced in Reconcile with a confirm/reject action.
+async function queryUnconfirmed(): Promise<{ id: string; name: string }[]> {
+  const out: { id: string; name: string }[] = [];
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: CREW_ROSTER_DB_ID,
+        filter: {
+          property: ROSTER_PROPS.status,
+          rich_text: { equals: "Unconfirmed" },
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const name = (pg.properties?.[ROSTER_PROPS.name]?.title || [])
+          .map((t: any) => t.plain_text).join("").trim();
+        if (name) out.push({ id: pg.id, name });
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch { /* non-critical */ }
+  return out;
+}
+
 // Compute schedule-vs-actual discrepancies.
 async function reconcile(startISO: string, endISO: string, todayISO: string) {
-  const [sched, cards] = await Promise.all([
+  const [sched, cards, unconfirmedWorkers] = await Promise.all([
     querySchedule(startISO, endISO),
     queryEntries(startISO, endISO),
+    queryUnconfirmed(),
   ]);
   const live = cards.filter((c) => !c.voided);
 
@@ -502,7 +530,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     crews[jk] = rec.crew.slice().sort((a, b) => a.worker.localeCompare(b.worker));
   }
 
-  return { discrepancies: open, missingCards, crews };
+  return { discrepancies: open, missingCards, crews, unconfirmedWorkers };
 }
 
 export async function GET(req: Request) {
@@ -880,6 +908,49 @@ export async function POST(req: Request) {
           });
         } catch { /* logging shouldn't block the undo */ }
       }
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "confirm_worker") {
+      // Owner confirms a foreman-added worker: Active checked, Status cleared.
+      const { rosterId, worker } = body;
+      if (!rosterId) return NextResponse.json({ ok: false, error: "rosterId required" }, { status: 400 });
+      await notion.pages.update({
+        page_id: rosterId,
+        properties: {
+          [ROSTER_PROPS.active]: { checkbox: true },
+          [ROSTER_PROPS.status]: { rich_text: [] },
+        },
+      });
+      try {
+        await notion.pages.create({
+          parent: { database_id: RECON_LOG_DB_ID },
+          properties: {
+            [RECON_PROPS.worker]: { title: [{ text: { content: worker || "Worker" } }] },
+            [RECON_PROPS.status]: { select: { name: "Fixed" } },
+            [RECON_PROPS.note]: { rich_text: [{ text: { content: "Confirmed new worker (foreman-added)" } }] },
+          },
+        });
+      } catch { /* logging shouldn't block */ }
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "reject_worker") {
+      // Owner rejects a foreman-added worker: archive the roster row.
+      // Their submitted timecards stay untouched (void separately if needed).
+      const { rosterId, worker } = body;
+      if (!rosterId) return NextResponse.json({ ok: false, error: "rosterId required" }, { status: 400 });
+      await notion.pages.update({ page_id: rosterId, archived: true });
+      try {
+        await notion.pages.create({
+          parent: { database_id: RECON_LOG_DB_ID },
+          properties: {
+            [RECON_PROPS.worker]: { title: [{ text: { content: worker || "Worker" } }] },
+            [RECON_PROPS.status]: { select: { name: "Dismissed" } },
+            [RECON_PROPS.note]: { rich_text: [{ text: { content: "Rejected foreman-added worker (roster row archived; timecards untouched)" } }] },
+          },
+        });
+      } catch { /* logging shouldn't block */ }
       return NextResponse.json({ ok: true });
     }
 

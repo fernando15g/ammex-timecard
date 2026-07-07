@@ -4253,7 +4253,7 @@ function DiscCard({
       <div className="mt-3 pt-3 border-t border-line space-y-1.5 text-sm">
         {d.scheduledJob && (
           <div className="flex gap-3">
-            <span className="text-rebar text-xs font-bold uppercase w-20 pt-0.5">Scheduled</span>
+            <span className="text-rebar text-xs font-bold uppercase w-24 pt-0.5">Scheduled by</span>
             <span className="text-concrete flex-1">
               {d.scheduledJob}
               {d.scheduledForeman && <span className="text-rebar"> · {d.scheduledForeman}</span>}
@@ -4261,7 +4261,7 @@ function DiscCard({
           </div>
         )}
         <div className="flex gap-3">
-          <span className="text-rebar text-xs font-bold uppercase w-20 pt-0.5">Logged</span>
+          <span className="text-rebar text-xs font-bold uppercase w-24 pt-0.5">Logged by</span>
           <span className={d.loggedJob ? "text-concrete flex-1" : "text-rebar italic flex-1"}>
             {d.loggedJob
               ? `${d.loggedJob}${d.loggedForeman ? ` · ${d.loggedForeman}` : ""}`
@@ -6081,27 +6081,49 @@ function ReconCardBrowser({
         <div className="p-3 overflow-y-auto overscroll-contain">
           {loading && <div className="text-rebar text-sm px-2 py-3">Loading…</div>}
 
-          {/* Missing cards (red) */}
+          {/* Missing cards (red) — grouped by date, OLDEST first so the most
+              overdue is at the top and hardest to miss. */}
           {!loading && missing.length > 0 && (
             <>
               <div className="text-[11px] font-bold uppercase tracking-wide px-1 mb-2" style={{ color: "#e5533c" }}>
                 Missing ({missing.length})
               </div>
-              {missing.map((m, i) => (
-                <div
-                  key={`${m.jobId}|${m.date}|${i}`}
-                  className="rounded-xl px-3 py-3 mb-2"
-                  style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
-                    <span className="text-concrete font-bold text-sm">{m.jobName}</span>
+              {(() => {
+                const byDate = new Map<string, typeof missing>();
+                for (const m of missing) {
+                  if (!byDate.has(m.date)) byDate.set(m.date, [] as any);
+                  byDate.get(m.date)!.push(m);
+                }
+                const dates = Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b)); // oldest first
+                return dates.map((date) => (
+                  <div key={date} className="mb-3">
+                    <div
+                      className="text-[11px] font-bold uppercase tracking-wider px-1 mb-1.5"
+                      style={{ color: "#e5533c" }}
+                    >
+                      {prettyDate(date, lang)}
+                    </div>
+                    {byDate.get(date)!.map((m, i) => (
+                      <div
+                        key={`${m.jobId}|${m.date}|${i}`}
+                        className="rounded-xl px-3 py-3 mb-2"
+                        style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+                          <span className="text-concrete font-bold text-sm">{m.jobName}</span>
+                        </div>
+                        <div className="text-rebar text-xs mt-0.5">
+                          {m.foreman
+                            ? `${m.foreman} hasn't submitted`
+                            : "no foreman on schedule"}
+                          {` · ${m.crewCount} crew`}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <div className="text-rebar text-xs mt-0.5">
-                    {prettyDate(m.date, lang).split(",")[0]} · {m.foreman || "no foreman"} · {m.crewCount} crew — nothing submitted
-                  </div>
-                </div>
-              ))}
+                ));
+              })()}
             </>
           )}
 

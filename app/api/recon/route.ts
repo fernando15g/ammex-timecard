@@ -422,10 +422,12 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     // logged something — check job & foreman against schedule
     const schedJobIds = new Set(rows.map((r) => r.jobId));
     for (const tc of tcs) {
-      const scheduledForeman = leadByJobDate.get(`${tc.projectId}|${tc.date}`) ||
-        leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
+      // Lead of the job he was SCHEDULED on (for the "scheduled for" line).
+      const scheduledJobLead = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
       if (tc.projectId && !schedJobIds.has(tc.projectId)) {
-        // different job (only when the timecard has a real project)
+        // different job (only when the timecard has a real project).
+        // "Scheduled for" must show the SCHEDULED job's lead — never the lead
+        // of the job he wandered to (that lead is unrelated to his schedule).
         discs.push({
           kind: "Different job",
           severity: "glance",
@@ -433,7 +435,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
           date: tc.date,
           scheduledJob: rows.map((r) => r.jobName).filter(Boolean).join(", ") || "(job)",
           scheduledJobId: s.jobId,
-          scheduledForeman,
+          scheduledForeman: scheduledJobLead,
           loggedJob: tc.projectName || tc.job,
           loggedForeman: tc.foreman,
           hours: tc.hours,
@@ -442,7 +444,9 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
           crewElsewhere: 0,
         });
       } else {
-        // same job (or unverifiable) — check foreman
+        // same job (or unverifiable) — check foreman. Here the logged job IS
+        // the scheduled job, so the scheduled job's lead is the right comparison.
+        const scheduledForeman = scheduledJobLead;
         if (
           scheduledForeman &&
           tc.foreman &&

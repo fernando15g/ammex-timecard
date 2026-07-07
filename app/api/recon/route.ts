@@ -300,12 +300,24 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     if (s.jobName && !rec.jobName) rec.jobName = s.jobName;
   }
 
-  // Missing cards: a foreman never submitted for a job+date (nobody logged on
-  // that job that day), and it's a past/current date (not future).
+  // Missing cards. Judged PER LEAD FOREMAN: a card is missing if the scheduled
+  // lead foreman himself hasn't logged that job+date — so a second foreman
+  // submitting his own crew no longer hides the lead's un-submitted card.
+  // Fallback: if a job+date has NO marked lead, keep the old rule (missing if
+  // nobody logged it) so nothing that flags today silently stops flagging.
   const missingCards: { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[] = [];
   for (const [jk, rec] of crewByJobDate) {
     if (daysAgo(rec.date, todayISO) < 0) continue; // future
-    if (!loggedOnJobDate.has(jk)) {
+    const lead = leadByJobDate.get(jk); // scheduled lead foreman for this job+date
+    let isMissing: boolean;
+    if (lead) {
+      // missing if the LEAD hasn't logged this exact job+date
+      isMissing = !loggedWorkerOnJobDate.has(`${lead.toLowerCase()}|${rec.jobId}|${rec.date}`);
+    } else {
+      // no marked lead → old behavior: missing if nobody logged this job+date
+      isMissing = !loggedOnJobDate.has(jk);
+    }
+    if (isMissing) {
       missingCards.push({
         foreman: rec.foreman,
         jobName: rec.jobName || "(job)",

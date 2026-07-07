@@ -4275,7 +4275,7 @@ function DiscCard({
       <div className="mt-3 pt-3 border-t border-line space-y-1.5 text-sm">
         {d.scheduledJob && (
           <div className="flex gap-3">
-            <span className="text-rebar text-xs font-bold uppercase w-24 pt-0.5">Scheduled by</span>
+            <span className="text-rebar text-xs font-bold uppercase w-24 pt-0.5">Scheduled for</span>
             <span className="text-concrete flex-1">
               {d.scheduledJob}
               {d.scheduledForeman && <span className="text-rebar"> · {d.scheduledForeman}</span>}
@@ -4327,7 +4327,7 @@ function DiscCard({
               disabled={busy}
               className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
             >
-              Dismiss
+              Ignore
             </button>
           </>
         ) : (
@@ -4345,7 +4345,7 @@ function DiscCard({
               disabled={busy}
               className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
             >
-              Dismiss
+              Ignore
             </button>
           </>
         )}
@@ -5024,7 +5024,7 @@ function ReconReviewView({
                                               disabled={busy}
                                               className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
                                             >
-                                              Dismiss
+                                              Ignore
                                             </button>
                                           </div>
                                         )}
@@ -5063,7 +5063,7 @@ function ReconReviewView({
                                           disabled={busy}
                                           className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
                                         >
-                                          Dismiss
+                                          Ignore
                                         </button>
                                       </div>
                                     </div>
@@ -5073,7 +5073,7 @@ function ReconReviewView({
                                   onClick={() => setDismissAllFor(crew)}
                                   className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mt-1 active:text-safety"
                                 >
-                                  Dismiss all (job cancelled)
+                                  Ignore all (job cancelled)
                                 </button>
                               </div>
                             )}
@@ -5822,7 +5822,7 @@ function ReconDismissAllModal({
   return (
     <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
       <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
-        <div className="text-concrete font-bold text-lg mb-2">Dismiss whole crew?</div>
+        <div className="text-concrete font-bold text-lg mb-2">Ignore whole crew?</div>
         <div className="text-rebar text-sm mb-4">
           This dismisses all {count} scheduled {count === 1 ? "worker" : "workers"} for this job —
           use it only when the job was cancelled and the crew was sent home. It can't be batch-undone.
@@ -5850,7 +5850,7 @@ function ReconDismissAllModal({
             disabled={!checked}
             className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
           >
-            Dismiss all
+            Ignore all
           </button>
         </div>
       </div>
@@ -5922,7 +5922,7 @@ function ReconDismissNoteModal({
     <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
       <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
         <div className="flex items-center justify-between mb-1">
-          <div className="text-concrete font-bold text-lg">Dismiss</div>
+          <div className="text-concrete font-bold text-lg">Ignore</div>
           <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
             ✕
           </button>
@@ -5955,7 +5955,7 @@ function ReconDismissNoteModal({
             onClick={() => onConfirm(note.trim())}
             className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
           >
-            Dismiss
+            Ignore
           </button>
         </div>
       </div>

@@ -6004,6 +6004,7 @@ function ReconCardBrowser({
   const [openKey, setOpenKey] = useState<string>("");
   const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Entry | null>(null);
+  const [closeMissing, setCloseMissing] = useState<{ jobId: string; date: string; jobName: string; foreman: string; crewCount: number } | null>(null);
   const [bulkCard, setBulkCard] = useState<Card | null>(null);
 
   const load = useCallback(() => {
@@ -6154,15 +6155,24 @@ function ReconCardBrowser({
                         className="rounded-xl px-3 py-3 mb-2"
                         style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-start gap-2">
                           <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
-                          <span className="text-concrete font-bold text-sm">{m.jobName}</span>
-                        </div>
-                        <div className="text-rebar text-xs mt-0.5">
-                          {m.foreman
-                            ? `${m.foreman} hasn't submitted`
-                            : "no foreman on schedule"}
-                          {` · ${m.crewCount} crew`}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-concrete font-bold text-sm">{m.jobName}</div>
+                            <div className="text-rebar text-xs mt-0.5">
+                              {m.foreman
+                                ? `${m.foreman} hasn't submitted`
+                                : "no foreman on schedule"}
+                              {` · ${m.crewCount} crew`}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => setCloseMissing(m)}
+                            aria-label="Close card"
+                            className="shrink-0 text-rebar text-xs font-bold bg-graphite border border-line rounded-full px-2.5 py-1 active:text-safety"
+                          >
+                            Close
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -6347,6 +6357,18 @@ function ReconCardBrowser({
           onClose={() => setEditEntry(null)}
           onSaved={() => {
             setEditEntry(null);
+            afterWrite();
+          }}
+        />
+      )}
+
+      {closeMissing && (
+        <CloseMissingModal
+          card={closeMissing}
+          lang={lang}
+          onClose={() => setCloseMissing(null)}
+          onDone={() => {
+            setCloseMissing(null);
             afterWrite();
           }}
         />
@@ -7062,6 +7084,88 @@ function ConfirmWorkerModal({
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Close a missing card (one-tap + optional note). Logs a "Missing card" record
+// keyed by jobId|date so the card stays closed for that job+day.
+function CloseMissingModal({
+  card,
+  lang,
+  onClose,
+  onDone,
+}: {
+  card: { jobId: string; date: string; jobName: string; foreman: string; crewCount: number };
+  lang: Lang;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function close() {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "close_missing",
+          jobId: card.jobId,
+          date: card.date,
+          jobName: card.jobName,
+          foreman: card.foreman,
+          note: note.trim(),
+        }),
+      }).then((r) => r.json());
+      if (res?.ok) onDone();
+      else setBusy(false);
+    } catch {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-1">Close this card?</div>
+        <div className="text-rebar text-sm mb-1">
+          {card.jobName}
+          {` · ${prettyDate(card.date, lang)}`}
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          Use this when the work is actually covered (e.g. another foreman submitted for this
+          crew). It clears the card from Missing and won&apos;t come back.
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason <span className="text-rebar font-normal normal-case">(optional)</span>
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. covered by another foreman"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={close}
+            disabled={busy}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+          >
+            {busy ? "Closing…" : "Close card"}
+          </button>
+        </div>
       </div>
     </div>
   );

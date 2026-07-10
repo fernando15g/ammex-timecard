@@ -241,6 +241,37 @@ function daysAgo(dateISO: string, todayISO: string): number {
 }
 
 // Roster rows a foreman created that the owner hasn't confirmed yet
+// Missing cards the owner has manually closed (logged with kind "Missing card").
+// Keyed by jobId|date so a closed card stays closed for that job+day.
+async function closedMissingKeys(startISO: string, endISO: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: RECON_LOG_DB_ID,
+        filter: {
+          and: [
+            { property: RECON_PROPS.kind, select: { equals: "Missing card" } },
+            { property: RECON_PROPS.date, date: { on_or_after: startISO } },
+            { property: RECON_PROPS.date, date: { on_or_before: endISO } },
+          ],
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const p = pg.properties || {};
+        // Refs holds "jobId|date"
+        const refs = (p[RECON_PROPS.refs]?.rich_text || []).map((t: any) => t.plain_text).join("").trim();
+        if (refs) out.add(refs);
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch { /* non-critical */ }
+  return out;
+}
+
 // (Status = "Unconfirmed"). Surfaced in Reconcile with a confirm/reject action.
 async function queryUnconfirmed(): Promise<{ id: string; name: string }[]> {
   const out: { id: string; name: string }[] = [];
@@ -269,10 +300,11 @@ async function queryUnconfirmed(): Promise<{ id: string; name: string }[]> {
 
 // Compute schedule-vs-actual discrepancies.
 async function reconcile(startISO: string, endISO: string, todayISO: string) {
-  const [sched, cards, unconfirmedWorkers] = await Promise.all([
+  const [sched, cards, unconfirmedWorkers, closedMissing] = await Promise.all([
     querySchedule(startISO, endISO),
     queryEntries(startISO, endISO),
     queryUnconfirmed(),
+    closedMissingKeys(startISO, endISO),
   ]);
   const live = cards.filter((c) => !c.voided);
 
@@ -345,7 +377,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
       // no marked lead → old behavior: missing if nobody logged this job+date
       isMissing = !loggedOnJobDate.has(jk);
     }
-    if (isMissing) {
+    if (isMissing && !closedMissing.has(`${rec.jobId}|${rec.date}`)) {
       missingCards.push({
         foreman: rec.foreman,
         jobName: rec.jobName || "(job)",
@@ -912,6 +944,30 @@ export async function POST(req: Request) {
           });
         } catch { /* logging shouldn't block the undo */ }
       }
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "close_missing") {
+      // Owner closes a missing card (e.g. covered by another foreman). Logs a
+      // "Missing card" record keyed by jobId|date so it stays closed.
+      const { jobId, date, jobName, foreman, note } = body;
+      if (!jobId || !date)
+        return NextResponse.json({ ok: false, error: "jobId and date required" }, { status: 400 });
+      await notion.pages.create({
+        parent: { database_id: RECON_LOG_DB_ID },
+        properties: {
+          [RECON_PROPS.worker]: {
+            title: [{ text: { content: `${jobName || "Job"}${foreman ? ` · ${foreman}` : ""}` } }],
+          },
+          [RECON_PROPS.kind]: { select: { name: "Missing card" } },
+          [RECON_PROPS.status]: { select: { name: "Dismissed" } },
+          [RECON_PROPS.date]: { date: { start: date } },
+          [RECON_PROPS.refs]: { rich_text: [{ text: { content: `${jobId}|${date}` } }] },
+          [RECON_PROPS.note]: {
+            rich_text: [{ text: { content: note ? `Closed — ${note}` : "Closed missing card" } }],
+          },
+        },
+      });
       return NextResponse.json({ ok: true });
     }
 

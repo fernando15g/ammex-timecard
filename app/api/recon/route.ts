@@ -451,15 +451,17 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
       });
       continue;
     }
-    // logged something — check job & foreman against schedule
+    // logged something — check job & foreman against schedule.
+    // A worker can be scheduled on MULTIPLE jobs the same day (e.g. job A under
+    // one foreman, then job B under another). So match each timecard to the
+    // scheduled row for the SAME job, and check the foreman for THAT job — not
+    // just the first scheduled job.
     const schedJobIds = new Set(rows.map((r) => r.jobId));
     for (const tc of tcs) {
-      // Lead of the job he was SCHEDULED on (for the "scheduled for" line).
-      const scheduledJobLead = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
       if (tc.projectId && !schedJobIds.has(tc.projectId)) {
-        // different job (only when the timecard has a real project).
-        // "Scheduled for" must show the SCHEDULED job's lead — never the lead
-        // of the job he wandered to (that lead is unrelated to his schedule).
+        // Logged a job the worker wasn't scheduled on at all → Different job.
+        // "Scheduled for" shows the scheduled job(s)' lead(s), not the wandered-to job.
+        const scheduledJobLead = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
         discs.push({
           kind: "Different job",
           severity: "glance",
@@ -476,13 +478,15 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
           crewElsewhere: 0,
         });
       } else {
-        // same job (or unverifiable) — check foreman. Here the logged job IS
-        // the scheduled job, so the scheduled job's lead is the right comparison.
-        const scheduledForeman = scheduledJobLead;
+        // Logged a job the worker WAS scheduled on. Check the foreman against
+        // the lead of THAT specific job (the one the timecard is for), so a
+        // worker legitimately scheduled on two jobs under two foremen doesn't
+        // get falsely flagged when logging the second one.
+        const thisJobLead = leadByJobDate.get(`${tc.projectId}|${tc.date}`) || "";
         if (
-          scheduledForeman &&
+          thisJobLead &&
           tc.foreman &&
-          scheduledForeman.toLowerCase() !== tc.foreman.toLowerCase()
+          thisJobLead.toLowerCase() !== tc.foreman.toLowerCase()
         ) {
           discs.push({
             kind: "Wrong foreman",
@@ -490,8 +494,8 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
             worker: tc.worker,
             date: tc.date,
             scheduledJob: tc.projectName || tc.job || (s.jobName || "(job)"),
-            scheduledJobId: s.jobId,
-            scheduledForeman,
+            scheduledJobId: tc.projectId || s.jobId,
+            scheduledForeman: thisJobLead,
             loggedJob: tc.projectName || tc.job,
             loggedForeman: tc.foreman,
             hours: tc.hours,

@@ -310,8 +310,12 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
 
   // scheduled foreman (lead) per job+date
   const leadByJobDate = new Map<string, string>();
+  // everyone scheduled on a job+date (worker|jobId|date) — used to accept a
+  // non-lead foreman's submission when he's legitimately scheduled there too
+  const schedOnJobDate = new Set<string>();
   for (const s of sched) {
     if (s.isLead) leadByJobDate.set(`${s.jobId}|${s.date}`, s.worker);
+    if (s.jobId) schedOnJobDate.add(`${s.worker.toLowerCase()}|${s.jobId}|${s.date}`);
   }
 
   // Did anyone log ON this specific job+date? (immune to a worker logging
@@ -506,11 +510,18 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         // the lead of THAT specific job (the one the timecard is for), so a
         // worker legitimately scheduled on two jobs under two foremen doesn't
         // get falsely flagged when logging the second one.
+        // Also accept a NON-lead foreman who is himself scheduled on this
+        // job+date (a foreman moving with his crew legitimately submits) —
+        // only flag when the submitting foreman isn't on this job's schedule.
         const thisJobLead = leadByJobDate.get(`${tc.projectId}|${tc.date}`) || "";
+        const submitterScheduledHere = tc.foreman
+          ? schedOnJobDate.has(`${tc.foreman.toLowerCase()}|${tc.projectId}|${tc.date}`)
+          : false;
         if (
           thisJobLead &&
           tc.foreman &&
-          thisJobLead.toLowerCase() !== tc.foreman.toLowerCase()
+          thisJobLead.toLowerCase() !== tc.foreman.toLowerCase() &&
+          !submitterScheduledHere
         ) {
           discs.push({
             kind: "Wrong foreman",

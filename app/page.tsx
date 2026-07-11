@@ -4581,29 +4581,46 @@ function ReconReviewView({
     const res = await fetch("/api/recon", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note }),
+      // refs = scheduled jobId → job-scoped resolution (a no-show on job A
+      // must not clear the same worker's still-missing job B that day).
+      body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note, refs: d.scheduledJobId || "" }),
     }).then((r) => r.json()).catch(() => null);
-    setDiscs((cur) =>
-      cur.filter((x) => !(x.worker === d.worker && x.date === d.date && x.kind === d.kind))
-    );
-    if (res?.id) setResolvedLog((cur) => [{ disc: d, status, pageId: res.id }, ...cur].slice(0, 20));
+    if (res?.id) {
+      // Only remove from screen when the write actually saved — otherwise the
+      // item would look resolved while Notion has no record of it.
+      setDiscs((cur) =>
+        cur.filter((x) => !(x.worker === d.worker && x.date === d.date && x.kind === d.kind && x.scheduledJobId === d.scheduledJobId))
+      );
+      setResolvedLog((cur) => [{ disc: d, status, pageId: res.id }, ...cur].slice(0, 20));
+    } else {
+      setMsg("That didn't save — check your connection and try again.");
+      setTimeout(() => setMsg(""), 3500);
+    }
     setBusyKey("");
   }
 
-  // resolve many at once (bulk dismiss — job cancelled)
+  // resolve many at once (bulk ignore — job cancelled)
   async function resolveMany(items: Disc[], status: string, note: string) {
     const added: { disc: Disc; status: string; pageId: string }[] = [];
+    const okKeys = new Set<string>();
     for (const d of items) {
       const res = await fetch("/api/recon", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note }),
+        body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note, refs: d.scheduledJobId || "" }),
       }).then((r) => r.json()).catch(() => null);
-      if (res?.id) added.push({ disc: d, status, pageId: res.id });
+      if (res?.id) {
+        added.push({ disc: d, status, pageId: res.id });
+        okKeys.add(`${d.worker}|${d.date}|${d.kind}|${d.scheduledJobId}`);
+      }
     }
-    const keys = new Set(items.map((d) => `${d.worker}|${d.date}|${d.kind}`));
-    setDiscs((cur) => cur.filter((x) => !keys.has(`${x.worker}|${x.date}|${x.kind}`)));
+    // Only clear the ones that actually saved.
+    setDiscs((cur) => cur.filter((x) => !okKeys.has(`${x.worker}|${x.date}|${x.kind}|${x.scheduledJobId}`)));
     if (added.length) setResolvedLog((cur) => [...added, ...cur].slice(0, 20));
+    if (added.length < items.length) {
+      setMsg(`${items.length - added.length} didn't save — try again.`);
+      setTimeout(() => setMsg(""), 3500);
+    }
   }
 
   // undo a resolution: archive the log record + bring the item back
@@ -4616,7 +4633,7 @@ function ReconReviewView({
     setResolvedLog((cur) => cur.filter((x) => x.pageId !== entry.pageId));
     setDiscs((cur) =>
       cur.some(
-        (x) => x.worker === entry.disc.worker && x.date === entry.disc.date && x.kind === entry.disc.kind
+        (x) => x.worker === entry.disc.worker && x.date === entry.disc.date && x.kind === entry.disc.kind && x.scheduledJobId === entry.disc.scheduledJobId
       )
         ? cur
         : [...cur, entry.disc]

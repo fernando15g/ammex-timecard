@@ -428,19 +428,29 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     seenWD.add(wd);
     const s = rows[0]; // a worker on a date (use first scheduled job)
     const tcs = tcByWD.get(wd) || [];
-    if (tcs.length === 0) {
-      // scheduled but no timecard — skip future dates
-      const ago = daysAgo(s.date, todayISO);
-      if (ago < 0) continue;
-      const scheduledForeman = leadByJobDate.get(`${s.jobId}|${s.date}`) || "";
-      const crew = crewByJobDate.get(`${s.jobId}|${s.date}`) || { total: 0, logged: 0, elsewhere: 0 };
+    // Distinct jobs this worker is scheduled on today (usually 1; can be 2+
+    // when a guy works one job in the morning and another after).
+    const distinctJobs: SchedRow[] = [];
+    {
+      const seenJ = new Set<string>();
+      for (const r of rows) {
+        if (!r.jobId || seenJ.has(r.jobId)) continue;
+        seenJ.add(r.jobId);
+        distinctJobs.push(r);
+      }
+    }
+    const pushNoTimecard = (row: SchedRow) => {
+      const ago = daysAgo(row.date, todayISO);
+      if (ago < 0) return;
+      const scheduledForeman = leadByJobDate.get(`${row.jobId}|${row.date}`) || "";
+      const crew = crewByJobDate.get(`${row.jobId}|${row.date}`) || { total: 0, logged: 0, elsewhere: 0 };
       discs.push({
         kind: "No timecard",
         severity: ago >= 2 ? "attention" : "pending",
-        worker: s.worker,
-        date: s.date,
-        scheduledJob: s.jobName || "(job)",
-        scheduledJobId: s.jobId,
+        worker: row.worker,
+        date: row.date,
+        scheduledJob: row.jobName || "(job)",
+        scheduledJobId: row.jobId,
         scheduledForeman,
         loggedJob: "",
         loggedForeman: "",
@@ -449,7 +459,21 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         crewTotal: crew.total,
         crewElsewhere: crew.elsewhere,
       });
+    };
+    if (tcs.length === 0) {
+      // scheduled but no timecard — one pending item PER scheduled job, so a
+      // guy on two jobs shows outstanding on both (each closes independently).
+      for (const row of distinctJobs) pushNoTimecard(row);
       continue;
+    }
+    // Logged something. If the worker is scheduled on MULTIPLE jobs today,
+    // check each scheduled job separately: logging job A must not hide that
+    // job B's hours are still missing (guys usually work both).
+    if (distinctJobs.length > 1) {
+      for (const row of distinctJobs) {
+        const didLogThis = loggedWorkerOnJobDate.has(`${row.worker.toLowerCase()}|${row.jobId}|${row.date}`);
+        if (!didLogThis) pushNoTimecard(row);
+      }
     }
     // logged something — check job & foreman against schedule.
     // A worker can be scheduled on MULTIPLE jobs the same day (e.g. job A under
@@ -532,6 +556,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
 
   // filter out resolved discrepancies (no-show / confirmed / fixed in the log)
   const resolved = new Set<string>();
+  const resolvedJob = new Map<string, Set<string>>(); // job-scoped "No timecard" resolutions
   const noShowSet = new Set<string>(); // `${worker}|${date}` marked No-show
   try {
     let cursor: string | undefined;
@@ -553,16 +578,32 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         const d = p[RECON_PROPS.date]?.date?.start?.slice(0, 10) || "";
         const k = p[RECON_PROPS.kind]?.select?.name || "";
         const st = p[RECON_PROPS.status]?.select?.name || "";
-        if (w && d && k && st) resolved.add(`${w.toLowerCase()}|${d}|${k.toLowerCase()}`);
+        const refs = (p[RECON_PROPS.refs]?.rich_text || []).map((t: any) => t.plain_text).join("").trim();
+        if (w && d && k && st) {
+          const base = `${w.toLowerCase()}|${d}|${k.toLowerCase()}`;
+          if (k.toLowerCase() === "no timecard" && refs && !refs.includes(",")) {
+            // Job-scoped resolution (refs = the scheduled jobId): resolves only
+            // that job's item, so no-showing a guy on job A doesn't silently
+            // clear his still-missing job B. Legacy rows (no refs) resolve all.
+            if (!resolvedJob.has(base)) resolvedJob.set(base, new Set());
+            resolvedJob.get(base)!.add(refs);
+          } else {
+            resolved.add(base);
+          }
+        }
         if (w && d && st === "No-show") noShowSet.add(`${w.toLowerCase()}|${d}`);
       }
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
   } catch { /* ignore */ }
 
-  const open = discs.filter(
-    (x) => !resolved.has(`${x.worker.toLowerCase()}|${x.date}|${x.kind.toLowerCase()}`)
-  );
+  const open = discs.filter((x) => {
+    const base = `${x.worker.toLowerCase()}|${x.date}|${x.kind.toLowerCase()}`;
+    if (resolved.has(base)) return false;
+    const jobSet = resolvedJob.get(base);
+    if (jobSet && x.scheduledJobId && jobSet.has(x.scheduledJobId)) return false;
+    return true;
+  });
   open.sort((a, b) => a.date.localeCompare(b.date) || a.worker.localeCompare(b.worker));
 
   // scheduled crew per job+date (for the "view crew" popup): who was scheduled

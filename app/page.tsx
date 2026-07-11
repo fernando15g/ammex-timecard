@@ -4410,7 +4410,7 @@ function ReconReviewView({
   const [missingCards, setMissingCards] = useState<
     { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[]
   >([]);
-  const [crews, setCrews] = useState<Record<string, { worker: string; logged: boolean }[]>>({});
+  const [crews, setCrews] = useState<Record<string, { worker: string; logged: boolean; elsewhereJob?: string }[]>>({});
   const [discLoading, setDiscLoading] = useState(false);
   const [ranCheck, setRanCheck] = useState(false);
   const [noShowFor, setNoShowFor] = useState<Disc | null>(null);
@@ -4423,6 +4423,7 @@ function ReconReviewView({
   const [showCards, setShowCards] = useState(false);
   const [showHeld, setShowHeld] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState<{ id: string; name: string }[]>([]);
+  const [noShows, setNoShows] = useState<Set<string>>(new Set());
   const [confirmWorker, setConfirmWorker] = useState<{ id: string; name: string } | null>(null);
   const [heldCount, setHeldCount] = useState(0);
   const [heldHours, setHeldHours] = useState(0);
@@ -4514,6 +4515,7 @@ function ReconReviewView({
     setMissingCards(d.missingCards || []);
     setCrews(d.crews || {});
     setUnconfirmed(d.unconfirmedWorkers || []);
+    setNoShows(new Set<string>(d.noShows || []));
   }, []);
 
   const loadDiscs = useCallback(() => {
@@ -4928,25 +4930,37 @@ function ReconReviewView({
                         ).map((wname) => {
                           const lw = wname.toLowerCase();
                           if (outNames.has(lw)) {
-                            return { worker: wname, state: "out" as const, disc: crew.find((d) => d.worker.toLowerCase() === lw)! };
+                            return { worker: wname, state: "out" as const, disc: crew.find((d) => d.worker.toLowerCase() === lw)!, elsewhereJob: "" };
                           }
                           const rosterHit = roster.find((m) => m.worker.toLowerCase() === lw);
-                          if (rosterHit?.logged) return { worker: wname, state: "here" as const, disc: null };
-                          // logged elsewhere → find their different-job disc
-                          const elsewhere = discs.find(
-                            (x) =>
-                              x.worker.toLowerCase() === lw &&
-                              x.date === first.date &&
-                              x.kind === "Different job"
-                          );
-                          return { worker: wname, state: "elsewhere" as const, disc: elsewhere || null };
+                          if (rosterHit?.logged) return { worker: wname, state: "here" as const, disc: null, elsewhereJob: "" };
+                          if (rosterHit?.elsewhereJob) {
+                            // GENUINELY logged on another job (backend verified).
+                            const elsewhere = discs.find(
+                              (x) =>
+                                x.worker.toLowerCase() === lw &&
+                                x.date === first.date &&
+                                x.kind === "Different job"
+                            );
+                            return { worker: wname, state: "elsewhere" as const, disc: elsewhere || null, elsewhereJob: rosterHit.elsewhereJob };
+                          }
+                          // Not out, not logged anywhere → resolved. Label the
+                          // real reason instead of falsely saying "elsewhere".
+                          if (noShows.has(`${lw}|${first.date}`)) {
+                            return { worker: wname, state: "noshow" as const, disc: null, elsewhereJob: "" };
+                          }
+                          return { worker: wname, state: "cleared" as const, disc: null, elsewhereJob: "" };
                         });
                         const cOut = rows.filter((r) => r.state === "out").length;
                         const cHere = rows.filter((r) => r.state === "here").length;
                         const cElse = rows.filter((r) => r.state === "elsewhere").length;
+                        const cNo = rows.filter((r) => r.state === "noshow").length;
+                        const cClr = rows.filter((r) => r.state === "cleared").length;
                         const summary = [
                           `${cHere} logged`,
                           cElse ? `${cElse} elsewhere` : "",
+                          cNo ? `${cNo} no-show` : "",
+                          cClr ? `${cClr} cleared` : "",
                           `${cOut} still out`,
                         ]
                           .filter(Boolean)
@@ -4990,6 +5004,20 @@ function ReconReviewView({
                                       </div>
                                     );
                                   }
+                                  if (r.state === "noshow" || r.state === "cleared") {
+                                    return (
+                                      <div
+                                        key={r.worker}
+                                        className="rounded-xl px-3 py-2"
+                                        style={{ background: "rgba(28,33,39,.4)", opacity: 0.7 }}
+                                      >
+                                        <div className="text-concrete text-sm font-semibold mb-0.5">{r.worker}</div>
+                                        <div className="text-rebar text-xs">
+                                          {r.state === "noshow" ? "no-show" : "cleared"}
+                                        </div>
+                                      </div>
+                                    );
+                                  }
                                   if (r.state === "elsewhere") {
                                     const ed = r.disc as Disc | null;
                                     const bk = ed ? `${ed.worker}|${ed.date}|${ed.kind}` : `${r.worker}|else`;
@@ -5007,7 +5035,7 @@ function ReconReviewView({
                                           )}
                                         </div>
                                         <div className="text-rebar text-xs mb-1.5">
-                                          → logged on {ed?.loggedJob || "another job"}
+                                          → logged on {ed?.loggedJob || r.elsewhereJob || "another job"}
                                         </div>
                                         {ed && (
                                           <div className="flex gap-2 flex-wrap">

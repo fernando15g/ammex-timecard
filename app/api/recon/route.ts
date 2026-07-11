@@ -532,6 +532,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
 
   // filter out resolved discrepancies (no-show / confirmed / fixed in the log)
   const resolved = new Set<string>();
+  const noShowSet = new Set<string>(); // `${worker}|${date}` marked No-show
   try {
     let cursor: string | undefined;
     do {
@@ -553,6 +554,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         const k = p[RECON_PROPS.kind]?.select?.name || "";
         const st = p[RECON_PROPS.status]?.select?.name || "";
         if (w && d && k && st) resolved.add(`${w.toLowerCase()}|${d}|${k.toLowerCase()}`);
+        if (w && d && st === "No-show") noShowSet.add(`${w.toLowerCase()}|${d}`);
       }
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
@@ -570,7 +572,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     crews[jk] = rec.crew.slice().sort((a, b) => a.worker.localeCompare(b.worker));
   }
 
-  return { discrepancies: open, missingCards, crews, unconfirmedWorkers };
+  return { discrepancies: open, missingCards, crews, unconfirmedWorkers, noShows: Array.from(noShowSet) };
 }
 
 export async function GET(req: Request) {

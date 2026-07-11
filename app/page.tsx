@@ -3192,7 +3192,7 @@ function ReconPanel({
             {!loading && worker && entries.length > 0 && (
               <div className="flex items-center justify-between mb-2 px-1">
                 <span className="text-rebar text-xs">
-                  {entries.length} {entries.length === 1 ? "entry" : "entries"} · {prettyDate(start, lang).split(",")[1]?.trim() || start} – {prettyDate(end, lang).split(",")[1]?.trim() || end}
+                  {entries.length} {entries.length === 1 ? "entry" : "entries"} · {prettyDate(start, lang).split(",")[1]?.trim() || start} – {prettyDate(end, lang).split(",")[1]?.trim() || end} · <span className="text-concrete font-bold">{round2(entries.filter((e) => !e.voided && !e.underReview).reduce((s, e) => s + (e.hours || 0), 0))}h</span>
                 </span>
                 <button
                   onClick={() => search()}
@@ -3205,27 +3205,49 @@ function ReconPanel({
             )}
 
             {!loading &&
-              entries.filter((e) => !e.voided).map((e) => {
+              (() => {
+                // One card per DAY: two jobs on the same date share a single
+                // card (one date header) with a divider between them.
+                const live = entries.filter((e) => !e.voided);
+                const byDate = new Map<string, typeof live>();
+                for (const e of live) {
+                  if (!byDate.has(e.date)) byDate.set(e.date, [] as any);
+                  byDate.get(e.date)!.push(e);
+                }
+                return Array.from(byDate.entries()).map(([dayDate, dayEntries]) => {
+                  // Day edge: green when every flag on the day is confirmed OK,
+                  // amber when any remain open (same rule, applied per day).
+                  const dayHasFlags = dayEntries.some((x) => (flags[x.id] || []).length > 0);
+                  const dayAllOk =
+                    dayHasFlags &&
+                    dayEntries.every((x) => (flags[x.id] || []).every((f) => isFlagOk(x, f)));
+                  const dayEdge = dayHasFlags
+                    ? dayAllOk
+                      ? "4px solid #4a9e63"
+                      : "4px solid #e0a63b"
+                    : undefined;
+                  return (
+                    <div
+                      key={dayDate}
+                      className="bg-graphite border border-line rounded-2xl p-4 mb-3"
+                      style={dayEdge ? { borderLeft: dayEdge } : undefined}
+                    >
+                      <div className="text-safety text-xs font-bold uppercase tracking-wide mb-2">
+                        {prettyDate(dayDate, lang)}
+                      </div>
+                      {dayEntries.map((e, di) => {
                 const efl = flags[e.id] || [];
                 const displayName = e.projectName || e.job || "—";
                 const allOk = efl.length > 0 && efl.every((f) => isFlagOk(e, f));
-                const edge = efl.length
-                  ? allOk
-                    ? "4px solid #4a9e63"
-                    : "4px solid #e0a63b"
-                  : undefined;
                 const needsProject = !e.projectId;
                 return (
                   <div
                     key={e.id}
-                    className="bg-graphite border border-line rounded-2xl p-4 mb-3"
-                    style={edge ? { borderLeft: edge } : undefined}
+                    className={di > 0 ? "mt-3 pt-3" : ""}
+                    style={di > 0 ? { borderTop: "1px solid rgba(244,243,240,.15)" } : undefined}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
-                        <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
-                          {prettyDate(e.date, lang)}
-                        </div>
                         <div className="text-concrete font-bold text-[15px]">
                           {displayName}
                           {e.underReview && (
@@ -3390,7 +3412,11 @@ function ReconPanel({
                     </div>
                   </div>
                 );
-              })}
+                      })}
+                    </div>
+                  );
+                });
+              })()}
 
             {/* Collapsible voided section */}
             {!loading && entries.some((e) => e.voided) && (

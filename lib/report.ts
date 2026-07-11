@@ -20,6 +20,7 @@ export interface RawRow {
   projectName: string; // clean "Project Helper" (may be empty)
   jobId: string; // clean "Job ID Helper" (may be empty)
   foreman: string; // who logged this card
+  projectPageId?: string; // Notion page id of the linked project (for schedule matching)
 }
 
 export interface PersonRow {
@@ -74,6 +75,7 @@ export interface ReportData {
   workerSummaries: WorkerSummary[]; // per-worker, jobs broken out (worker view)
   grandTotal: number; // total labor hours across all jobs for the week
   onHold?: { worker: string; dateISO: string; job: string; hours: number }[]; // held-for-review, excluded from totals
+  crewNotes?: string[]; // foreman report: days he worked as crew under another lead
 }
 
 // A single readable line for one flag.
@@ -168,7 +170,8 @@ export function buildReport(
   weekEndOverrideISO?: string, // span end; defaults to start + 6 (a week)
   foremanFilter?: string, // if set, grid shows only this foreman's entries
   lang: ReportLang = "en",
-  confirmedFlagKeys?: Set<string> // worker|dateISO|kindlabel confirmed in the cockpit
+  confirmedFlagKeys?: Set<string>, // worker|dateISO|kindlabel confirmed in the cockpit
+  sched?: { leadByJobDate: Map<string, string> } // schedule leads → schedule-driven foreman reports
 ): ReportData {
   const weekEndISO = weekEndOverrideISO || addDaysISO(weekStartISO, 6);
   const nDays = Math.max(1, spanDays(weekStartISO, weekEndISO));
@@ -204,6 +207,45 @@ export function buildReport(
   }[] = [];
 
   const ff = foremanFilter ? foremanFilter.trim().toLowerCase() : "";
+  // Foreman-report inclusion. With a schedule available, a foreman's report is
+  // SCHEDULE-driven: rows logged on jobs he was the scheduled lead for that
+  // date (no matter who submitted the card), PLUS his own hours wherever he
+  // worked. Rows we can't tie to a scheduled lead (no linked project, or no
+  // lead marked for that job+date) fall back to the old submitter rule so
+  // nothing silently disappears. Without a schedule, behavior is unchanged.
+  const crewNoteKeys = new Set<string>();
+  const crewNotes: { dateISO: string; text: string }[] = [];
+  const includeRow = (r: RawRow, rowForeman: string): boolean => {
+    if (!ff) return true;
+    const isOwn = r.worker.trim().toLowerCase() === ff;
+    if (!sched) return rowForeman.toLowerCase() === ff;
+    const key = r.projectPageId ? `${r.projectPageId}|${r.dateISO}` : "";
+    const leadHere = key ? (sched.leadByJobDate.get(key) || "").trim().toLowerCase() : "";
+    if (leadHere) {
+      if (leadHere === ff) return true; // a job he led that day — his crew's hours
+      if (isOwn) {
+        // His own hours on a job someone ELSE led → include, and note where
+        // his crew-mates' hours live for that day.
+        const nk = `${r.dateISO}|${key}`;
+        if (!crewNoteKeys.has(nk)) {
+          crewNoteKeys.add(nk);
+          const leadDisplay = sched.leadByJobDate.get(key) || "";
+          const day = fmtDayLabel(r.dateISO, lang);
+          crewNotes.push({
+            dateISO: r.dateISO,
+            text:
+              lang === "es"
+                ? `${day} — en ${r.projectName || r.jobText || "otro trabajo"} (líder: ${leadDisplay})`
+                : `${day} — on ${r.projectName || r.jobText || "another job"} (lead: ${leadDisplay})`,
+          });
+        }
+        return true;
+      }
+      return false; // someone else's crew on someone else's job
+    }
+    // No scheduled lead for this row → legacy submitter rule (+ his own hours).
+    return rowForeman.toLowerCase() === ff || isOwn;
+  };
 
   for (const r of rows) {
     const idx = dayIndex(weekStartISO, r.dateISO);
@@ -216,8 +258,8 @@ export function buildReport(
     const title = assigned ? r.projectName.trim() : prettifyJob(r.jobText);
     const rowForeman = (r.foreman || "").trim();
 
-    // GRID: include the row only if no foreman filter, or it's this foreman's.
-    if (!ff || rowForeman.toLowerCase() === ff) {
+    // GRID: include per the schedule-driven rule above.
+    if (includeRow(r, rowForeman)) {
       let g = groups.get(groupKey);
       if (!g) {
         g = {
@@ -550,6 +592,9 @@ export function buildReport(
     foremanName: foremanFilter ? foremanFilter.trim() : "",
     workerSummaries,
     grandTotal,
+    crewNotes: crewNotes
+      .sort((a, b) => a.dateISO.localeCompare(b.dateISO))
+      .map((n) => n.text),
   };
 }
 

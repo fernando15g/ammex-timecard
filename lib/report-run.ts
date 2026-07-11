@@ -9,6 +9,8 @@ import {
   PAYROLL_RECIPIENT,
   RECON_LOG_DB_ID,
   RECON_PROPS,
+  SCHEDULE_DB_ID,
+  SCHEDULE_PROPS,
 } from "./notion";
 import { buildReport, RawRow } from "./report";
 import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
@@ -186,8 +188,9 @@ export async function loadRowsAndRoster(
     }
     const jobId = readText(props[TIMECARD_PROPS.jobIdHelper]);
     const foreman = readText(props[TIMECARD_PROPS.foreman]);
+    const projectPageId = relationIds(props[TIMECARD_PROPS.projectHelper])[0] || "";
     if (!worker || !dateISO) continue;
-    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman });
+    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman, projectPageId });
   }
 
   const activeRoster: string[] = [];
@@ -211,6 +214,50 @@ export async function loadRowsAndRoster(
 
 // Confirmed-OK flags from the Reconciliation Log for [start,end] as a set of
 // `worker|dateISO|kindlabel` — used to hide already-reviewed flags on reports.
+// Schedule leads for the report span. Returns the lead foreman per job+date
+// (keyed `jobPageId|dateISO`) and the set of all lead names — used to make
+// foreman reports schedule-driven (his crew = jobs he led) instead of
+// submitter-driven, and to give every lead a page in the weekly bundle even
+// if he personally submitted nothing.
+async function loadScheduleLeads(
+  notion: Client,
+  startISO: string,
+  endISO: string
+): Promise<{ leadByJobDate: Map<string, string>; leadNames: Set<string> }> {
+  const leadByJobDate = new Map<string, string>();
+  const leadNames = new Set<string>();
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: SCHEDULE_DB_ID,
+        filter: {
+          and: [
+            { property: SCHEDULE_PROPS.date, date: { on_or_after: startISO } },
+            { property: SCHEDULE_PROPS.date, date: { on_or_before: endISO } },
+            { property: SCHEDULE_PROPS.isLead, checkbox: { equals: true } },
+          ],
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const p = pg.properties || {};
+        const worker = (p[SCHEDULE_PROPS.worker]?.title || [])
+          .map((t: any) => t.plain_text).join("").trim();
+        const date = p[SCHEDULE_PROPS.date]?.date?.start?.slice(0, 10) || "";
+        const jobId = (p[SCHEDULE_PROPS.job]?.relation || [])[0]?.id || "";
+        if (worker && date && jobId) {
+          leadByJobDate.set(`${jobId}|${date}`, worker);
+          leadNames.add(worker);
+        }
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch { /* schedule unavailable → callers fall back to submitter-based */ }
+  return { leadByJobDate, leadNames };
+}
+
 async function loadConfirmedFlagKeys(
   notion: Client,
   startISO: string,
@@ -413,9 +460,10 @@ export async function runReport(
     }
     const jobId = readText(props[TIMECARD_PROPS.jobIdHelper]);
     const foreman = readText(props[TIMECARD_PROPS.foreman]);
+    const projectPageId = relationIds(props[TIMECARD_PROPS.projectHelper])[0] || "";
 
     if (!worker || !dateISO) continue;
-    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman });
+    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman, projectPageId });
   }
 
   // 4) Active roster
@@ -437,6 +485,11 @@ export async function runReport(
 
   // 4b) Confirmed-OK flags from the cockpit — removed from the report's flags.
   const confirmedFlagKeys = await loadConfirmedFlagKeys(notion, startISO, endISO);
+
+  // 4c) Schedule leads — makes foreman reports schedule-driven (his crew =
+  // jobs he led that day), independent of who submitted the card.
+  const schedLeads = await loadScheduleLeads(notion, startISO, endISO);
+  const sched = { leadByJobDate: schedLeads.leadByJobDate };
 
   // 5) Build report + files
 
@@ -486,8 +539,13 @@ export async function runReport(
 
   // 5-ALL) Foreman breakout: one document with a section per foreman.
   if (reportView === "foremanAll") {
+    // Every submitter PLUS every scheduled lead — a lead whose cards were all
+    // submitted by someone else still gets his section.
     const foremen = Array.from(
-      new Set(rows.map((r) => (r.foreman || "").trim()).filter(Boolean))
+      new Set([
+        ...rows.map((r) => (r.foreman || "").trim()).filter(Boolean),
+        ...Array.from(schedLeads.leadNames),
+      ])
     ).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
     const pdfParts: Uint8Array[] = [];
@@ -495,7 +553,7 @@ export async function runReport(
     const usedNames = new Set<string>();
 
     for (const fm of foremen) {
-      const rdf = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, fm, lang, confirmedFlagKeys);
+      const rdf = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, fm, lang, confirmedFlagKeys, sched);
       if (!flagsOn) rdf.flags = [];
       pdfParts.push(await buildReportPdf(rdf));
       if (mode === "email") {
@@ -570,7 +628,8 @@ export async function runReport(
     endISO,
     foreman || undefined,
     lang,
-    confirmedFlagKeys
+    confirmedFlagKeys,
+    foreman ? sched : undefined
   );
   if (!flagsOn) rd.flags = [];
   rd.onHold = await loadHeldRows(notion, startISO, endISO, foreman || undefined);

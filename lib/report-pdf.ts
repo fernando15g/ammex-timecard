@@ -88,6 +88,18 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
       color: safety,
     });
     y -= 18;
+    // Days this foreman worked as crew under another lead — points to where
+    // the rest of that day's crew hours live.
+    for (const note of rd.crewNotes || []) {
+      page.drawText(`• ${note}`, {
+        x: MARGIN,
+        y,
+        size: 8.5,
+        font,
+        color: gray,
+      });
+      y -= 12;
+    }
   }
   y -= 6;
 

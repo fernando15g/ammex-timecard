@@ -531,9 +531,26 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
           y -= 13;
         }
       }
-      // One job total across all foremen on this job.
-      const jt = `${tr.jobTotal}: ${job.total} ${tr.hrs}`;
-      page.drawText(jt, { x: MARGIN + 12, y, size: 9, font: bold, color: gray });
+      // One job total across all foremen on this job. Formatted to match the
+      // crew lines: a solid rule under the last name, bold label, and the total
+      // in safety orange right-aligned in the same column as the crew hours.
+      ensure(24);
+      y -= 2;
+      page.drawLine({
+        start: { x: MARGIN + 18, y: y + 9 },
+        end: { x: rightX, y: y + 9 },
+        thickness: 1,
+        color: steel,
+      });
+      y -= 4;
+      page.drawText(tr.jobTotal, {
+        x: MARGIN + 18, y, size: 10, font: bold, color: steel,
+      });
+      const jtTot = `${job.total}`;
+      const jtW = bold.widthOfTextAtSize(jtTot, 11);
+      page.drawText(jtTot, {
+        x: rightX - jtW, y, size: 11, font: bold, color: safety,
+      });
       y -= 18;
     }
     y -= 6;

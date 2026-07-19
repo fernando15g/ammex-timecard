@@ -36,6 +36,7 @@ type TCEntry = {
   voided: boolean;
   voidNote: string;
   underReview: boolean;
+  uncategorized: boolean;
 };
 
 function mapRow(page: any): TCEntry {
@@ -53,6 +54,7 @@ function mapRow(page: any): TCEntry {
     voided: !!p[TIMECARD_PROPS.voided]?.checkbox,
     voidNote: rt(p[TIMECARD_PROPS.voidNote]),
     underReview: !!p[TIMECARD_PROPS.underReview]?.checkbox,
+    uncategorized: !!p[TIMECARD_PROPS.uncategorized]?.checkbox,
   };
 }
 
@@ -823,7 +825,7 @@ export async function GET(req: Request) {
       const e2 = url.searchParams.get("end") || s;
       if (!s) return NextResponse.json({ ok: false, error: "start date required" }, { status: 400 });
       const all = await queryEntries(s, e2);
-      const missing = all.filter((x) => !x.voided && !x.underReview && !x.projectId);
+      const missing = all.filter((x) => !x.voided && !x.underReview && !x.projectId && !x.uncategorized);
       return NextResponse.json({ ok: true, entries: missing });
     }
 
@@ -1038,6 +1040,37 @@ export async function POST(req: Request) {
           },
         },
       });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "set_custom_name") {
+      // Give a card a custom label with no real project (e.g. change order that
+      // can't map to the original project). Writes the label to the free-text
+      // Job field, leaves Project Helper empty, and marks Uncategorized so it
+      // stops nagging "needs project" and buckets as Uncategorized on reports.
+      const { id, name } = body;
+      if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+      const label = (name || "").trim();
+      if (!label) return NextResponse.json({ ok: false, error: "name required" }, { status: 400 });
+      await notion.pages.update({
+        page_id: id,
+        properties: {
+          [TIMECARD_PROPS.job]: { rich_text: [{ text: { content: label } }] },
+          [TIMECARD_PROPS.projectHelper]: { relation: [] },
+          [TIMECARD_PROPS.uncategorized]: { checkbox: true },
+        },
+      });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "set_uncategorized") {
+      // Mark/unmark a card as intentionally project-less (paid training, etc.).
+      // Marking clears any project relation so it's genuinely uncategorized.
+      const { id, uncategorized } = body;
+      if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+      const props: any = { [TIMECARD_PROPS.uncategorized]: { checkbox: !!uncategorized } };
+      if (uncategorized) props[TIMECARD_PROPS.projectHelper] = { relation: [] };
+      await notion.pages.update({ page_id: id, properties: props });
       return NextResponse.json({ ok: true });
     }
 

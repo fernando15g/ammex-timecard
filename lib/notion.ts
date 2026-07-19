@@ -58,6 +58,7 @@ export const TIMECARD_PROPS = {
   voided: "Voided", // Checkbox — void-not-delete for duplicates/corrections
   voidNote: "Void note", // Text (rich_text) — why it was voided
   underReview: "Under Review", // Checkbox — held pending owner review; excluded from counts
+  uncategorized: "Uncategorized", // Checkbox — intentionally no project (change order / paid training); stops the needs-project nag, bucketed as Uncategorized on reports
 };
 
 // Reconciliation Log — durable record of outcomes (no-show / confirmed / fixed).

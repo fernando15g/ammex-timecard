@@ -2338,8 +2338,11 @@ function SchedulePanel({
         {loading && <div className="text-rebar text-center py-8">Loading…</div>}
 
         {/* Job cards — vertical stack on phone, horizontal scrolling row on
-            iPad/desktop (jobs side by side in the order added, scroll across). */}
-        <div className="flex flex-col md:flex-row md:overflow-x-auto gap-4 md:pb-3 md:-mx-1 md:px-1">
+            iPad/desktop (jobs side by side in the order added, scroll across).
+            On desktop the scroll row fills the remaining viewport height so the
+            horizontal scroll works across the whole area, not just a short band
+            sized to a small job list. */}
+        <div className="flex flex-col md:flex-row md:overflow-x-auto gap-4 md:pb-3 md:-mx-1 md:px-1 md:min-h-[60vh] md:items-start md:content-start">
           {jobs.map((j, idx) => (
             <div
               key={j.jobPageId}
@@ -7276,6 +7279,7 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
   const [editing, setEditing] = useState<RosterPerson | null>(null);
   const [adding, setAdding] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
+  const [q, setQ] = useState("");
 
   useLockBodyScroll();
 
@@ -7311,8 +7315,13 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
     setBusyId("");
   }
 
-  const active = people.filter((p) => p.active);
-  const inactive = people.filter((p) => !p.active);
+  const query = q.trim().toLowerCase();
+  const match = (p: RosterPerson) =>
+    !query ||
+    p.name.toLowerCase().includes(query) ||
+    (p.role || "").toLowerCase().includes(query);
+  const active = people.filter((p) => p.active && match(p));
+  const inactive = people.filter((p) => !p.active && match(p));
 
   return (
     <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
@@ -7329,10 +7338,28 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
 
         <button
           onClick={() => setAdding(true)}
-          className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-4"
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-3"
         >
           + Add worker
         </button>
+
+        <div className="relative mb-4">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search name or role…"
+            className="w-full bg-graphite border border-line rounded-full h-11 pl-4 pr-9 text-concrete text-sm"
+          />
+          {q && (
+            <button
+              onClick={() => setQ("")}
+              aria-label="Clear"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-rebar text-lg"
+            >
+              ×
+            </button>
+          )}
+        </div>
 
         {msg && <div className="text-rebar text-sm text-center mb-3">{msg}</div>}
         {loading && <div className="text-rebar text-sm text-center py-8">Loading…</div>}
@@ -7358,7 +7385,7 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
                 >
                   {showInactive ? "▾" : "▸"} Inactive ({inactive.length})
                 </button>
-                {showInactive &&
+                {(showInactive || !!query) &&
                   inactive.map((p) => (
                     <RosterRow key={p.id} p={p} busy={busyId === p.id} inactive
                       onEdit={() => setEditing(p)} onToggle={() => setActive(p, true)} />

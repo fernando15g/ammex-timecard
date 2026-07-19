@@ -240,6 +240,16 @@ function daysAgo(dateISO: string, todayISO: string): number {
   return Math.round((b - a) / 86400000);
 }
 
+// How many days old a scheduled item is before it escalates from "pending" to
+// "needs attention". Normally 2 days (workers get a grace period). But FRIDAY
+// work escalates after just 1 day (i.e. by Saturday), because Friday time is
+// due Sunday for the Monday payroll report — so it needs chasing over the
+// weekend rather than waiting until Monday.
+function attentionThreshold(dateISO: string): number {
+  const dow = new Date(dateISO + "T00:00:00Z").getUTCDay(); // 0=Sun … 5=Fri … 6=Sat
+  return dow === 5 ? 1 : 2; // Friday → 1 day, everything else → 2 days
+}
+
 // Roster rows a foreman created that the owner hasn't confirmed yet
 // Missing cards the owner has manually closed (logged with kind "Missing card").
 // Keyed by jobId|date so a closed card stays closed for that job+day.
@@ -450,7 +460,9 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
       const crew = crewByJobDate.get(`${row.jobId}|${row.date}`) || { total: 0, logged: 0, elsewhere: 0 };
       discs.push({
         kind: "No timecard",
-        severity: ago >= 2 ? "attention" : "pending",
+        // Friday work escalates after 1 day (by Saturday) since it's due Sunday
+        // for the Monday report; Mon–Thu keep the normal 2-day grace period.
+        severity: daysAgo(row.date, todayISO) >= attentionThreshold(row.date) ? "attention" : "pending",
         worker: row.worker,
         date: row.date,
         scheduledJob: row.jobName || "(job)",

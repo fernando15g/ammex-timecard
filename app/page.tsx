@@ -99,6 +99,7 @@ export default function Page() {
   const [showSchedule, setShowSchedule] = useState(false);
   const [showRecon, setShowRecon] = useState(false);
   const [showVisits, setShowVisits] = useState(false);
+  const [showRoster, setShowRoster] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   // PIN gates the hamburger (admin area); unlock lasts the session so Reports
   // and Schedule share one entry.
@@ -1059,6 +1060,21 @@ export default function Page() {
                   </svg>
                   Site visits
                 </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowRoster(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                  </svg>
+                  Crew roster
+                </button>
               </>
             )}
           </div>
@@ -1100,6 +1116,9 @@ export default function Page() {
           onClose={() => setShowVisits(false)}
         />
       )}
+
+      {/* Crew roster management (owner-only) */}
+      {showRoster && <RosterPanel onClose={() => setShowRoster(false)} />}
     </div>
   );
 }
@@ -7235,6 +7254,243 @@ function CloseMissingModal({
             className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
           >
             {busy ? "Closing…" : "Close card"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Crew Roster management (owner-only) ----------
+// Writes to the same Crew Roster DB the owner platform reads. Add / edit /
+// deactivate only — no schema changes. Deactivating removes a worker from the
+// timesheet crew picker (Active=false); it's a reversible checkbox, never a
+// delete, so history stays intact.
+type RosterPerson = { id: string; name: string; role: string; active: boolean; status: string };
+
+function RosterPanel({ onClose }: { onClose: () => void }) {
+  const [people, setPeople] = useState<RosterPerson[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState("");
+  const [busyId, setBusyId] = useState("");
+  const [editing, setEditing] = useState<RosterPerson | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [showInactive, setShowInactive] = useState(false);
+
+  useLockBodyScroll();
+
+  function load() {
+    setLoading(true);
+    fetch("/api/roster-manage")
+      .then((r) => r.json())
+      .then((d) => {
+        setPeople(d.people || []);
+        setLoading(false);
+      })
+      .catch(() => {
+        setMsg("Couldn't load the roster.");
+        setLoading(false);
+      });
+  }
+  useEffect(() => { load(); }, []);
+
+  async function setActive(p: RosterPerson, active: boolean) {
+    setBusyId(p.id);
+    // optimistic
+    setPeople((cur) => cur.map((x) => (x.id === p.id ? { ...x, active } : x)));
+    const res = await fetch("/api/roster-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "set_active", id: p.id, active }),
+    }).then((r) => r.json()).catch(() => null);
+    if (!res?.ok) {
+      setPeople((cur) => cur.map((x) => (x.id === p.id ? { ...x, active: !active } : x))); // rollback
+      setMsg("That didn't save — try again.");
+      setTimeout(() => setMsg(""), 3000);
+    }
+    setBusyId("");
+  }
+
+  const active = people.filter((p) => p.active);
+  const inactive = people.filter((p) => !p.active);
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-4">
+          <div className="font-bold text-concrete text-lg">Crew roster</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            Close
+          </button>
+        </div>
+
+        <button
+          onClick={() => setAdding(true)}
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-4"
+        >
+          + Add worker
+        </button>
+
+        {msg && <div className="text-rebar text-sm text-center mb-3">{msg}</div>}
+        {loading && <div className="text-rebar text-sm text-center py-8">Loading…</div>}
+
+        {!loading && (
+          <>
+            <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2 px-1">
+              Active ({active.length})
+            </div>
+            {active.map((p) => (
+              <RosterRow key={p.id} p={p} busy={busyId === p.id}
+                onEdit={() => setEditing(p)} onToggle={() => setActive(p, false)} />
+            ))}
+            {active.length === 0 && (
+              <div className="text-rebar text-sm px-1 py-2">No active workers.</div>
+            )}
+
+            {inactive.length > 0 && (
+              <div className="mt-5">
+                <button
+                  onClick={() => setShowInactive((s) => !s)}
+                  className="text-rebar text-xs font-bold uppercase tracking-wide px-1 mb-2 flex items-center gap-1"
+                >
+                  {showInactive ? "▾" : "▸"} Inactive ({inactive.length})
+                </button>
+                {showInactive &&
+                  inactive.map((p) => (
+                    <RosterRow key={p.id} p={p} busy={busyId === p.id} inactive
+                      onEdit={() => setEditing(p)} onToggle={() => setActive(p, true)} />
+                  ))}
+              </div>
+            )}
+
+            <div className="text-rebar text-[11px] mt-6 px-1 leading-relaxed">
+              Deactivating removes a worker from the timesheet crew picker. It's reversible
+              and keeps their history. Tip: deactivate at the end of the day, not while crews
+              are still submitting.
+            </div>
+          </>
+        )}
+      </div>
+
+      {(adding || editing) && (
+        <RosterEditModal
+          person={editing}
+          onClose={() => { setAdding(false); setEditing(null); }}
+          onSaved={() => { setAdding(false); setEditing(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function RosterRow({
+  p, busy, inactive, onEdit, onToggle,
+}: {
+  p: RosterPerson; busy: boolean; inactive?: boolean;
+  onEdit: () => void; onToggle: () => void;
+}) {
+  return (
+    <div
+      className="bg-graphite border border-line rounded-2xl px-4 py-3 mb-2 flex items-center gap-3"
+      style={inactive ? { opacity: 0.6 } : undefined}
+    >
+      <div className="flex-1 min-w-0">
+        <div className="text-concrete font-bold text-[15px] flex items-center gap-2">
+          {p.name}
+          {busy && <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />}
+        </div>
+        <div className="text-rebar text-xs mt-0.5">
+          {p.role || "—"}
+          {p.status ? ` · ${p.status}` : ""}
+        </div>
+      </div>
+      <button
+        onClick={onEdit}
+        className="text-rebar text-xs font-bold bg-steel border border-line rounded-full px-3 py-1.5"
+      >
+        Edit
+      </button>
+      <button
+        onClick={onToggle}
+        className="text-xs font-bold rounded-full px-3 py-1.5 border"
+        style={
+          inactive
+            ? { color: "#4a9e63", borderColor: "rgba(74,158,99,.5)" }
+            : { color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }
+        }
+      >
+        {inactive ? "Reactivate" : "Deactivate"}
+      </button>
+    </div>
+  );
+}
+
+function RosterEditModal({
+  person, onClose, onSaved,
+}: {
+  person: RosterPerson | null; onClose: () => void; onSaved: () => void;
+}) {
+  const isEdit = !!person;
+  const [name, setName] = useState(person?.name || "");
+  const [role, setRole] = useState(person?.role || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function save() {
+    if (!name.trim()) { setErr("Name is required."); return; }
+    setBusy(true); setErr("");
+    const payload = isEdit
+      ? { op: "edit", id: person!.id, name: name.trim(), role: role.trim() }
+      : { op: "add", name: name.trim(), role: role.trim(), active: true };
+    const res = await fetch("/api/roster-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then((r) => r.json()).catch(() => null);
+    if (res?.ok) onSaved();
+    else { setErr(res?.error || "Couldn't save — try again."); setBusy(false); }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-4">
+          {isEdit ? "Edit worker" : "Add worker"}
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Name</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Full name"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Role <span className="text-rebar font-normal normal-case">(optional — type "Foreman" for foremen)</span>
+        </label>
+        <input
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          placeholder="e.g. Foreman, Ironworker"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        {err && <div className="text-sm mb-3" style={{ color: "#e5533c" }}>{err}</div>}
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={busy}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+          >
+            {busy ? "Saving…" : isEdit ? "Save" : "Add"}
           </button>
         </div>
       </div>

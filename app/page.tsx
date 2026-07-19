@@ -2975,24 +2975,6 @@ function ReconPanel({
   const [editEntry, setEditEntry] = useState<ReconEntry | null>(null);
   const [voidEntry, setVoidEntry] = useState<ReconEntry | null>(null);
   const [splitEntry, setSplitEntry] = useState<ReconEntry | null>(null);
-  const [renameEntry, setRenameEntry] = useState<ReconEntry | null>(null);
-
-  async function toggleUncategorized(e: ReconEntry, uncategorized: boolean) {
-    // optimistic
-    setEntries((cur) =>
-      cur.map((x) => (x.id === e.id ? { ...x, uncategorized, projectId: uncategorized ? "" : x.projectId, projectName: uncategorized ? "" : x.projectName } : x))
-    );
-    const res = await fetch("/api/recon", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "set_uncategorized", id: e.id, uncategorized }),
-    }).then((r) => r.json()).catch(() => null);
-    if (!res?.ok) {
-      setMsg("That didn't save — try again.");
-      setTimeout(() => setMsg(""), 3000);
-      search(); // resync from source on failure
-    }
-  }
   const [recentSplits, setRecentSplits] = useState<
     {
       origId: string;
@@ -3453,27 +3435,6 @@ function ReconPanel({
                         Split
                       </button>
                       <button
-                        onClick={() => setRenameEntry(e)}
-                        className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
-                      >
-                        Rename
-                      </button>
-                      {e.uncategorized ? (
-                        <button
-                          onClick={() => toggleUncategorized(e, false)}
-                          className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
-                        >
-                          Clear N/A
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => toggleUncategorized(e, true)}
-                          className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
-                        >
-                          N/A
-                        </button>
-                      )}
-                      <button
                         onClick={() => setVoidEntry(e)}
                         className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
                       >
@@ -3652,17 +3613,6 @@ function ReconPanel({
             setSplitEntry(null);
             setRecentSplits((cur) => [undo, ...cur].slice(0, 20));
             refreshAfterWrite();
-          }}
-        />
-      )}
-
-      {renameEntry && (
-        <RenameEntryModal
-          entry={renameEntry}
-          onClose={() => setRenameEntry(null)}
-          onSaved={() => {
-            setRenameEntry(null);
-            search();
           }}
         />
       )}
@@ -5502,6 +5452,28 @@ function ReconBulkProjectModal({
   const [picked, setPicked] = useState<{ id: string; name: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [progress, setProgress] = useState("");
+  const [customMode, setCustomMode] = useState(false);
+  const [customName, setCustomName] = useState("");
+
+  // Apply a custom name (label with no real project) to every entry in the card.
+  async function applyCustomName() {
+    const label = customName.trim();
+    if (!label) { setProgress("Enter a name."); return; }
+    setSaving(true);
+    setProgress(`Updating ${entries.length}…`);
+    let ok = 0;
+    for (const e of entries) {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "set_custom_name", id: e.id, name: label }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.ok) ok++;
+    }
+    setSaving(false);
+    if (ok === entries.length) onDone();
+    else setProgress(`Only ${ok}/${entries.length} saved. Try again.`);
+  }
 
   useEffect(() => {
     fetch("/api/recon?action=projects")
@@ -5549,7 +5521,7 @@ function ReconBulkProjectModal({
           <div className="text-rebar text-xs mb-2">
             "{jobName}" · {dateLabel} · {entries.length} {entries.length === 1 ? "entry" : "entries"}
           </div>
-          {!picked ? (
+          {!picked && !customMode ? (
             <input
               autoFocus
               value={query}
@@ -5560,8 +5532,50 @@ function ReconBulkProjectModal({
           ) : null}
         </div>
 
-        {!picked ? (
+        {customMode ? (
+          <div className="p-5">
+            <div className="text-concrete font-bold mb-1">Custom name</div>
+            <div className="text-rebar text-xs mb-3">
+              A label with no real project (e.g. change order). Shows under Uncategorized on
+              reports so accounting can place it.
+            </div>
+            <input
+              autoFocus
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              placeholder="e.g. CO — night differential"
+              className="w-full bg-steel rounded-xl px-3 h-11 text-concrete mb-3"
+            />
+            {progress && <div className="text-rebar text-sm mb-3">{progress}</div>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setCustomMode(false); setProgress(""); }}
+                disabled={saving}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Back
+              </button>
+              <button
+                onClick={applyCustomName}
+                disabled={saving}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Saving…" : "Save name"}
+              </button>
+            </div>
+          </div>
+        ) : !picked ? (
           <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+            {/* Alternative to a real project */}
+            <button
+              onClick={() => { setCustomMode(true); setCustomName(""); setProgress(""); }}
+              className="w-full text-left px-3 py-3 rounded-xl active:bg-steel flex items-center justify-between border border-line mb-1"
+              style={{ color: "#8fbcff" }}
+            >
+              <span className="font-bold">✎ Custom name…</span>
+              <span className="text-rebar text-xs">no project</span>
+            </button>
+            <div className="text-rebar text-[11px] px-1 pt-1 pb-1">or pick a project:</div>
             {filtered.map((p) => (
               <button
                 key={p.id}
@@ -7577,73 +7591,6 @@ function RosterEditModal({
             className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
           >
             {busy ? "Saving…" : isEdit ? "Save" : "Add"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Rename a timecard to a custom label with no real project (change orders that
-// can't map to the original project due to wage differences, etc.). Writes the
-// label to the free-text Job field, clears any project relation, and marks the
-// card Uncategorized so it stops nagging and buckets as Uncategorized on reports.
-function RenameEntryModal({
-  entry,
-  onClose,
-  onSaved,
-}: {
-  entry: ReconEntry;
-  onClose: () => void;
-  onSaved: () => void;
-}) {
-  const [name, setName] = useState(entry.projectName || entry.job || "");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-
-  async function save() {
-    const label = name.trim();
-    if (!label) { setErr("Enter a name."); return; }
-    setBusy(true); setErr("");
-    const res = await fetch("/api/recon", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "set_custom_name", id: entry.id, name: label }),
-    }).then((r) => r.json()).catch(() => null);
-    if (res?.ok) onSaved();
-    else { setErr(res?.error || "Couldn't save — try again."); setBusy(false); }
-  }
-
-  return (
-    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
-      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
-        <div className="text-concrete font-bold text-lg mb-1">Custom name</div>
-        <div className="text-rebar text-sm mb-4">
-          Give this card a custom label with no real project — for change orders or work
-          that shouldn&apos;t map to a project. It&apos;ll show under &ldquo;Uncategorized&rdquo;
-          on reports so accounting can place it.
-        </div>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. CO — night differential"
-          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
-        />
-        {err && <div className="text-sm mb-3" style={{ color: "#e5533c" }}>{err}</div>}
-        <div className="flex gap-2">
-          <button
-            onClick={onClose}
-            disabled={busy}
-            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={save}
-            disabled={busy}
-            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
-          >
-            {busy ? "Saving…" : "Save name"}
           </button>
         </div>
       </div>

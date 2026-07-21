@@ -137,7 +137,7 @@ export function addDaysISO(iso: string, days: number): string {
 // Matches the read-time normalization so names with stray whitespace artifacts
 // compare equal instead of being treated as different people.
 function nkey(s: string): string {
-  return (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return (s || "").normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function dayIndex(weekStartISO: string, dateISO: string): number {

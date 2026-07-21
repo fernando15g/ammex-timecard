@@ -85,14 +85,14 @@ export function readText(prop: any): string {
   }
 }
 
-// Normalize a person's name for use as a grouping key. Collapses any run of
-// whitespace (double spaces, tabs, non-breaking spaces) to a single space and
-// trims the ends — so a name that picked up an invisible whitespace artifact
-// from a manual Notion edit ("Luis  Grijalva") groups with the clean version
-// ("Luis Grijalva") instead of splitting into two rows. Does NOT touch genuine
-// spelling/accent differences — those remain distinct, as they should.
+// Normalize a person's name for use as a grouping key. Applies Unicode NFC
+// normalization (so an accent stored as a combining char matches the same
+// accent stored precomposed — they look identical but are different strings),
+// collapses any run of whitespace to a single space, and trims. Handles the
+// common "same name, two invisible encodings" case from mixed data entry.
+// Does NOT touch genuine spelling/accent-present-vs-absent differences.
 export function normalizeName(s: string): string {
-  return (s || "").replace(/\s+/g, " ").trim();
+  return (s || "").normalize("NFC").replace(/\s+/g, " ").trim();
 }
 
 export function relationIds(prop: any): string[] {

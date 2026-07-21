@@ -11,6 +11,51 @@ export async function GET(req: NextRequest) {
   if (req.nextUrl.searchParams.get("pin")?.trim() !== DIAG_PIN) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
   }
+
+  // Name inspector: /api/notion-check?names=<search>&db=<timecards_db>&pin=5314
+  // Lists every DISTINCT worker-name string on timecards matching the search,
+  // with exact length + per-character unicode codes, so we can see precisely
+  // how two "identical looking" names differ (accent, hidden char, etc.).
+  const nameSearch = req.nextUrl.searchParams.get("names")?.trim();
+  if (nameSearch) {
+    const db = req.nextUrl.searchParams.get("db")?.trim();
+    if (!db) return NextResponse.json({ ok: false, error: "Pass ?db=<timecards_db>" }, { status: 400 });
+    if (!NOTION_TOKEN) return NextResponse.json({ ok: false, error: "NOTION_TOKEN not set" }, { status: 500 });
+    const notion = new Client({ auth: NOTION_TOKEN });
+    try {
+      const seen = new Map<string, number>(); // raw name -> count
+      let cursor: string | undefined;
+      do {
+        const res: any = await notion.databases.query({
+          database_id: db, start_cursor: cursor, page_size: 100,
+        });
+        for (const pg of res.results) {
+          const p = pg.properties || {};
+          // find the title property (Worker)
+          let raw = "";
+          for (const v of Object.values<any>(p)) {
+            if (v?.type === "title") { raw = (v.title || []).map((t: any) => t.plain_text).join(""); break; }
+          }
+          if (raw.toLowerCase().includes(nameSearch.toLowerCase())) {
+            seen.set(raw, (seen.get(raw) || 0) + 1);
+          }
+        }
+        cursor = res.has_more ? res.next_cursor : undefined;
+      } while (cursor);
+
+      const variants = Array.from(seen.entries()).map(([raw, count]) => ({
+        display: raw,
+        count,
+        length: raw.length,
+        codes: Array.from(raw).map((ch) => ch.charCodeAt(0)),
+        normalized: raw.replace(/\s+/g, " ").trim(),
+      }));
+      return NextResponse.json({ ok: true, search: nameSearch, distinctVariants: variants.length, variants });
+    } catch (err: any) {
+      return NextResponse.json({ ok: false, error: err?.message || String(err) }, { status: 502 });
+    }
+  }
+
   const db = req.nextUrl.searchParams.get("db")?.trim();
   if (!db) {
     return NextResponse.json(

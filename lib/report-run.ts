@@ -85,6 +85,16 @@ export function readText(prop: any): string {
   }
 }
 
+// Normalize a person's name for use as a grouping key. Collapses any run of
+// whitespace (double spaces, tabs, non-breaking spaces) to a single space and
+// trims the ends — so a name that picked up an invisible whitespace artifact
+// from a manual Notion edit ("Luis  Grijalva") groups with the clean version
+// ("Luis Grijalva") instead of splitting into two rows. Does NOT touch genuine
+// spelling/accent differences — those remain distinct, as they should.
+export function normalizeName(s: string): string {
+  return (s || "").replace(/\s+/g, " ").trim();
+}
+
 export function relationIds(prop: any): string[] {
   if (!prop) return [];
   if (prop.type === "relation") return (prop.relation || []).map((r: any) => r.id);
@@ -176,7 +186,7 @@ export async function loadRowsAndRoster(
   const rows: RawRow[] = [];
   for (const page of raw) {
     const props = page.properties || {};
-    const worker = readText(props[TIMECARD_PROPS.worker]);
+    const worker = normalizeName(readText(props[TIMECARD_PROPS.worker]));
     const dateISO = props[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "";
     const hoursVal = props[TIMECARD_PROPS.hours]?.number;
     const hours = typeof hoursVal === "number" ? hoursVal : 0;
@@ -203,7 +213,7 @@ export async function loadRowsAndRoster(
       page_size: 100,
     });
     for (const pg of res.results) {
-      const nm = readText(pg.properties?.[ROSTER_PROPS.name]);
+      const nm = normalizeName(readText(pg.properties?.[ROSTER_PROPS.name]));
       if (nm) activeRoster.push(nm);
     }
     rc = res.has_more ? res.next_cursor : undefined;
@@ -243,8 +253,8 @@ async function loadScheduleLeads(
       });
       for (const pg of res.results) {
         const p = pg.properties || {};
-        const worker = (p[SCHEDULE_PROPS.worker]?.title || [])
-          .map((t: any) => t.plain_text).join("").trim();
+        const worker = normalizeName((p[SCHEDULE_PROPS.worker]?.title || [])
+          .map((t: any) => t.plain_text).join(""));
         const date = p[SCHEDULE_PROPS.date]?.date?.start?.slice(0, 10) || "";
         const jobId = (p[SCHEDULE_PROPS.job]?.relation || [])[0]?.id || "";
         if (worker && date && jobId) {
@@ -319,7 +329,7 @@ async function loadHeldRows(
       });
       for (const page of res.results) {
         const p = page.properties || {};
-        const worker = readText(p[TIMECARD_PROPS.worker]);
+        const worker = normalizeName(readText(p[TIMECARD_PROPS.worker]));
         const dateISO = p[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "";
         const hours = typeof p[TIMECARD_PROPS.hours]?.number === "number" ? p[TIMECARD_PROPS.hours].number : 0;
         const fm = readText(p[TIMECARD_PROPS.foreman]);
@@ -447,7 +457,7 @@ export async function runReport(
   const rows: RawRow[] = [];
   for (const page of raw) {
     const props = page.properties || {};
-    const worker = readText(props[TIMECARD_PROPS.worker]);
+    const worker = normalizeName(readText(props[TIMECARD_PROPS.worker]));
     const dateISO = props[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "";
     const hoursVal = props[TIMECARD_PROPS.hours]?.number;
     const hours = typeof hoursVal === "number" ? hoursVal : 0;
@@ -477,7 +487,7 @@ export async function runReport(
       page_size: 100,
     });
     for (const pg of res.results) {
-      const nm = readText(pg.properties?.[ROSTER_PROPS.name]);
+      const nm = normalizeName(readText(pg.properties?.[ROSTER_PROPS.name]));
       if (nm) activeRoster.push(nm);
     }
     rc = res.has_more ? res.next_cursor : undefined;

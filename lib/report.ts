@@ -133,6 +133,13 @@ export function addDaysISO(iso: string, days: number): string {
   return dt.toISOString().slice(0, 10);
 }
 
+// Normalize a name for comparison: collapse internal whitespace, trim, lower.
+// Matches the read-time normalization so names with stray whitespace artifacts
+// compare equal instead of being treated as different people.
+function nkey(s: string): string {
+  return (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 function dayIndex(weekStartISO: string, dateISO: string): number {
   const [y1, m1, d1] = weekStartISO.split("-").map(Number);
   const [y2, m2, d2] = dateISO.split("-").map(Number);
@@ -206,7 +213,7 @@ export function buildReport(
     job: string;
   }[] = [];
 
-  const ff = foremanFilter ? foremanFilter.trim().toLowerCase() : "";
+  const ff = foremanFilter ? nkey(foremanFilter) : "";
   // Foreman-report inclusion. With a schedule available, a foreman's report is
   // SCHEDULE-driven: rows logged on jobs he was the scheduled lead for that
   // date (no matter who submitted the card), PLUS his own hours wherever he
@@ -217,10 +224,10 @@ export function buildReport(
   const crewNotes: { dateISO: string; text: string }[] = [];
   const includeRow = (r: RawRow, rowForeman: string): boolean => {
     if (!ff) return true;
-    const isOwn = r.worker.trim().toLowerCase() === ff;
+    const isOwn = nkey(r.worker) === ff;
     if (!sched) return rowForeman.toLowerCase() === ff;
     const key = r.projectPageId ? `${r.projectPageId}|${r.dateISO}` : "";
-    const leadHere = key ? (sched.leadByJobDate.get(key) || "").trim().toLowerCase() : "";
+    const leadHere = key ? nkey(sched.leadByJobDate.get(key) || "") : "";
     if (leadHere) {
       if (leadHere === ff) return true; // a job he led that day — his crew's hours
       if (isOwn) {
@@ -468,13 +475,13 @@ export function buildReport(
 
   // Worker not on the active roster (misspelled name or unconfirmed add).
   const rosterSet = new Set(
-    activeRoster.map((n) => n.trim().toLowerCase())
+    activeRoster.map((n) => nkey(n))
   );
   const offRosterSeen = new Set<string>();
   for (const r of rows) {
     const idx = dayIndex(weekStartISO, r.dateISO);
     if (idx < 0 || idx >= nDays) continue;
-    const norm = r.worker.trim().toLowerCase();
+    const norm = nkey(r.worker);
     if (!rosterSet.has(norm) && !offRosterSeen.has(norm)) {
       offRosterSeen.add(norm);
       flags.push({
@@ -490,7 +497,7 @@ export function buildReport(
   let outFlags = flags;
   if (ff) {
     outFlags = flags.filter((f) =>
-      (f.foremen || []).some((fm) => fm.trim().toLowerCase() === ff)
+      (f.foremen || []).some((fm) => nkey(fm) === ff)
     );
   }
 
@@ -507,7 +514,7 @@ export function buildReport(
     outFlags = outFlags.filter((f) => {
       const label = KIND_TO_LABEL[f.kind];
       if (!label) return true; // off_roster etc. — not confirmable in cockpit
-      const key = `${f.worker.trim().toLowerCase()}|${f.dateISO}|${label}`;
+      const key = `${nkey(f.worker)}|${f.dateISO}|${label}`;
       return !confirmedFlagKeys.has(key);
     });
   }

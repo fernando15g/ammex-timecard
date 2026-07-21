@@ -48,6 +48,16 @@ export function buildPayrollGrid(
   // worker -> dayIdx -> array of {hours, job, firstSeq} to support splits
   type DayJobs = Map<string, { hours: number; order: number }>; // job -> hours + first-seen order
   const byWorker = new Map<string, Map<number, DayJobs>>();
+  // Group case-insensitively (a card typed "luis grijalva" and one typed
+  // "Luis Grijalva" are the same person). Keep the best-cased display name so
+  // the payroll doc shows a proper name, not whatever case was typed most.
+  const displayName = new Map<string, string>(); // lowerKey -> nicest display
+  const betterCased = (a: string, b: string): string => {
+    // Prefer the one whose words are Capitalized (e.g. "Luis Grijalva" over
+    // "luis grijalva"). Count capitalized word-starts; higher wins, else keep a.
+    const caps = (s: string) => s.split(/\s+/).filter((w) => w && w[0] === w[0].toUpperCase() && w[0] !== w[0].toLowerCase()).length;
+    return caps(b) > caps(a) ? b : a;
+  };
   let seq = 0;
 
   function dayIndex(iso: string): number {
@@ -60,10 +70,12 @@ export function buildPayrollGrid(
     const idx = dayIndex(r.dateISO);
     if (idx < 0 || idx >= nDays) continue;
     const job = r.projectName.trim() || prettifyJob(r.jobText) || "—";
-    let days = byWorker.get(r.worker);
+    const key = r.worker.toLowerCase(); // case-insensitive grouping key
+    displayName.set(key, betterCased(displayName.get(key) || r.worker, r.worker));
+    let days = byWorker.get(key);
     if (!days) {
       days = new Map();
-      byWorker.set(r.worker, days);
+      byWorker.set(key, days);
     }
     let dj = days.get(idx);
     if (!dj) {
@@ -113,15 +125,15 @@ export function buildPayrollGrid(
           : jobs.map((j) => r2(j.hours)).join(" / ");
       cells.push({ text });
     }
-    gridRows.push({ name, cells, total: r2(total) });
+    gridRows.push({ name: displayName.get(name) || name, cells, total: r2(total) });
   }
   gridRows.sort((a, b) =>
     a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
   );
 
-  const worked = new Set(byWorker.keys());
+  const worked = new Set(byWorker.keys()); // keys are lowercased
   const noHours = activeRoster
-    .filter((n) => !worked.has(n))
+    .filter((n) => !worked.has(n.toLowerCase()))
     .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
   const grandTotal = r2(gridRows.reduce((s, r) => s + r.total, 0));

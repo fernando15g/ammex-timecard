@@ -95,6 +95,25 @@ export function normalizeName(s: string): string {
   return (s || "").normalize("NFC").replace(/\s+/g, " ").trim();
 }
 
+// Reconcile case differences in worker names across rows (a foreman typing
+// "luis grijalva" and an owner-corrected "Luis Grijalva" are the same person).
+// Groups by lowercased name and rewrites every row's worker to the single
+// best-cased version that actually appears in the data — so all reports treat
+// them as one person and display a properly-capitalized name, without machine-
+// guessing capitalization for names that were only ever typed one way.
+export function canonicalizeNames<T extends { worker: string }>(rows: T[]): T[] {
+  const best = new Map<string, string>(); // lowerKey -> nicest real casing
+  const capScore = (s: string) =>
+    s.split(/\s+/).filter((w) => w && w[0] !== w[0].toLowerCase()).length;
+  for (const r of rows) {
+    const key = r.worker.toLowerCase();
+    const cur = best.get(key);
+    if (cur === undefined || capScore(r.worker) > capScore(cur)) best.set(key, r.worker);
+  }
+  for (const r of rows) r.worker = best.get(r.worker.toLowerCase()) || r.worker;
+  return rows;
+}
+
 export function relationIds(prop: any): string[] {
   if (!prop) return [];
   if (prop.type === "relation") return (prop.relation || []).map((r: any) => r.id);
@@ -219,7 +238,7 @@ export async function loadRowsAndRoster(
     rc = res.has_more ? res.next_cursor : undefined;
   } while (rc);
 
-  return { rows, activeRoster };
+  return { rows: canonicalizeNames(rows), activeRoster };
 }
 
 // Confirmed-OK flags from the Reconciliation Log for [start,end] as a set of
@@ -478,6 +497,8 @@ export async function runReport(
 
   // 4) Active roster
   const activeRoster: string[] = [];
+  // Reconcile case differences across worker names before any report is built.
+  canonicalizeNames(rows);
   let rc: string | undefined = undefined;
   do {
     const res: any = await notion.databases.query({

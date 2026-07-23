@@ -3,8 +3,9 @@ import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage } from "pdf-lib";
 export interface ScheduleCrew {
   worker: string;
   isLead: boolean;
-  hours?: number;       // actual payable hours logged on this job that day
+  hours?: number;        // actual payable hours logged on this job that day
   unscheduled?: boolean; // worked this job without being scheduled on it
+  elsewhere?: string;    // scheduled here but logged on another job, e.g. "Kino 8h"
 }
 export interface ScheduleJob {
   jobPageId: string;
@@ -84,12 +85,16 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     const worked = rest.filter((c) => !c.unscheduled && c.hours != null).sort(abc);
     const noHours = rest.filter((c) => !c.unscheduled && c.hours == null).sort(abc);
     const walkOn = rest.filter((c) => c.unscheduled).sort(abc);
-    const ordered: (ScheduleCrew & { gapBefore?: boolean })[] = [];
+    // Everyone who WORKED reads first (crew, then walk-ons); the exceptions
+    // (scheduled but no hours here) sit at the bottom in their own block.
+    const ordered: (ScheduleCrew & { gapBefore?: boolean; noHoursHead?: boolean })[] = [];
     if (lead) ordered.push(lead);
     worked.forEach((c, i) => ordered.push({ ...c, gapBefore: i === 0 && !!lead }));
-    noHours.forEach((c, i) => ordered.push({ ...c, gapBefore: i === 0 && ordered.length > 0 }));
     walkOn.forEach((c, i) => ordered.push({ ...c, gapBefore: i === 0 && ordered.length > 0 }));
-    return { ...j, ordered };
+    noHours.forEach((c, i) =>
+      ordered.push({ ...c, gapBefore: i === 0 && ordered.length > 0, noHoursHead: i === 0 })
+    );
+    return { ...j, ordered, noHoursCount: noHours.length };
   });
 
   // Group into rows of up to COLS.
@@ -131,28 +136,41 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     yy -= headH;
     pg.drawLine({ start: { x, y: yy }, end: { x: x + colW, y: yy }, thickness: 0.6, color: line });
     yy -= 14;
-    for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean })[]) {
+    for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean; noHoursHead?: boolean })[]) {
       if (c.gapBefore) yy -= 5; // blank space between groups
+      if (c.noHoursHead) {
+        // Small label above the no-hours block so the section explains itself.
+        pg.drawText("NO HOURS LOGGED", { x: x + 4, y: yy, size: 6.5, font: bold, color: faded });
+        yy -= 10;
+      }
       const worked = c.hours != null;
-      // Name colour reflects what actually happened against the plan.
-      const nameColor = c.unscheduled
-        ? amber                       // worked here, wasn't scheduled
-        : c.isLead
-        ? blue
-        : worked
-        ? steel                       // scheduled and showed up
-        : faded;                      // scheduled, no hours logged
+      // Colour = status only (role is shown by the F badge, so leads aren't blue).
+      const nameColor = c.unscheduled ? amber : worked ? steel : faded;
+      const indent = c.isLead ? 14 : 4; // room for the F badge
       const nm = c.worker.toUpperCase() + (worked ? `  ${c.hours}h` : "");
-      const lines = wrap(nm, c.isLead ? bold : font, 8.5, colW - 8);
+      const lines = wrap(nm, c.isLead ? bold : font, 8.5, colW - 8 - (c.isLead ? 10 : 0));
       for (let li = 0; li < lines.length; li++) {
+        if (li === 0 && c.isLead) {
+          // Blue circled F — marks the foreman without using name colour.
+          pg.drawCircle({ x: x + 8, y: yy + 3, size: 4.6, borderColor: blue, borderWidth: 0.9 });
+          pg.drawText("F", { x: x + 6.1, y: yy + 0.6, size: 5.5, font: bold, color: blue });
+        }
         pg.drawText(lines[li], {
-          x: x + (li === 0 ? 4 : 10),
+          x: x + (li === 0 ? indent : indent + 6),
           y: yy,
           size: 8.5,
           font: c.isLead ? bold : font,
           color: nameColor,
         });
         yy -= lineH;
+      }
+      // Context for a no-show: where they actually worked that day, if anywhere.
+      if (!worked && c.elsewhere) {
+        const noteLines = wrap(`at ${c.elsewhere}`, font, 7, colW - 16);
+        for (const nl of noteLines) {
+          pg.drawText(nl, { x: x + 12, y: yy + 2, size: 7, font, color: gray });
+          yy -= 9;
+        }
       }
     }
   }
@@ -161,20 +179,27 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     // Row height = header + tallest column's crew lines.
     let maxLines = 0;
     let maxGaps = 0;
+    let maxExtra = 0;
     for (const job of row) {
       let lines = 0;
       let gaps = 0;
-      for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean })[]) {
+      let extra = 0;
+      for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean; noHoursHead?: boolean })[]) {
         // Measure the same string that gets drawn (name + hours) so wrapped
-        // lines are counted correctly, and reserve the between-group gaps.
+        // lines are counted correctly, and reserve gaps / labels / notes.
         const nm = c.worker.toUpperCase() + (c.hours != null ? `  ${c.hours}h` : "");
-        lines += wrap(nm, c.isLead ? bold : font, 8.5, colW - 8).length;
+        lines += wrap(nm, c.isLead ? bold : font, 8.5, colW - 8 - (c.isLead ? 10 : 0)).length;
         if (c.gapBefore) gaps++;
+        if (c.noHoursHead) extra += 10;                       // "NO HOURS LOGGED" label
+        if (c.hours == null && c.elsewhere) {
+          extra += wrap(`at ${c.elsewhere}`, font, 7, colW - 16).length * 9; // note lines
+        }
       }
       maxLines = Math.max(maxLines, lines);
       maxGaps = Math.max(maxGaps, gaps);
+      maxExtra = Math.max(maxExtra, extra);
     }
-    const rowH = headH + 14 + maxLines * lineH + maxGaps * 5 + rowGap;
+    const rowH = headH + 14 + maxLines * lineH + maxGaps * 5 + maxExtra + rowGap;
 
     // If the row won't fit, move the whole row to a new page.
     if (y - rowH < MARGIN && y < PH - MARGIN - 60) {

@@ -72,6 +72,58 @@ async function actualsForDate(
 }
 
 
+
+// Overlay actuals onto a day's scheduled jobs:
+//  - hours for scheduled crew who logged on that job
+//  - walk-ons (worked the job without being scheduled), appended
+//  - for scheduled crew with NO hours here, note where they DID work that day
+//    so "didn't show" is distinguishable from "went to another job".
+async function applyActuals(
+  notion: Client,
+  dateISO: string,
+  jobs: ScheduleJob[]
+): Promise<void> {
+  const actuals = await actualsForDate(notion, dateISO);
+
+  // Reverse index: worker -> every job they logged on that day.
+  const byWorker = new Map<string, { jobPageId: string; hours: number }[]>();
+  for (const [jobPageId, people] of actuals) {
+    for (const [k, v] of people) {
+      if (!byWorker.has(k)) byWorker.set(k, []);
+      byWorker.get(k)!.push({ jobPageId, hours: v.hours });
+    }
+  }
+  // Names for every job touched (some may not be on today's schedule).
+  const names = await jobLookup(notion, Array.from(actuals.keys()));
+
+  for (const jg of jobs) {
+    const worked = actuals.get(jg.jobPageId);
+    const scheduledKeys = new Set(jg.crew.map((c) => c.worker.toLowerCase()));
+
+    for (const c of jg.crew) {
+      const k = c.worker.toLowerCase();
+      const hit = worked?.get(k);
+      if (hit) {
+        c.hours = hit.hours;
+      } else {
+        const others = (byWorker.get(k) || []).filter((e) => e.jobPageId !== jg.jobPageId);
+        if (others.length) {
+          c.elsewhere = others
+            .map((e) => `${names.get(e.jobPageId)?.name || "another job"} ${e.hours}h`)
+            .join(", ");
+        }
+      }
+    }
+    if (worked) {
+      for (const [k, v] of worked) {
+        if (!scheduledKeys.has(k)) {
+          jg.crew.push({ worker: v.worker, isLead: false, hours: v.hours, unscheduled: true });
+        }
+      }
+    }
+  }
+}
+
 // Load a full ScheduleData (plan + actuals) for one date. Shared by the
 // on-demand PDF export so the exported sheet matches what's on screen.
 async function loadScheduleForDate(notion: Client, dateISO: string): Promise<ScheduleData> {
@@ -107,20 +159,8 @@ async function loadScheduleForDate(notion: Client, dateISO: string): Promise<Sch
     jg.crew.push({ worker, isLead });
   }
 
-  const actuals = await actualsForDate(notion, dateISO);
   const jobs = Array.from(byJob.values());
-  for (const jg of jobs) {
-    const worked = actuals.get(jg.jobPageId);
-    if (!worked) continue;
-    const scheduledKeys = new Set(jg.crew.map((c) => c.worker.toLowerCase()));
-    for (const c of jg.crew) {
-      const hit = worked.get(c.worker.toLowerCase());
-      if (hit) c.hours = hit.hours;
-    }
-    for (const [k, v] of worked) {
-      if (!scheduledKeys.has(k)) jg.crew.push({ worker: v.worker, isLead: false, hours: v.hours, unscheduled: true });
-    }
-  }
+  await applyActuals(notion, dateISO, jobs);
   return { date: dateISO, jobs };
 }
 
@@ -314,23 +354,8 @@ export async function GET(req: NextRequest) {
     // (?actuals=1, used by the read-only past-schedules view). The planning
     // editor never asks for it, so walk-ons can't reach a view that saves.
     const jobs = Array.from(byJob.values());
-    const wantActuals = req.nextUrl.searchParams.get("actuals") === "1";
-    const actuals = wantActuals
-      ? await actualsForDate(notion, targetDate)
-      : new Map<string, Map<string, { worker: string; hours: number }>>();
-    for (const jg of jobs) {
-      const worked = actuals.get(jg.jobPageId);
-      if (!worked) continue;
-      const scheduledKeys = new Set(jg.crew.map((c: any) => c.worker.toLowerCase()));
-      for (const c of jg.crew as any[]) {
-        const hit = worked.get(c.worker.toLowerCase());
-        if (hit) c.hours = hit.hours; // showed up
-      }
-      for (const [k, v] of worked) {
-        if (!scheduledKeys.has(k)) {
-          (jg.crew as any[]).push({ worker: v.worker, isLead: false, hours: v.hours, unscheduled: true });
-        }
-      }
+    if (req.nextUrl.searchParams.get("actuals") === "1") {
+      await applyActuals(notion, targetDate, jobs);
     }
 
     return NextResponse.json({ date: targetDate, jobs });

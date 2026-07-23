@@ -196,11 +196,12 @@ export async function GET(req: NextRequest) {
   if (exportRange && date) {
     try {
       const dates: string[] = [];
-      if (exportRange === "week") {
+      if (exportRange === "week" || exportRange === "lastweek") {
         const d = new Date(date + "T00:00:00Z");
         const dow = d.getUTCDay();               // 0=Sun
         const monOffset = dow === 0 ? -6 : 1 - dow;
-        const mon = new Date(d.getTime() + monOffset * 86400000);
+        let mon = new Date(d.getTime() + monOffset * 86400000);
+        if (exportRange === "lastweek") mon = new Date(mon.getTime() - 7 * 86400000);
         for (let i = 0; i < 7; i++) {
           dates.push(new Date(mon.getTime() + i * 86400000).toISOString().slice(0, 10));
         }
@@ -225,7 +226,7 @@ export async function GET(req: NextRequest) {
       }
       const out = await merged.save();
       const name =
-        exportRange === "week"
+        exportRange === "week" || exportRange === "lastweek"
           ? `Ammex_Schedule_Week_${dates[0]}_to_${dates[6]}.pdf`
           : `Ammex_Schedule_${date}.pdf`;
       return NextResponse.json({

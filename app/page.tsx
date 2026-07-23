@@ -1983,11 +1983,11 @@ function SchedulePanel({
 
   const totalCrew = jobs.reduce((s, j) => s + j.crew.length, 0);
 
-  const [exporting, setExporting] = useState<"" | "day" | "week">("");
+  const [exporting, setExporting] = useState<"" | "day" | "week" | "lastweek">("");
   const [exportOpen, setExportOpen] = useState(false);
   // Download the past-schedule PDF (plan + actuals) for the day being viewed,
   // or the Mon–Sun week containing it.
-  async function exportSchedulePdf(range: "day" | "week") {
+  async function exportSchedulePdf(range: "day" | "week" | "lastweek") {
     if (!histDate) return;
     setExporting(range);
     try {
@@ -2058,7 +2058,38 @@ function SchedulePanel({
       <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
         <div className="max-w-2xl mx-auto p-5 pb-24">
           <div className="flex items-center justify-between mb-4">
-            <div className="w-14" />
+            <div className="relative">
+              <button
+                onClick={() => setExportOpen((o) => !o)}
+                disabled={!!exporting || !histDate}
+                className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {exporting ? "…" : "PDF"}
+                <span className="text-[10px]">▾</span>
+              </button>
+              {exportOpen && !exporting && (
+                <div className="absolute left-0 mt-1 z-30 bg-graphite border border-line rounded-xl overflow-hidden shadow-xl min-w-[150px]">
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("day"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel border-b border-line/60"
+                  >
+                    This day
+                  </button>
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("week"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel border-b border-line/60"
+                  >
+                    This week
+                  </button>
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("lastweek"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel"
+                  >
+                    Last week
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
             <button
               onClick={onClose}
@@ -2082,45 +2113,12 @@ function SchedulePanel({
             </button>
           </div>
 
-          {/* Export (top-left) + prominent date */}
-          <div className="relative mb-4">
-            <div className="absolute left-0 top-0">
-              <button
-                onClick={() => setExportOpen((o) => !o)}
-                disabled={!!exporting || !histDate}
-                className="bg-graphite border border-line rounded-full px-3 h-9 text-concrete text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-50"
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <path d="M7 10l5 5 5-5" />
-                  <path d="M12 15V3" />
-                </svg>
-                {exporting ? "Building…" : "PDF"}
-                <span className="text-rebar">▾</span>
-              </button>
-              {exportOpen && !exporting && (
-                <div className="absolute left-0 mt-1 z-20 bg-graphite border border-line rounded-xl overflow-hidden shadow-lg min-w-[150px]">
-                  <button
-                    onClick={() => { setExportOpen(false); exportSchedulePdf("day"); }}
-                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel border-b border-line/60"
-                  >
-                    This day
-                  </button>
-                  <button
-                    onClick={() => { setExportOpen(false); exportSchedulePdf("week"); }}
-                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel"
-                  >
-                    This week
-                  </button>
-                </div>
-              )}
+          {/* Prominent date */}
+          <div className="text-center mb-4">
+            <div className="text-safety text-2xl font-extrabold tracking-tight">
+              {histDate ? prettyScheduleDate(histDate) : "—"}
             </div>
-            <div className="text-center">
-              <div className="text-safety text-2xl font-extrabold tracking-tight">
-                {histDate ? prettyScheduleDate(histDate) : "—"}
-              </div>
-              <div className="text-rebar text-xs mt-1">read-only</div>
-            </div>
+            <div className="text-rebar text-xs mt-1">read-only</div>
           </div>
 
           {/* Day navigation — fixed sides, centered picker, no wrapping */}

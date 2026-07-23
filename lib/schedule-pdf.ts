@@ -63,9 +63,9 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-  const PW = 612;
-  const PH = 792;
-  const COLS = 4;
+  const PW = 792; // landscape
+  const PH = 612;
+  const COLS = 5;
   const gap = 12;
   const usableW = PW - MARGIN * 2;
   const colW = (usableW - gap * (COLS - 1)) / COLS;
@@ -73,13 +73,23 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
   const rowGap = 18;
   const lineH = 13;
 
-  // Order each job's crew: lead first, then the rest alphabetical.
+  // Group each job's crew so the sheet is scannable instead of intermixed:
+  //   foreman → worked (with hours) → no hours logged → worked but not scheduled.
+  // `gapBefore` inserts a blank line between groups.
+  const abc = (a: ScheduleCrew, b: ScheduleCrew) =>
+    a.worker.localeCompare(b.worker, undefined, { sensitivity: "base" });
   const jobs = data.jobs.map((j) => {
-    const lead = j.crew.find((c) => c.isLead);
-    const others = j.crew
-      .filter((c) => !c.isLead)
-      .sort((a, b) => a.worker.localeCompare(b.worker, undefined, { sensitivity: "base" }));
-    return { ...j, ordered: lead ? [lead, ...others] : others };
+    const lead = j.crew.find((c) => c.isLead && !c.unscheduled);
+    const rest = j.crew.filter((c) => c !== lead);
+    const worked = rest.filter((c) => !c.unscheduled && c.hours != null).sort(abc);
+    const noHours = rest.filter((c) => !c.unscheduled && c.hours == null).sort(abc);
+    const walkOn = rest.filter((c) => c.unscheduled).sort(abc);
+    const ordered: (ScheduleCrew & { gapBefore?: boolean })[] = [];
+    if (lead) ordered.push(lead);
+    worked.forEach((c, i) => ordered.push({ ...c, gapBefore: i === 0 && !!lead }));
+    noHours.forEach((c, i) => ordered.push({ ...c, gapBefore: i === 0 && ordered.length > 0 }));
+    walkOn.forEach((c, i) => ordered.push({ ...c, gapBefore: i === 0 && ordered.length > 0 }));
+    return { ...j, ordered };
   });
 
   // Group into rows of up to COLS.
@@ -93,17 +103,18 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
   const totalCrew = data.jobs.reduce((s, j) => s + j.crew.filter((c) => !c.unscheduled).length, 0);
   page.drawText(`${data.jobs.length} jobs · ${totalCrew} crew`, { x: MARGIN, y: PH - MARGIN - 40, size: 10, font, color: gray });
 
-  // Key — explains what the name colours / hours mean on this sheet.
+  // Key — colour tells the story; hours are shown next to each name.
   {
     const ky = PH - MARGIN - 54;
     let kx = MARGIN;
     const chip = (label: string, color: any) => {
-      page.drawText(label, { x: kx, y: ky, size: 7.5, font, color });
-      kx += font.widthOfTextAtSize(label, 7.5) + 14;
+      page.drawCircle({ x: kx + 3, y: ky + 3, size: 3, color });
+      page.drawText(label, { x: kx + 10, y: ky, size: 8, font, color: steel });
+      kx += 10 + font.widthOfTextAtSize(label, 8) + 18;
     };
-    chip("* 8h = scheduled & worked", steel);
-    chip("NAME 8h = worked, not scheduled", amber);
-    chip("NAME = scheduled, no hours", faded);
+    chip("Worked", steel);
+    chip("Not scheduled", amber);
+    chip("No hours logged", faded);
   }
   let y = PH - MARGIN - 70;
 
@@ -120,7 +131,8 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     yy -= headH;
     pg.drawLine({ start: { x, y: yy }, end: { x: x + colW, y: yy }, thickness: 0.6, color: line });
     yy -= 14;
-    for (const c of job.ordered) {
+    for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean })[]) {
+      if (c.gapBefore) yy -= 5; // blank space between groups
       const worked = c.hours != null;
       // Name colour reflects what actually happened against the plan.
       const nameColor = c.unscheduled
@@ -130,8 +142,7 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
         : worked
         ? steel                       // scheduled and showed up
         : faded;                      // scheduled, no hours logged
-      const suffix = worked ? `  ${c.unscheduled ? "" : "* "}${c.hours}h` : "";
-      const nm = c.worker.toUpperCase() + suffix;
+      const nm = c.worker.toUpperCase() + (worked ? `  ${c.hours}h` : "");
       const lines = wrap(nm, c.isLead ? bold : font, 8.5, colW - 8);
       for (let li = 0; li < lines.length; li++) {
         pg.drawText(lines[li], {
@@ -149,14 +160,21 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
   for (const row of rows) {
     // Row height = header + tallest column's crew lines.
     let maxLines = 0;
+    let maxGaps = 0;
     for (const job of row) {
       let lines = 0;
-      for (const c of job.ordered) {
-        lines += wrap(c.worker.toUpperCase(), c.isLead ? bold : font, 8.5, colW - 8).length;
+      let gaps = 0;
+      for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean })[]) {
+        // Measure the same string that gets drawn (name + hours) so wrapped
+        // lines are counted correctly, and reserve the between-group gaps.
+        const nm = c.worker.toUpperCase() + (c.hours != null ? `  ${c.hours}h` : "");
+        lines += wrap(nm, c.isLead ? bold : font, 8.5, colW - 8).length;
+        if (c.gapBefore) gaps++;
       }
       maxLines = Math.max(maxLines, lines);
+      maxGaps = Math.max(maxGaps, gaps);
     }
-    const rowH = headH + 14 + maxLines * lineH + rowGap;
+    const rowH = headH + 14 + maxLines * lineH + maxGaps * 5 + rowGap;
 
     // If the row won't fit, move the whole row to a new page.
     if (y - rowH < MARGIN && y < PH - MARGIN - 60) {

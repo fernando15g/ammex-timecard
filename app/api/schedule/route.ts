@@ -309,11 +309,14 @@ export async function GET(req: NextRequest) {
       jg.crew.push({ worker, isLead });
     }
 
-    // Overlay what ACTUALLY happened: hours for scheduled people who worked,
-    // plus anyone who worked the job without being scheduled (listed after the
-    // scheduled crew so the plan reads first).
-    const actuals = await actualsForDate(notion, targetDate);
+    // Overlay what ACTUALLY happened — ONLY when explicitly requested
+    // (?actuals=1, used by the read-only past-schedules view). The planning
+    // editor never asks for it, so walk-ons can't reach a view that saves.
     const jobs = Array.from(byJob.values());
+    const wantActuals = req.nextUrl.searchParams.get("actuals") === "1";
+    const actuals = wantActuals
+      ? await actualsForDate(notion, targetDate)
+      : new Map<string, Map<string, { worker: string; hours: number }>>();
     for (const jg of jobs) {
       const worked = actuals.get(jg.jobPageId);
       if (!worked) continue;

@@ -1858,9 +1858,14 @@ function SchedulePanel({
           jobPageId: j.jobPageId,
           name: j.name,
           jobId: j.jobId,
-          crew: [...(j.crew || [])].sort(
-            (a: any, b: any) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0)
-          ),
+          // Lead first, then scheduled crew, then anyone who worked the job
+          // without being scheduled (shown last, in amber).
+          crew: [...(j.crew || [])].sort((a: any, b: any) => {
+            const aU = a.unscheduled ? 1 : 0;
+            const bU = b.unscheduled ? 1 : 0;
+            if (aU !== bU) return aU - bU;
+            return (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0);
+          }),
         }))
       );
       setHistEmpty((d.jobs || []).length === 0);
@@ -1890,19 +1895,19 @@ function SchedulePanel({
     setHistMsg("");
     const today = localISO(new Date()).slice(0, 10);
     // Default: today; if today has nothing, walk back to the last scheduled day.
-    loadHist(`/api/schedule?recent=1&before=${today}`);
+    loadHist(`/api/schedule?recent=1&actuals=1&before=${today}`);
   }
   function histPrev() {
     if (!histDate) return;
-    loadHist(`/api/schedule?recent=1&before=${isoAddDays(histDate, -1)}`);
+    loadHist(`/api/schedule?recent=1&actuals=1&before=${isoAddDays(histDate, -1)}`);
   }
   function histNext() {
     if (!histDate) return;
-    loadHist(`/api/schedule?recent=1&after=${isoAddDays(histDate, 1)}`);
+    loadHist(`/api/schedule?recent=1&actuals=1&after=${isoAddDays(histDate, 1)}`);
   }
   function histJump(d: string) {
     if (!d) return;
-    loadHist(`/api/schedule?date=${d}`, d);
+    loadHist(`/api/schedule?date=${d}&actuals=1`, d);
   }
 
   function addJob(j: { id: string; name: string; jobId: string }) {
@@ -1976,17 +1981,17 @@ function SchedulePanel({
       .map((j) => j.name);
   }
 
-  const totalCrew = jobs.reduce(
-    (s, j) => s + j.crew.filter((c) => !(c as any).unscheduled).length,
-    0
-  );
+  const totalCrew = jobs.reduce((s, j) => s + j.crew.length, 0);
 
   const [exporting, setExporting] = useState<"" | "day" | "week">("");
-  // Download the schedule PDF (plan + actuals) for the selected day or its week.
+  const [exportOpen, setExportOpen] = useState(false);
+  // Download the past-schedule PDF (plan + actuals) for the day being viewed,
+  // or the Mon–Sun week containing it.
   async function exportSchedulePdf(range: "day" | "week") {
+    if (!histDate) return;
     setExporting(range);
     try {
-      const r = await fetch(`/api/schedule?export=${range}&date=${date}`);
+      const r = await fetch(`/api/schedule?export=${range}&date=${histDate}`);
       const d = await r.json();
       if (!d?.ok || !d.pdf) {
         alert(d?.error || "Couldn't build the PDF.");
@@ -2077,12 +2082,45 @@ function SchedulePanel({
             </button>
           </div>
 
-          {/* Prominent date */}
-          <div className="text-center mb-4">
-            <div className="text-safety text-2xl font-extrabold tracking-tight">
-              {histDate ? prettyScheduleDate(histDate) : "—"}
+          {/* Export (top-left) + prominent date */}
+          <div className="relative mb-4">
+            <div className="absolute left-0 top-0">
+              <button
+                onClick={() => setExportOpen((o) => !o)}
+                disabled={!!exporting || !histDate}
+                className="bg-graphite border border-line rounded-full px-3 h-9 text-concrete text-xs font-bold inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <path d="M7 10l5 5 5-5" />
+                  <path d="M12 15V3" />
+                </svg>
+                {exporting ? "Building…" : "PDF"}
+                <span className="text-rebar">▾</span>
+              </button>
+              {exportOpen && !exporting && (
+                <div className="absolute left-0 mt-1 z-20 bg-graphite border border-line rounded-xl overflow-hidden shadow-lg min-w-[150px]">
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("day"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel border-b border-line/60"
+                  >
+                    This day
+                  </button>
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("week"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel"
+                  >
+                    This week
+                  </button>
+                </div>
+              )}
             </div>
-            <div className="text-rebar text-xs mt-1">read-only</div>
+            <div className="text-center">
+              <div className="text-safety text-2xl font-extrabold tracking-tight">
+                {histDate ? prettyScheduleDate(histDate) : "—"}
+              </div>
+              <div className="text-rebar text-xs mt-1">read-only</div>
+            </div>
           </div>
 
           {/* Day navigation — fixed sides, centered picker, no wrapping */}
@@ -2133,23 +2171,52 @@ function SchedulePanel({
                   )}
                 </div>
                 <div className="space-y-1">
-                  {j.crew.map((c, i) => (
-                    <div key={i} className="flex items-center gap-2 text-sm">
-                      <span className="text-concrete">{c.worker}</span>
-                      {c.isLead && (
+                  {j.crew.map((c: any, i: number) => {
+                    const worked = c.hours != null;
+                    return (
+                      <div key={i} className="flex items-center gap-2 text-sm">
                         <span
-                          className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
-                          style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                          style={
+                            c.unscheduled
+                              ? { color: "#e0a63b" }                 // worked here, not scheduled
+                              : worked
+                              ? { color: "#f4f3f0" }                 // scheduled and showed up
+                              : { color: "#f4f3f0", opacity: 0.45 }  // scheduled, no hours
+                          }
                         >
-                          FOREMAN
+                          {c.worker}
                         </span>
-                      )}
-                    </div>
-                  ))}
+                        {worked && !c.unscheduled && (
+                          <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
+                        )}
+                        {worked && (
+                          <span
+                            className="text-[11px] font-bold"
+                            style={{ color: c.unscheduled ? "#e0a63b" : "#f4f3f0" }}
+                          >
+                            {c.hours}h
+                          </span>
+                        )}
+                        {c.isLead && (
+                          <span
+                            className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                            style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                          >
+                            FOREMAN
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
                   {j.crew.length === 0 && <div className="text-rebar text-xs">No crew listed.</div>}
                 </div>
                 <div className="text-rebar text-[11px] mt-2">
-                  {j.crew.length} {j.crew.length === 1 ? "worker" : "workers"}
+                  {j.crew.filter((c: any) => !c.unscheduled).length} scheduled
+                  {j.crew.some((c: any) => c.unscheduled) && (
+                    <span style={{ color: "#e0a63b" }}>
+                      {" "}· {j.crew.filter((c: any) => c.unscheduled).length} not scheduled
+                    </span>
+                  )}
                 </div>
               </div>
             ))}
@@ -2353,21 +2420,6 @@ function SchedulePanel({
               Clear all
             </button>
           )}
-          {/* PDF export with actuals — this day, or the whole week */}
-          <button
-            onClick={() => exportSchedulePdf("day")}
-            disabled={!!exporting}
-            className="text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0 disabled:opacity-50"
-          >
-            {exporting === "day" ? "Building…" : "PDF: day"}
-          </button>
-          <button
-            onClick={() => exportSchedulePdf("week")}
-            disabled={!!exporting}
-            className="text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0 disabled:opacity-50"
-          >
-            {exporting === "week" ? "Building…" : "PDF: week"}
-          </button>
         </div>
 
         {resultMsg && !showReview && (
@@ -2408,63 +2460,32 @@ function SchedulePanel({
                   ✕
                 </button>
               </div>
-              <div className="text-rebar text-xs mt-1 mb-2">
-                {j.crew.filter((c) => !(c as any).unscheduled).length} crew
-                {j.crew.some((c) => (c as any).unscheduled) && (
-                  <span style={{ color: "#e0a63b" }}>
-                    {" "}· +{j.crew.filter((c) => (c as any).unscheduled).length} unscheduled
-                  </span>
-                )}
-              </div>
+              <div className="text-rebar text-xs mt-1 mb-2">{j.crew.length} crew</div>
 
               <div className="space-y-1.5">
                 {j.crew.map((c) => (
                   <div
                     key={c.worker}
-                    onClick={() => { if (!(c as any).unscheduled) setLead(j.jobPageId, c.worker); }}
+                    onClick={() => setLead(j.jobPageId, c.worker)}
                     className={`flex items-center gap-2 bg-steel rounded-xl px-3 py-2.5 border ${
                       c.isLead ? "border-blue-500" : "border-transparent"
                     }`}
                   >
-                    <span
-                      className="flex-1 text-sm"
-                      style={
-                        (c as any).unscheduled
-                          ? { color: "#e0a63b" }                      // worked here, wasn't scheduled
-                          : (c as any).hours != null
-                          ? { color: "#f4f3f0" }                      // scheduled and showed up
-                          : { color: "#f4f3f0", opacity: 0.45 }       // scheduled, no hours logged
-                      }
-                    >
-                      {c.worker}
-                    </span>
-                    {(c as any).hours != null && !(c as any).unscheduled && (
-                      <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
-                    )}
-                    {(c as any).hours != null && (
-                      <span
-                        className="text-[11px] font-bold"
-                        style={{ color: (c as any).unscheduled ? "#e0a63b" : "#f4f3f0" }}
-                      >
-                        {(c as any).hours}h
-                      </span>
-                    )}
+                    <span className="flex-1 text-concrete text-sm">{c.worker}</span>
                     {c.isLead && (
                       <span className="bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
                         Lead
                       </span>
                     )}
-                    {!(c as any).unscheduled && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeWorker(j.jobPageId, c.worker);
-                        }}
-                        className="text-rebar"
-                      >
-                        ✕
-                      </button>
-                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeWorker(j.jobPageId, c.worker);
+                      }}
+                      className="text-rebar"
+                    >
+                      ✕
+                    </button>
                   </div>
                 ))}
               </div>

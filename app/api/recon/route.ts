@@ -435,6 +435,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     crewLogged: number;
     crewTotal: number;
     crewElsewhere: number;
+    cardSubmitted?: boolean; // the job's card came in without this person → likely no-show
   };
   const discs: Disc[] = [];
 
@@ -476,6 +477,10 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
         crewLogged: crew.logged,
         crewTotal: crew.total,
         crewElsewhere: crew.elsewhere,
+        // The foreman's card for this job+date DID come in, but this person
+        // wasn't on it — strong signal they didn't show up (vs. the card simply
+        // not being submitted yet).
+        cardSubmitted: loggedOnJobDate.has(`${row.jobId}|${row.date}`),
       });
     };
     if (tcs.length === 0) {

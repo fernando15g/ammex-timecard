@@ -8,6 +8,8 @@ import {
   PROJECT_PROPS,
   PROJECTS_DB_ID,
   PAYROLL_RECIPIENT,
+  TIMECARDS_DB_ID,
+  TIMECARD_PROPS,
 } from "@/lib/notion";
 import { buildSchedulePdf, ScheduleData, ScheduleJob } from "@/lib/schedule-pdf";
 
@@ -22,6 +24,104 @@ interface Assignment {
   jobName: string;
   jobId: string;
   isLead: boolean;
+}
+
+
+// Actual hours worked per job for a date, from the Timecards DB. Used to show
+// what really happened against the plan: who showed up (and for how long), and
+// who worked the job without being scheduled. Payable hours only (voided and
+// on-hold cards excluded), consistent with the reports.
+async function actualsForDate(
+  notion: Client,
+  dateISO: string
+): Promise<Map<string, Map<string, { worker: string; hours: number }>>> {
+  const byJob = new Map<string, Map<string, { worker: string; hours: number }>>();
+  try {
+    let cursor: string | undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: TIMECARDS_DB_ID,
+        filter: {
+          and: [
+            { property: TIMECARD_PROPS.date, date: { equals: dateISO } },
+            { property: TIMECARD_PROPS.voided, checkbox: { equals: false } },
+            { property: TIMECARD_PROPS.underReview, checkbox: { equals: false } },
+          ],
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      for (const pg of res.results) {
+        const p = pg.properties || {};
+        const worker = (p[TIMECARD_PROPS.worker]?.title || [])
+          .map((t: any) => t.plain_text).join("").replace(/\s+/g, " ").trim();
+        const jobPageId = p[TIMECARD_PROPS.projectHelper]?.relation?.[0]?.id || "";
+        const hours = typeof p[TIMECARD_PROPS.hours]?.number === "number" ? p[TIMECARD_PROPS.hours].number : 0;
+        if (!worker || !jobPageId) continue;
+        let m = byJob.get(jobPageId);
+        if (!m) { m = new Map(); byJob.set(jobPageId, m); }
+        const k = worker.toLowerCase();
+        const ex = m.get(k);
+        if (ex) ex.hours = Math.round((ex.hours + hours) * 100) / 100;
+        else m.set(k, { worker, hours });
+      }
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch { /* actuals are additive — never block the schedule */ }
+  return byJob;
+}
+
+
+// Load a full ScheduleData (plan + actuals) for one date. Shared by the
+// on-demand PDF export so the exported sheet matches what's on screen.
+async function loadScheduleForDate(notion: Client, dateISO: string): Promise<ScheduleData> {
+  const rows: any[] = [];
+  let cursor: string | undefined = undefined;
+  do {
+    const resp: any = await notion.databases.query({
+      database_id: SCHEDULE_DB_ID,
+      start_cursor: cursor,
+      page_size: 100,
+      filter: { property: SCHEDULE_PROPS.date, date: { equals: dateISO } },
+    });
+    rows.push(...resp.results);
+    cursor = resp.has_more ? resp.next_cursor : undefined;
+  } while (cursor);
+
+  const jobIds = rows
+    .map((r) => r.properties?.[SCHEDULE_PROPS.job]?.relation?.[0]?.id)
+    .filter(Boolean);
+  const lookup = await jobLookup(notion, jobIds);
+
+  const byJob = new Map<string, ScheduleJob>();
+  for (const r of rows) {
+    const props = r.properties || {};
+    const worker = (props[SCHEDULE_PROPS.worker]?.title || [])
+      .map((t: any) => t.plain_text).join("") || "";
+    const jobPageId = props[SCHEDULE_PROPS.job]?.relation?.[0]?.id || "";
+    const isLead = !!props[SCHEDULE_PROPS.isLead]?.checkbox;
+    if (!worker || !jobPageId) continue;
+    const info = lookup.get(jobPageId) || { name: "(unknown)", jobId: "" };
+    let jg = byJob.get(jobPageId);
+    if (!jg) { jg = { jobPageId, name: info.name, jobId: info.jobId, crew: [] }; byJob.set(jobPageId, jg); }
+    jg.crew.push({ worker, isLead });
+  }
+
+  const actuals = await actualsForDate(notion, dateISO);
+  const jobs = Array.from(byJob.values());
+  for (const jg of jobs) {
+    const worked = actuals.get(jg.jobPageId);
+    if (!worked) continue;
+    const scheduledKeys = new Set(jg.crew.map((c) => c.worker.toLowerCase()));
+    for (const c of jg.crew) {
+      const hit = worked.get(c.worker.toLowerCase());
+      if (hit) c.hours = hit.hours;
+    }
+    for (const [k, v] of worked) {
+      if (!scheduledKeys.has(k)) jg.crew.push({ worker: v.worker, isLead: false, hours: v.hours, unscheduled: true });
+    }
+  }
+  return { date: dateISO, jobs };
 }
 
 // Resolve a Projects page id -> { name, jobId }, cached per request.
@@ -88,6 +188,56 @@ export async function GET(req: NextRequest) {
   const recent = req.nextUrl.searchParams.get("recent");
   const before = req.nextUrl.searchParams.get("before")?.trim(); // review mode: most recent day <= this
   const after = req.nextUrl.searchParams.get("after")?.trim(); // review mode: earliest day >= this
+  const exportRange = req.nextUrl.searchParams.get("export")?.trim(); // "day" | "week"
+
+  // On-demand PDF export of the schedule WITH actuals (who showed, who walked
+  // on). Returns base64 so the client can download it. "week" covers Mon–Sun
+  // of the week containing `date`, one page-set per day that has a schedule.
+  if (exportRange && date) {
+    try {
+      const dates: string[] = [];
+      if (exportRange === "week") {
+        const d = new Date(date + "T00:00:00Z");
+        const dow = d.getUTCDay();               // 0=Sun
+        const monOffset = dow === 0 ? -6 : 1 - dow;
+        const mon = new Date(d.getTime() + monOffset * 86400000);
+        for (let i = 0; i < 7; i++) {
+          dates.push(new Date(mon.getTime() + i * 86400000).toISOString().slice(0, 10));
+        }
+      } else {
+        dates.push(date);
+      }
+
+      const { PDFDocument } = await import("pdf-lib");
+      const merged = await PDFDocument.create();
+      let included = 0;
+      for (const dt of dates) {
+        const data = await loadScheduleForDate(notion, dt);
+        if (!data.jobs.length) continue; // skip days with no schedule
+        const bytes = await buildSchedulePdf(data);
+        const doc = await PDFDocument.load(bytes);
+        const pages = await merged.copyPages(doc, doc.getPageIndices());
+        pages.forEach((p) => merged.addPage(p));
+        included++;
+      }
+      if (!included) {
+        return NextResponse.json({ ok: false, error: "No schedule found for that range." }, { status: 404 });
+      }
+      const out = await merged.save();
+      const name =
+        exportRange === "week"
+          ? `Ammex_Schedule_Week_${dates[0]}_to_${dates[6]}.pdf`
+          : `Ammex_Schedule_${date}.pdf`;
+      return NextResponse.json({
+        ok: true,
+        filename: name,
+        pdf: Buffer.from(out).toString("base64"),
+        days: included,
+      });
+    } catch (err: any) {
+      return NextResponse.json({ ok: false, error: err?.message || "Export failed" }, { status: 502 });
+    }
+  }
 
   try {
     let targetDate = date || "";
@@ -159,10 +309,27 @@ export async function GET(req: NextRequest) {
       jg.crew.push({ worker, isLead });
     }
 
-    return NextResponse.json({
-      date: targetDate,
-      jobs: Array.from(byJob.values()),
-    });
+    // Overlay what ACTUALLY happened: hours for scheduled people who worked,
+    // plus anyone who worked the job without being scheduled (listed after the
+    // scheduled crew so the plan reads first).
+    const actuals = await actualsForDate(notion, targetDate);
+    const jobs = Array.from(byJob.values());
+    for (const jg of jobs) {
+      const worked = actuals.get(jg.jobPageId);
+      if (!worked) continue;
+      const scheduledKeys = new Set(jg.crew.map((c: any) => c.worker.toLowerCase()));
+      for (const c of jg.crew as any[]) {
+        const hit = worked.get(c.worker.toLowerCase());
+        if (hit) c.hours = hit.hours; // showed up
+      }
+      for (const [k, v] of worked) {
+        if (!scheduledKeys.has(k)) {
+          (jg.crew as any[]).push({ worker: v.worker, isLead: false, hours: v.hours, unscheduled: true });
+        }
+      }
+    }
+
+    return NextResponse.json({ date: targetDate, jobs });
   } catch (err: any) {
     return NextResponse.json(
       { error: err?.message || "Failed to load schedule" },

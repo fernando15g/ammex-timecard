@@ -1976,7 +1976,36 @@ function SchedulePanel({
       .map((j) => j.name);
   }
 
-  const totalCrew = jobs.reduce((s, j) => s + j.crew.length, 0);
+  const totalCrew = jobs.reduce(
+    (s, j) => s + j.crew.filter((c) => !(c as any).unscheduled).length,
+    0
+  );
+
+  const [exporting, setExporting] = useState<"" | "day" | "week">("");
+  // Download the schedule PDF (plan + actuals) for the selected day or its week.
+  async function exportSchedulePdf(range: "day" | "week") {
+    setExporting(range);
+    try {
+      const r = await fetch(`/api/schedule?export=${range}&date=${date}`);
+      const d = await r.json();
+      if (!d?.ok || !d.pdf) {
+        alert(d?.error || "Couldn't build the PDF.");
+      } else {
+        const bin = atob(d.pdf);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = d.filename || "schedule.pdf";
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      }
+    } catch {
+      alert("Couldn't build the PDF.");
+    }
+    setExporting("");
+  }
 
   async function save() {
     setSaving(true);
@@ -1984,6 +2013,9 @@ function SchedulePanel({
     const assignments: any[] = [];
     for (const j of jobs) {
       for (const c of j.crew) {
+        // People shown only because they WORKED this job (not scheduled) are
+        // display-only actuals — never write them back into the schedule.
+        if ((c as any).unscheduled) continue;
         assignments.push({
           worker: c.worker,
           jobPageId: j.jobPageId,
@@ -2321,6 +2353,21 @@ function SchedulePanel({
               Clear all
             </button>
           )}
+          {/* PDF export with actuals — this day, or the whole week */}
+          <button
+            onClick={() => exportSchedulePdf("day")}
+            disabled={!!exporting}
+            className="text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0 disabled:opacity-50"
+          >
+            {exporting === "day" ? "Building…" : "PDF: day"}
+          </button>
+          <button
+            onClick={() => exportSchedulePdf("week")}
+            disabled={!!exporting}
+            className="text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0 disabled:opacity-50"
+          >
+            {exporting === "week" ? "Building…" : "PDF: week"}
+          </button>
         </div>
 
         {resultMsg && !showReview && (
@@ -2361,32 +2408,63 @@ function SchedulePanel({
                   ✕
                 </button>
               </div>
-              <div className="text-rebar text-xs mt-1 mb-2">{j.crew.length} crew</div>
+              <div className="text-rebar text-xs mt-1 mb-2">
+                {j.crew.filter((c) => !(c as any).unscheduled).length} crew
+                {j.crew.some((c) => (c as any).unscheduled) && (
+                  <span style={{ color: "#e0a63b" }}>
+                    {" "}· +{j.crew.filter((c) => (c as any).unscheduled).length} unscheduled
+                  </span>
+                )}
+              </div>
 
               <div className="space-y-1.5">
                 {j.crew.map((c) => (
                   <div
                     key={c.worker}
-                    onClick={() => setLead(j.jobPageId, c.worker)}
+                    onClick={() => { if (!(c as any).unscheduled) setLead(j.jobPageId, c.worker); }}
                     className={`flex items-center gap-2 bg-steel rounded-xl px-3 py-2.5 border ${
                       c.isLead ? "border-blue-500" : "border-transparent"
                     }`}
                   >
-                    <span className="flex-1 text-concrete text-sm">{c.worker}</span>
+                    <span
+                      className="flex-1 text-sm"
+                      style={
+                        (c as any).unscheduled
+                          ? { color: "#e0a63b" }                      // worked here, wasn't scheduled
+                          : (c as any).hours != null
+                          ? { color: "#f4f3f0" }                      // scheduled and showed up
+                          : { color: "#f4f3f0", opacity: 0.45 }       // scheduled, no hours logged
+                      }
+                    >
+                      {c.worker}
+                    </span>
+                    {(c as any).hours != null && !(c as any).unscheduled && (
+                      <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
+                    )}
+                    {(c as any).hours != null && (
+                      <span
+                        className="text-[11px] font-bold"
+                        style={{ color: (c as any).unscheduled ? "#e0a63b" : "#f4f3f0" }}
+                      >
+                        {(c as any).hours}h
+                      </span>
+                    )}
                     {c.isLead && (
                       <span className="bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
                         Lead
                       </span>
                     )}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeWorker(j.jobPageId, c.worker);
-                      }}
-                      className="text-rebar"
-                    >
-                      ✕
-                    </button>
+                    {!(c as any).unscheduled && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeWorker(j.jobPageId, c.worker);
+                        }}
+                        className="text-rebar"
+                      >
+                        ✕
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -4315,6 +4393,15 @@ function DiscCard({
           >
             {kindLabel}
           </div>
+          {isNoTimecard && d.cardSubmitted && (
+            <span
+              className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ml-1.5"
+              style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}
+              title="The foreman's card for this job came in without this person — likely a no-show."
+            >
+              LEFT OFF CARD
+            </span>
+          )}
         </div>
         {isNoTimecard && onViewCrew ? (
           <button
@@ -7353,6 +7440,7 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
   const [adding, setAdding] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
   const [q, setQ] = useState("");
+  const [confirmPerson, setConfirmPerson] = useState<RosterPerson | null>(null);
 
   useLockBodyScroll();
 
@@ -7444,7 +7532,8 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
             </div>
             {active.map((p) => (
               <RosterRow key={p.id} p={p} busy={busyId === p.id}
-                onEdit={() => setEditing(p)} onToggle={() => setActive(p, false)} />
+                onEdit={() => setEditing(p)} onToggle={() => setActive(p, false)}
+                onConfirm={() => setConfirmPerson(p)} />
             ))}
             {active.length === 0 && (
               <div className="text-rebar text-sm px-1 py-2">No active workers.</div>
@@ -7461,7 +7550,8 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
                 {(showInactive || !!query) &&
                   inactive.map((p) => (
                     <RosterRow key={p.id} p={p} busy={busyId === p.id} inactive
-                      onEdit={() => setEditing(p)} onToggle={() => setActive(p, true)} />
+                      onEdit={() => setEditing(p)} onToggle={() => setActive(p, true)}
+                      onConfirm={() => setConfirmPerson(p)} />
                   ))}
               </div>
             )}
@@ -7482,24 +7572,42 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
           onSaved={() => { setAdding(false); setEditing(null); load(); }}
         />
       )}
+
+      {confirmPerson && (
+        <ConfirmWorkerModal
+          worker={{ id: confirmPerson.id, name: confirmPerson.name }}
+          onClose={() => setConfirmPerson(null)}
+          onDone={() => { setConfirmPerson(null); load(); }}
+        />
+      )}
     </div>
   );
 }
 
 function RosterRow({
-  p, busy, inactive, onEdit, onToggle,
+  p, busy, inactive, onEdit, onToggle, onConfirm,
 }: {
   p: RosterPerson; busy: boolean; inactive?: boolean;
-  onEdit: () => void; onToggle: () => void;
+  onEdit: () => void; onToggle: () => void; onConfirm?: () => void;
 }) {
+  const unconfirmed = (p.status || "").trim().toLowerCase() === "unconfirmed";
   return (
     <div
       className="bg-graphite border border-line rounded-2xl px-4 py-3 mb-2 flex items-center gap-3"
       style={inactive ? { opacity: 0.6 } : undefined}
     >
       <div className="flex-1 min-w-0">
-        <div className="text-concrete font-bold text-[15px] flex items-center gap-2">
+        <div className="text-concrete font-bold text-[15px] flex items-center gap-2 flex-wrap">
           {p.name}
+          {unconfirmed && (
+            <button
+              onClick={onConfirm}
+              className="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.55)", background: "rgba(229,83,60,.10)" }}
+            >
+              UNCONFIRMED
+            </button>
+          )}
           {busy && <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />}
         </div>
         <div className="text-rebar text-xs mt-0.5">

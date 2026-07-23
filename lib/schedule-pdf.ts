@@ -3,6 +3,8 @@ import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage } from "pdf-lib";
 export interface ScheduleCrew {
   worker: string;
   isLead: boolean;
+  hours?: number;       // actual payable hours logged on this job that day
+  unscheduled?: boolean; // worked this job without being scheduled on it
 }
 export interface ScheduleJob {
   jobPageId: string;
@@ -19,6 +21,9 @@ const steel = rgb(0.11, 0.13, 0.15);
 const blue = rgb(0.12, 0.45, 0.85);
 const gray = rgb(0.45, 0.48, 0.52);
 const line = rgb(0.78, 0.8, 0.82);
+const amber = rgb(0.72, 0.5, 0.05);   // worked the job but wasn't scheduled
+const green = rgb(0.20, 0.55, 0.32);  // scheduled and showed up
+const faded = rgb(0.62, 0.64, 0.67);  // scheduled but no hours logged
 const headBg = rgb(1, 0.93, 0.85);
 const MARGIN = 36;
 
@@ -85,9 +90,22 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
   // Title block
   page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y: PH - MARGIN - 4, size: 15, font: bold, color: steel });
   page.drawText(longDate(data.date).toUpperCase(), { x: MARGIN, y: PH - MARGIN - 24, size: 12, font: bold, color: steel });
-  const totalCrew = data.jobs.reduce((s, j) => s + j.crew.length, 0);
+  const totalCrew = data.jobs.reduce((s, j) => s + j.crew.filter((c) => !c.unscheduled).length, 0);
   page.drawText(`${data.jobs.length} jobs · ${totalCrew} crew`, { x: MARGIN, y: PH - MARGIN - 40, size: 10, font, color: gray });
-  let y = PH - MARGIN - 56;
+
+  // Key — explains what the name colours / hours mean on this sheet.
+  {
+    const ky = PH - MARGIN - 54;
+    let kx = MARGIN;
+    const chip = (label: string, color: any) => {
+      page.drawText(label, { x: kx, y: ky, size: 7.5, font, color });
+      kx += font.widthOfTextAtSize(label, 7.5) + 14;
+    };
+    chip("* 8h = scheduled & worked", steel);
+    chip("NAME 8h = worked, not scheduled", amber);
+    chip("NAME = scheduled, no hours", faded);
+  }
+  let y = PH - MARGIN - 70;
 
   function drawColumn(pg: PDFPage, x: number, topY: number, job: typeof jobs[number]) {
     let yy = topY;
@@ -103,7 +121,17 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     pg.drawLine({ start: { x, y: yy }, end: { x: x + colW, y: yy }, thickness: 0.6, color: line });
     yy -= 14;
     for (const c of job.ordered) {
-      const nm = c.worker.toUpperCase();
+      const worked = c.hours != null;
+      // Name colour reflects what actually happened against the plan.
+      const nameColor = c.unscheduled
+        ? amber                       // worked here, wasn't scheduled
+        : c.isLead
+        ? blue
+        : worked
+        ? steel                       // scheduled and showed up
+        : faded;                      // scheduled, no hours logged
+      const suffix = worked ? `  ${c.unscheduled ? "" : "* "}${c.hours}h` : "";
+      const nm = c.worker.toUpperCase() + suffix;
       const lines = wrap(nm, c.isLead ? bold : font, 8.5, colW - 8);
       for (let li = 0; li < lines.length; li++) {
         pg.drawText(lines[li], {
@@ -111,7 +139,7 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
           y: yy,
           size: 8.5,
           font: c.isLead ? bold : font,
-          color: c.isLead ? blue : steel,
+          color: nameColor,
         });
         yy -= lineH;
       }

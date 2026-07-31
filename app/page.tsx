@@ -4551,6 +4551,7 @@ function ReconReviewView({
   const [msg, setMsg] = useState("");
   const [bulkGroup, setBulkGroup] = useState<string | null>(null); // "job|date" key
   const [editGroup, setEditGroup] = useState<string | null>(null); // full card edit
+  const [splitGroup, setSplitGroup] = useState<string | null>(null); // bulk split between two jobs
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Miss | null>(null);
 
@@ -4926,6 +4927,12 @@ function ReconReviewView({
                         className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
                       >
                         Edit date / details
+                      </button>
+                      <button
+                        onClick={() => setSplitGroup(g.key)}
+                        className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
+                      >
+                        Split between jobs
                       </button>
                     </div>
                   </div>
@@ -5417,6 +5424,23 @@ function ReconReviewView({
           }}
         />
       )}
+
+      {splitGroup && (() => {
+        const g = groups.find((x) => x.key === splitGroup);
+        if (!g) return null;
+        return (
+          <ReconBulkSplitModal
+            jobName={g.job}
+            dateLabel={prettyDate(g.date, lang)}
+            entries={g.items}
+            onClose={() => setSplitGroup(null)}
+            onDone={() => {
+              setSplitGroup(null);
+              load();
+            }}
+          />
+        );
+      })()}
 
       {editGroup && (() => {
         const g = groups.find((x) => x.key === editGroup);
@@ -7720,6 +7744,369 @@ function RosterEditModal({
             {busy ? "Saving…" : isEdit ? "Save" : "Add"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Bulk split: divide a whole submitted card between two jobs ----------
+// For when a foreman logged the whole crew under one job but the day was really
+// split (e.g. everyone did 6h on Job A + 2h on Job B). One default split applies
+// to the crew; individual workers can be adjusted or excluded (left untouched).
+// Balance is soft-checked: if someone's parts don't equal their original total,
+// you're warned but can proceed. Assigning both jobs clears the card from the
+// needs-project list. Reuses the same per-entry split op as the Lookup split.
+type BulkSplitRow = {
+  id: string;
+  worker: string;
+  total: number;
+  aHours: string;   // stays on Job A
+  bHours: string;   // moves to Job B
+  excluded: boolean; // leave this worker untouched (still needs project later)
+  foreman: string;
+  job: string;
+  date: string;
+};
+
+function ReconBulkSplitModal({
+  jobName,
+  dateLabel,
+  entries,
+  onClose,
+  onDone,
+}: {
+  jobName: string;
+  dateLabel: string;
+  entries: { id: string; worker: string; hours: number; foreman: string; job: string; date: string }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  useLockBodyScroll();
+  const [rows, setRows] = useState<BulkSplitRow[]>(
+    entries.map((e) => ({
+      id: e.id,
+      worker: e.worker,
+      total: e.hours,
+      aHours: String(e.hours),
+      bHours: "0",
+      excluded: false,
+      foreman: e.foreman,
+      job: e.job,
+      date: e.date,
+    }))
+  );
+  const [defaultB, setDefaultB] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [warnOpen, setWarnOpen] = useState(false);
+
+  // Job pickers (A = where remaining hours stay, B = where moved hours go)
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickFor, setPickFor] = useState<"" | "A" | "B">("");
+  const [query, setQuery] = useState("");
+  const [jobA, setJobA] = useState<{ id: string; name: string } | null>(null);
+  const [jobB, setJobB] = useState<{ id: string; name: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => { if (Array.isArray(d?.projects)) setProjects(d.projects); })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  // Apply the default "move N hours to Job B" to every non-excluded worker:
+  // B = N (capped at their total), A = total - B.
+  function applyDefault() {
+    const n = parseFloat(defaultB);
+    if (isNaN(n) || n < 0) return;
+    setRows((cur) =>
+      cur.map((r) => {
+        if (r.excluded) return r;
+        const b = Math.min(n, r.total);
+        return { ...r, bHours: String(+b.toFixed(2)), aHours: String(+(r.total - b).toFixed(2)) };
+      })
+    );
+  }
+
+  function setRow(id: string, field: "aHours" | "bHours", v: string) {
+    setRows((cur) =>
+      cur.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, [field]: v };
+        // Mirror the Lookup split: editing one side auto-fills the other to
+        // keep the total, but both stay editable (soft check catches drift).
+        const num = parseFloat(v);
+        if (!isNaN(num) && num >= 0 && num <= r.total) {
+          const other = +(r.total - num).toFixed(2);
+          if (field === "bHours") next.aHours = String(other);
+          else next.bHours = String(other);
+        }
+        return next;
+      })
+    );
+  }
+
+  const included = rows.filter((r) => !r.excluded);
+  const splitting = included.filter((r) => parseFloat(r.bHours) > 0);
+  const assignOnly = included.filter((r) => !(parseFloat(r.bHours) > 0)); // all hours stay on A
+  const unbalanced = included.filter((r) => {
+    const a = parseFloat(r.aHours);
+    const b = parseFloat(r.bHours);
+    return isNaN(a) || isNaN(b) || a < 0 || b < 0 || Math.abs(a + b - r.total) > 0.001;
+  });
+  const invalid = included.some((r) => {
+    const a = parseFloat(r.aHours);
+    const b = parseFloat(r.bHours);
+    return isNaN(a) || isNaN(b) || a < 0 || b < 0 || (a === 0 && b === 0);
+  });
+  const canSave = !!jobA && !!jobB && included.length > 0 && !invalid && jobA.id !== jobB.id;
+
+  function trySave() {
+    if (unbalanced.length > 0) setWarnOpen(true);
+    else void save();
+  }
+
+  async function save() {
+    setWarnOpen(false);
+    setSaving(true);
+    let done = 0;
+    let failed = 0;
+
+    // Workers keeping all hours on Job A → just assign the project (no split).
+    if (assignOnly.length > 0) {
+      setProgress(`Assigning ${assignOnly.length}…`);
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "bulk_project", ids: assignOnly.map((r) => r.id), projectId: jobA!.id }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.ok) done += assignOnly.length;
+      else failed += assignOnly.length;
+    }
+
+    // Workers splitting → one split op each (same op the Lookup split uses).
+    for (let i = 0; i < splitting.length; i++) {
+      const r = splitting[i];
+      setProgress(`Splitting ${i + 1}/${splitting.length}…`);
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "split",
+          id: r.id,
+          origHours: parseFloat(r.aHours),
+          origProjectId: jobA!.id,
+          origProjectName: jobA!.name,
+          newHours: parseFloat(r.bHours),
+          newProjectId: jobB!.id,
+          newProjectName: jobB!.name,
+          worker: r.worker,
+          date: r.date,
+          foreman: r.foreman,
+          job: r.job,
+        }),
+      }).then((x) => x.json()).catch(() => null);
+      if (res?.ok) done++;
+      else failed++;
+    }
+
+    setSaving(false);
+    if (failed === 0) onDone();
+    else setProgress(`${done} saved, ${failed} failed — check and retry.`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-end sm:items-center justify-center sm:p-5">
+      <div className="bg-graphite border border-line rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] flex flex-col">
+        <div className="p-5 pb-3">
+          <div className="text-concrete font-bold text-lg">Split between jobs</div>
+          <div className="text-rebar text-sm mt-0.5">
+            "{jobName}" · {dateLabel} · {entries.length} workers
+          </div>
+        </div>
+
+        {pickFor ? (
+          <div className="flex-1 overflow-y-auto overscroll-contain px-3 pb-3">
+            <div className="px-2 pb-2">
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            {filtered.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => {
+                  if (pickFor === "A") setJobA({ id: p.id, name: p.name });
+                  else setJobB({ id: p.id, name: p.name });
+                  setPickFor(""); setQuery("");
+                }}
+                className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+              >
+                <span>{p.name}</span>
+                {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+              </button>
+            ))}
+            {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            <button
+              onClick={() => { setPickFor(""); setQuery(""); }}
+              className="w-full text-center text-rebar text-sm font-bold py-3"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <>
+            <div className="px-5 space-y-2">
+              <button
+                onClick={() => setPickFor("A")}
+                className="w-full bg-steel border border-line rounded-xl px-3 py-3 text-left"
+              >
+                <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job A — hours stay</div>
+                <div className={jobA ? "text-concrete font-bold" : "text-rebar"}>
+                  {jobA ? jobA.name : "Pick a project…"}
+                </div>
+              </button>
+              <button
+                onClick={() => setPickFor("B")}
+                className="w-full bg-steel border border-line rounded-xl px-3 py-3 text-left"
+              >
+                <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job B — hours move here</div>
+                <div className={jobB ? "text-concrete font-bold" : "text-rebar"}>
+                  {jobB ? jobB.name : "Pick a project…"}
+                </div>
+              </button>
+              {jobA && jobB && jobA.id === jobB.id && (
+                <div className="text-sm" style={{ color: "#e5533c" }}>Job A and Job B must be different.</div>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  value={defaultB}
+                  onChange={(e) => setDefaultB(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="e.g. 2"
+                  className="w-24 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center"
+                />
+                <div className="text-rebar text-sm flex-1">hours to Job B, everyone</div>
+                <button
+                  onClick={applyDefault}
+                  className="bg-steel border border-line text-concrete rounded-xl px-4 h-11 text-sm font-bold"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto overscroll-contain px-5 mt-3">
+              <div className="flex text-rebar text-[10px] font-bold uppercase tracking-wide pb-1">
+                <div className="flex-1">Worker</div>
+                <div className="w-16 text-center">Job A</div>
+                <div className="w-16 text-center">Job B</div>
+                <div className="w-14" />
+              </div>
+              {rows.map((r) => {
+                const a = parseFloat(r.aHours);
+                const b = parseFloat(r.bHours);
+                const bad = !r.excluded && (isNaN(a) || isNaN(b) || Math.abs(a + b - r.total) > 0.001);
+                return (
+                  <div
+                    key={r.id}
+                    className="flex items-center gap-2 py-2 border-t border-line/50"
+                    style={r.excluded ? { opacity: 0.45 } : undefined}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-concrete text-sm font-semibold truncate">{r.worker}</div>
+                      <div className="text-[11px]" style={{ color: bad ? "#e0a63b" : "#9aa3af" }}>
+                        {r.total}h total{bad ? ` · parts = ${((isNaN(a)?0:a)+(isNaN(b)?0:b)).toFixed(2)}h` : ""}
+                      </div>
+                    </div>
+                    <input
+                      value={r.aHours}
+                      onChange={(e) => setRow(r.id, "aHours", e.target.value)}
+                      disabled={r.excluded}
+                      inputMode="decimal"
+                      className="w-16 bg-steel border border-line rounded-lg h-10 text-center text-concrete disabled:opacity-40"
+                    />
+                    <input
+                      value={r.bHours}
+                      onChange={(e) => setRow(r.id, "bHours", e.target.value)}
+                      disabled={r.excluded}
+                      inputMode="decimal"
+                      className="w-16 bg-steel border border-line rounded-lg h-10 text-center text-concrete disabled:opacity-40"
+                    />
+                    <button
+                      onClick={() =>
+                        setRows((cur) => cur.map((x) => (x.id === r.id ? { ...x, excluded: !x.excluded } : x)))
+                      }
+                      className="w-14 text-[11px] font-bold text-rebar active:text-safety"
+                    >
+                      {r.excluded ? "Include" : "Skip"}
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="text-rebar text-[11px] py-2">
+                Skipped workers are left untouched and stay in this list. Workers with 0h on Job B are
+                just assigned Job A (no split).
+              </div>
+            </div>
+
+            <div className="p-5 pt-3">
+              {progress && <div className="text-rebar text-sm mb-2">{progress}</div>}
+              <div className="flex gap-2">
+                <button
+                  onClick={onClose}
+                  disabled={saving}
+                  className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={trySave}
+                  disabled={!canSave || saving}
+                  className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+                >
+                  {saving ? "Saving…" : "Split & assign"}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {warnOpen && (
+          <div className="absolute inset-0 z-10 bg-black/70 flex items-center justify-center p-6 rounded-2xl">
+            <div className="bg-graphite border border-line rounded-2xl p-5 w-full max-w-sm">
+              <div className="text-concrete font-bold mb-2">Hours don't add up</div>
+              <div className="text-rebar text-sm mb-4">
+                {unbalanced.length} {unbalanced.length === 1 ? "worker's" : "workers'"} parts don't
+                equal their original total (shown in amber). This will change their total hours.
+                Proceed anyway?
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setWarnOpen(false)}
+                  className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+                >
+                  Go back
+                </button>
+                <button
+                  onClick={() => void save()}
+                  className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+                >
+                  Proceed
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

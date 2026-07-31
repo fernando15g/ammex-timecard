@@ -4552,6 +4552,7 @@ function ReconReviewView({
   const [bulkGroup, setBulkGroup] = useState<string | null>(null); // "job|date" key
   const [editGroup, setEditGroup] = useState<string | null>(null); // full card edit
   const [splitGroup, setSplitGroup] = useState<string | null>(null); // bulk split between two jobs
+  const [voidGroup, setVoidGroup] = useState<string | null>(null); // void a whole junk card
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Miss | null>(null);
 
@@ -4933,6 +4934,13 @@ function ReconReviewView({
                         className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
                       >
                         Split between jobs
+                      </button>
+                      <button
+                        onClick={() => setVoidGroup(g.key)}
+                        className="text-xs font-semibold active:opacity-80 underline underline-offset-2"
+                        style={{ color: "#e5533c" }}
+                      >
+                        Void card
                       </button>
                     </div>
                   </div>
@@ -5436,6 +5444,23 @@ function ReconReviewView({
             onClose={() => setSplitGroup(null)}
             onDone={() => {
               setSplitGroup(null);
+              load();
+            }}
+          />
+        );
+      })()}
+
+      {voidGroup && (() => {
+        const g = groups.find((x) => x.key === voidGroup);
+        if (!g) return null;
+        return (
+          <ReconVoidCardModal
+            jobName={g.job}
+            dateLabel={prettyDate(g.date, lang)}
+            entries={g.items}
+            onClose={() => setVoidGroup(null)}
+            onDone={() => {
+              setVoidGroup(null);
               load();
             }}
           />
@@ -8105,6 +8130,117 @@ function ReconBulkSplitModal({
                 </button>
               </div>
             </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Void a whole junk card from the needs-project section ----------
+// For duplicate / wrong-day / test cards. Voids every entry on the card (never
+// deletes — voids are reversible and stay visible under Voided in Lookup) with
+// an optional shared note, and logs each to the Rec Log. Requires an explicit
+// confirmation since it affects the whole crew's entries at once.
+function ReconVoidCardModal({
+  jobName,
+  dateLabel,
+  entries,
+  onClose,
+  onDone,
+}: {
+  jobName: string;
+  dateLabel: string;
+  entries: { id: string; worker: string; date: string }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  useLockBodyScroll();
+  const [note, setNote] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState("");
+
+  async function voidAll() {
+    setSaving(true);
+    let done = 0;
+    let failed = 0;
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      setProgress(`Voiding ${i + 1}/${entries.length}…`);
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "void",
+          id: e.id,
+          voided: true,
+          note: note.trim() || "Voided card (needs-project)",
+          logWorker: e.worker,
+          logDate: e.date,
+        }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.ok) done++;
+      else failed++;
+    }
+    setSaving(false);
+    if (failed === 0) onDone();
+    else setProgress(`${done} voided, ${failed} failed — check Lookup and retry.`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-1">Void this card?</div>
+        <div className="text-rebar text-sm mb-4">
+          "{jobName}" · {dateLabel} — this voids all {entries.length}{" "}
+          {entries.length === 1 ? "entry" : "entries"} on the card. Voided entries don't count
+          toward hours or reports, but they're reversible and stay visible under Voided in Lookup.
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason (optional)
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. duplicate card, wrong day"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        {progress && <div className="text-rebar text-sm mb-3">{progress}</div>}
+        {!confirm ? (
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => setConfirm(true)}
+              className="flex-1 rounded-xl py-3 font-bold text-white"
+              style={{ background: "#e5533c" }}
+            >
+              Void card
+            </button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirm(false)}
+              disabled={saving}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            >
+              Go back
+            </button>
+            <button
+              onClick={voidAll}
+              disabled={saving}
+              className="flex-1 rounded-xl py-3 font-bold text-white disabled:opacity-60"
+              style={{ background: "#e5533c" }}
+            >
+              {saving ? "Voiding…" : `Yes, void ${entries.length}`}
+            </button>
           </div>
         )}
       </div>

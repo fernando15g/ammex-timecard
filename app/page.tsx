@@ -2988,6 +2988,39 @@ function ReconPanel({
   const [workers, setWorkers] = useState<string[]>([]);
   const [worker, setWorker] = useState<string>("");
   const [workerQuery, setWorkerQuery] = useState("");
+  const [cardMode, setCardMode] = useState(false); // Lookup: by-worker vs by-card
+  const [cards, setCards] = useState<any[]>([]);
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [openCard, setOpenCard] = useState<any | null>(null);
+  const [cardBulk, setCardBulk] = useState<"" | "project" | "split" | "void">("");
+  function loadCards(): Promise<any[]> {
+    setCardsLoading(true);
+    return fetch(`/api/recon?action=cards&start=${start}&end=${end}&today=${todayISO()}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const list = d?.submitted || [];
+        setCards(list);
+        setCardsLoading(false);
+        return list;
+      })
+      .catch(() => { setCards([]); setCardsLoading(false); return []; });
+  }
+  // After an edit from the card view: refetch and re-point the open card at the
+  // fresh copy (matched by job+foreman+date). If it no longer exists (e.g. the
+  // whole card was voided), close the detail view.
+  async function refreshOpenCard() {
+    const list = await loadCards();
+    setOpenCard((cur: any) => {
+      if (!cur) return cur;
+      const match = list.find(
+        (c: any) =>
+          (c.projectId || c.job) === (cur.projectId || cur.job) &&
+          c.foreman === cur.foreman &&
+          c.date === cur.date
+      );
+      return match || null;
+    });
+  }
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const [entries, setEntries] = useState<ReconEntry[]>([]);
@@ -3013,6 +3046,12 @@ function ReconPanel({
       })
       .catch(() => {});
   }, []);
+
+  // Load cards when in card mode (and when the date range changes).
+  useEffect(() => {
+    if (view === "find" && cardMode) loadCards();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, cardMode, start, end]);
 
   // Flags overview — refresh when on Lookup tab or the range changes.
   const loadFlagsOverview = useCallback(() => {
@@ -3087,6 +3126,7 @@ function ReconPanel({
   function refreshAfterWrite() {
     search();
     loadFlagsOverview();
+    if (cardMode) void refreshOpenCard();
   }
 
   async function undoSplit(s: {
@@ -3279,6 +3319,33 @@ function ReconPanel({
               );
             })()}
 
+            {/* By worker / By card toggle */}
+            <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-4">
+              <button
+                onClick={() => setCardMode(false)}
+                className={`flex-1 rounded-full py-2 text-sm font-bold ${!cardMode ? "bg-safety text-steel" : "text-rebar"}`}
+              >
+                By worker
+              </button>
+              <button
+                onClick={() => setCardMode(true)}
+                className={`flex-1 rounded-full py-2 text-sm font-bold ${cardMode ? "bg-safety text-steel" : "text-rebar"}`}
+              >
+                By card
+              </button>
+            </div>
+
+            {cardMode ? (
+              <CardBrowser
+                cards={cards}
+                loading={cardsLoading}
+                start={start}
+                end={end}
+                lang={lang}
+                onOpen={(c) => setOpenCard(c)}
+              />
+            ) : (
+            <>
             {/* Look up a specific worker */}
             <div className="flex gap-2 mb-4">
               <button
@@ -3620,6 +3687,8 @@ function ReconPanel({
                 ))}
               </div>
             )}
+            </>
+            )}
           </>
         ) : (
           <ReconReviewView tr={tr} lang={lang} start={start} end={end} />
@@ -3676,6 +3745,48 @@ function ReconPanel({
       )}
 
       {/* Edit modal */}
+      {openCard && (
+        <CardDetailModal
+          card={openCard}
+          lang={lang}
+          onClose={() => setOpenCard(null)}
+          onEditEntry={(e) => setEditEntry(e)}
+          onVoidEntry={(e) => setVoidEntry(e)}
+          onSplitEntry={(e) => setSplitEntry(e)}
+          onBulk={(kind) => setCardBulk(kind)}
+        />
+      )}
+
+      {/* Whole-card actions launched from the card view — reuse the same bulk
+          modals as the Reconcile needs-project section. */}
+      {openCard && cardBulk === "project" && (
+        <ReconBulkProjectModal
+          jobName={openCard.job}
+          dateLabel={prettyDate(openCard.date, lang)}
+          entries={openCard.entries}
+          onClose={() => setCardBulk("")}
+          onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+      {openCard && cardBulk === "split" && (
+        <ReconBulkSplitModal
+          jobName={openCard.job}
+          dateLabel={prettyDate(openCard.date, lang)}
+          entries={openCard.entries}
+          onClose={() => setCardBulk("")}
+          onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+      {openCard && cardBulk === "void" && (
+        <ReconVoidCardModal
+          jobName={openCard.job}
+          dateLabel={prettyDate(openCard.date, lang)}
+          entries={openCard.entries}
+          onClose={() => setCardBulk("")}
+          onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+
       {editEntry && (
         <ReconEditModal
           entry={editEntry}
@@ -8243,6 +8354,225 @@ function ReconVoidCardModal({
             </button>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Card browser (Lookup "By card" mode) ----------
+// Lists submitted cards for the range (one per job+foreman+date), newest first,
+// searchable by foreman/job. Tapping a card opens it to see the full crew and
+// edit individually or in bulk. Defaults to this week's cards.
+function CardBrowser({
+  cards,
+  loading,
+  start,
+  end,
+  lang,
+  onOpen,
+}: {
+  cards: any[];
+  loading: boolean;
+  start: string;
+  end: string;
+  lang: Lang;
+  onOpen: (c: any) => void;
+}) {
+  const [q, setQ] = useState("");
+  const query = q.trim().toLowerCase();
+  const shown = cards.filter(
+    (c) =>
+      !query ||
+      (c.foreman || "").toLowerCase().includes(query) ||
+      (c.job || "").toLowerCase().includes(query)
+  );
+  // Group by date, newest first (cards already sorted by date desc from API).
+  const byDate = new Map<string, any[]>();
+  for (const c of shown) {
+    if (!byDate.has(c.date)) byDate.set(c.date, []);
+    byDate.get(c.date)!.push(c);
+  }
+
+  return (
+    <div>
+      <div className="relative mb-4">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search foreman or job…"
+          className="w-full bg-graphite border border-line rounded-full h-11 pl-4 pr-9 text-concrete text-sm"
+        />
+        {q && (
+          <button
+            onClick={() => setQ("")}
+            aria-label="Clear"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-rebar text-lg"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {loading && <div className="text-rebar text-sm px-1 py-2">Loading cards…</div>}
+      {!loading && shown.length === 0 && (
+        <div className="text-rebar text-sm px-1 py-2">No submitted cards in this range.</div>
+      )}
+
+      {!loading &&
+        Array.from(byDate.entries()).map(([date, dayCards]) => (
+          <div key={date} className="mb-4">
+            <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2 px-1">
+              {prettyDate(date, lang)}
+            </div>
+            {dayCards.map((c, i) => {
+              const total = round2(
+                c.entries.reduce((s: number, e: any) => s + (e.hours || 0), 0)
+              );
+              const needsProject = c.entries.some((e: any) => !e.projectId);
+              return (
+                <button
+                  key={i}
+                  onClick={() => onOpen(c)}
+                  className="w-full text-left bg-graphite border border-line rounded-2xl p-3.5 mb-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-concrete font-bold text-[15px]">{c.job}</span>
+                    <span className="text-rebar text-xs">
+                      {c.entries.length} {c.entries.length === 1 ? "worker" : "workers"} · {total}h ›
+                    </span>
+                  </div>
+                  <div className="text-rebar text-xs mt-0.5">
+                    Foreman: {c.foreman || "—"}
+                    {needsProject && (
+                      <span style={{ color: "#8fbcff" }}> · needs project</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ))}
+    </div>
+  );
+}
+
+// Card detail — full crew of one submitted card, with per-entry actions.
+function CardDetailModal({
+  card,
+  lang,
+  onClose,
+  onEditEntry,
+  onVoidEntry,
+  onSplitEntry,
+  onBulk,
+}: {
+  card: any;
+  lang: Lang;
+  onClose: () => void;
+  onEditEntry: (e: any) => void;
+  onVoidEntry: (e: any) => void;
+  onSplitEntry: (e: any) => void;
+  onBulk: (kind: "project" | "split" | "void") => void;
+}) {
+  useLockBodyScroll();
+  const total = round2(card.entries.reduce((s: number, e: any) => s + (e.hours || 0), 0));
+  const needsProject = card.entries.some((e: any) => !e.projectId && !e.uncategorized);
+  return (
+    <div className="fixed inset-0 z-[70] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-4">
+          <div className="min-w-0">
+            <div className="font-bold text-concrete text-lg truncate">{card.job}</div>
+            <div className="text-rebar text-xs">
+              {prettyDate(card.date, lang)} · Foreman: {card.foreman || "—"} · {card.entries.length}{" "}
+              {card.entries.length === 1 ? "worker" : "workers"} · {total}h
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full shrink-0 ml-3"
+          >
+            Close
+          </button>
+        </div>
+
+        {/* Whole-card actions */}
+        <div className="flex gap-2 mb-4 flex-wrap">
+          {needsProject && (
+            <button
+              onClick={() => onBulk("project")}
+              className="text-xs font-bold px-3 py-2 rounded-full"
+              style={{ color: "#8fbcff", background: "rgba(47,115,216,.16)" }}
+            >
+              Set project
+            </button>
+          )}
+          <button
+            onClick={() => onBulk("split")}
+            className="text-rebar text-xs font-bold px-3 py-2 rounded-full bg-graphite border border-line"
+          >
+            Split between jobs
+          </button>
+          <button
+            onClick={() => onBulk("void")}
+            className="text-xs font-bold px-3 py-2 rounded-full bg-graphite border"
+            style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+          >
+            Void card
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          {card.entries.map((e: any) => (
+            <div key={e.id} className="bg-graphite border border-line rounded-2xl px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div className="text-concrete font-bold text-[15px]">
+                  {e.worker}
+                  {e.underReview && (
+                    <span className="ml-2 text-[11px] font-bold" style={{ color: "#e0a63b" }}>
+                      ⟳ on hold
+                    </span>
+                  )}
+                  {e.uncategorized && (
+                    <span
+                      className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                      style={{ color: "#9aa3af", background: "rgba(154,163,175,.15)" }}
+                    >
+                      UNCATEGORIZED
+                    </span>
+                  )}
+                </div>
+                <div className="text-concrete text-lg font-extrabold">{e.hours}h</div>
+              </div>
+              <div className="text-rebar text-xs mt-0.5">
+                {e.projectName || e.job || "—"}
+                {!e.projectId && !e.uncategorized && (
+                  <span style={{ color: "#8fbcff" }}> · needs project</span>
+                )}
+              </div>
+              <div className="flex gap-2 mt-2.5">
+                <button
+                  onClick={() => onEditEntry(e)}
+                  className="bg-steel border border-line text-concrete rounded-lg px-3.5 py-1.5 text-xs font-bold active:text-safety"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => onSplitEntry(e)}
+                  className="text-rebar border border-line rounded-lg px-3.5 py-1.5 text-xs font-bold active:text-safety"
+                >
+                  Split
+                </button>
+                <button
+                  onClick={() => onVoidEntry(e)}
+                  className="text-rebar border border-line rounded-lg px-3.5 py-1.5 text-xs font-bold active:text-safety"
+                >
+                  Void
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

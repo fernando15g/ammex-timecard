@@ -742,10 +742,14 @@ export async function GET(req: Request) {
             entries: [],
           });
         }
+        // Full entry shape (incl. notes/voidNote/uncategorized) so the card
+        // view can hand these straight to the same edit/void/split modals the
+        // worker view uses without losing fields on save.
         map.get(key)!.entries.push({
           id: e.id, worker: e.worker, hours: e.hours, job: e.job,
           projectName: e.projectName, projectId: e.projectId, foreman: e.foreman, date: e.date,
-          underReview: e.underReview,
+          notes: e.notes, voided: e.voided, voidNote: e.voidNote,
+          underReview: e.underReview, uncategorized: e.uncategorized,
         });
       }
       const submitted = Array.from(map.values()).sort(

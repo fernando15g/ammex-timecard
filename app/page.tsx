@@ -2965,7 +2965,7 @@ function ReconPanel({
     return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
   })();
 
-  const [view, setView] = useState<"find" | "review">("find");
+  const [view, setView] = useState<"find" | "review">("review");
 
   // date range
   const [rangeMode, setRangeMode] = useState<"this" | "last" | "custom">("this");
@@ -8060,58 +8060,82 @@ function ReconBulkSplitModal({
         </div>
 
         {pickFor ? (
-          <div className="flex-1 overflow-y-auto overscroll-contain px-3 pb-3">
-            <div className="px-2 pb-2">
-              <input
-                autoFocus
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by name or job ID…"
-                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
-              />
-            </div>
-            {filtered.map((p) => (
+          <>
+            <div className="px-5 pb-3 flex items-center justify-between">
+              <div className="text-concrete font-bold">
+                {pickFor === "A" ? "Job A — hours stay" : "Job B — hours move here"}
+              </div>
               <button
-                key={p.id}
-                onClick={() => {
-                  if (pickFor === "A") setJobA({ id: p.id, name: p.name });
-                  else setJobB({ id: p.id, name: p.name });
-                  setPickFor(""); setQuery("");
-                }}
-                className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                onClick={() => { setPickFor(""); setQuery(""); }}
+                className="text-rebar text-sm font-bold"
               >
-                <span>{p.name}</span>
-                {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                Cancel
               </button>
-            ))}
-            {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
-            <button
-              onClick={() => { setPickFor(""); setQuery(""); }}
-              className="w-full text-center text-rebar text-sm font-bold py-3"
-            >
-              Cancel
-            </button>
-          </div>
+            </div>
+            <div className="px-5 pb-3">
+              <div className="relative">
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search by name or job ID…"
+                  className="w-full bg-steel border border-line rounded-full h-11 pl-4 pr-9 text-concrete focus:border-rebar outline-none"
+                />
+                {query && (
+                  <button
+                    onClick={() => setQuery("")}
+                    aria-label="Clear"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-rebar text-lg"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto overscroll-contain px-3 pb-4">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    if (pickFor === "A") setJobA({ id: p.id, name: p.name });
+                    else setJobB({ id: p.id, name: p.name });
+                    setPickFor(""); setQuery("");
+                  }}
+                  className="w-full text-left px-4 py-3.5 rounded-xl active:bg-steel text-concrete flex items-center justify-between gap-3"
+                >
+                  <span className="min-w-0 truncate">{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm shrink-0">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-4 py-3">No matches.</div>}
+            </div>
+          </>
         ) : (
           <>
-            <div className="px-5 space-y-2">
+            <div className="px-5 space-y-2.5">
               <button
                 onClick={() => setPickFor("A")}
-                className="w-full bg-steel border border-line rounded-xl px-3 py-3 text-left"
+                className="w-full bg-steel border border-line rounded-xl px-4 py-3 text-left flex items-center justify-between gap-3 active:border-rebar"
               >
-                <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job A — hours stay</div>
-                <div className={jobA ? "text-concrete font-bold" : "text-rebar"}>
-                  {jobA ? jobA.name : "Pick a project…"}
+                <div className="min-w-0">
+                  <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job A — hours stay</div>
+                  <div className={`truncate ${jobA ? "text-concrete font-bold" : "text-rebar"}`}>
+                    {jobA ? jobA.name : "Pick a project…"}
+                  </div>
                 </div>
+                <span className="text-rebar shrink-0">›</span>
               </button>
               <button
                 onClick={() => setPickFor("B")}
-                className="w-full bg-steel border border-line rounded-xl px-3 py-3 text-left"
+                className="w-full bg-steel border border-line rounded-xl px-4 py-3 text-left flex items-center justify-between gap-3 active:border-rebar"
               >
-                <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job B — hours move here</div>
-                <div className={jobB ? "text-concrete font-bold" : "text-rebar"}>
-                  {jobB ? jobB.name : "Pick a project…"}
+                <div className="min-w-0">
+                  <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job B — hours move here</div>
+                  <div className={`truncate ${jobB ? "text-concrete font-bold" : "text-rebar"}`}>
+                    {jobB ? jobB.name : "Pick a project…"}
+                  </div>
                 </div>
+                <span className="text-rebar shrink-0">›</span>
               </button>
               {jobA && jobB && jobA.id === jobB.id && (
                 <div className="text-sm" style={{ color: "#e5533c" }}>Job A and Job B must be different.</div>
@@ -8122,10 +8146,10 @@ function ReconBulkSplitModal({
                   value={defaultB}
                   onChange={(e) => setDefaultB(e.target.value)}
                   inputMode="decimal"
-                  placeholder="e.g. 2"
-                  className="w-24 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center"
+                  placeholder="2"
+                  className="w-20 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center focus:border-rebar outline-none"
                 />
-                <div className="text-rebar text-sm flex-1">hours to Job B, everyone</div>
+                <div className="text-rebar text-sm flex-1 leading-tight">hours to Job B<br />for everyone</div>
                 <button
                   onClick={applyDefault}
                   className="bg-steel border border-line text-concrete rounded-xl px-4 h-11 text-sm font-bold"
@@ -8135,12 +8159,12 @@ function ReconBulkSplitModal({
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto overscroll-contain px-5 mt-3">
-              <div className="flex text-rebar text-[10px] font-bold uppercase tracking-wide pb-1">
+            <div className="flex-1 overflow-y-auto overscroll-contain px-5 mt-4">
+              <div className="flex items-center text-rebar text-[10px] font-bold uppercase tracking-wide pb-1.5">
                 <div className="flex-1">Worker</div>
                 <div className="w-16 text-center">Job A</div>
                 <div className="w-16 text-center">Job B</div>
-                <div className="w-14" />
+                <div className="w-16" />
               </div>
               {rows.map((r) => {
                 const a = parseFloat(r.aHours);
@@ -8149,13 +8173,13 @@ function ReconBulkSplitModal({
                 return (
                   <div
                     key={r.id}
-                    className="flex items-center gap-2 py-2 border-t border-line/50"
-                    style={r.excluded ? { opacity: 0.45 } : undefined}
+                    className="flex items-center gap-2 py-2.5 border-t border-line/50"
+                    style={r.excluded ? { opacity: 0.4 } : undefined}
                   >
                     <div className="flex-1 min-w-0">
                       <div className="text-concrete text-sm font-semibold truncate">{r.worker}</div>
                       <div className="text-[11px]" style={{ color: bad ? "#e0a63b" : "#9aa3af" }}>
-                        {r.total}h total{bad ? ` · parts = ${((isNaN(a)?0:a)+(isNaN(b)?0:b)).toFixed(2)}h` : ""}
+                        {r.total}h total{bad ? ` · now ${((isNaN(a)?0:a)+(isNaN(b)?0:b)).toFixed(2)}h` : ""}
                       </div>
                     </div>
                     <input
@@ -8163,28 +8187,35 @@ function ReconBulkSplitModal({
                       onChange={(e) => setRow(r.id, "aHours", e.target.value)}
                       disabled={r.excluded}
                       inputMode="decimal"
-                      className="w-16 bg-steel border border-line rounded-lg h-10 text-center text-concrete disabled:opacity-40"
+                      className="w-16 bg-steel border rounded-lg h-10 text-center text-concrete disabled:opacity-40 focus:border-rebar outline-none"
+                      style={{ borderColor: bad ? "#e0a63b" : undefined }}
                     />
                     <input
                       value={r.bHours}
                       onChange={(e) => setRow(r.id, "bHours", e.target.value)}
                       disabled={r.excluded}
                       inputMode="decimal"
-                      className="w-16 bg-steel border border-line rounded-lg h-10 text-center text-concrete disabled:opacity-40"
+                      className="w-16 bg-steel border rounded-lg h-10 text-center text-concrete disabled:opacity-40 focus:border-rebar outline-none"
+                      style={{ borderColor: bad ? "#e0a63b" : undefined }}
                     />
                     <button
                       onClick={() =>
                         setRows((cur) => cur.map((x) => (x.id === r.id ? { ...x, excluded: !x.excluded } : x)))
                       }
-                      className="w-14 text-[11px] font-bold text-rebar active:text-safety"
+                      className="w-16 text-[11px] font-bold rounded-full py-1.5 border"
+                      style={
+                        r.excluded
+                          ? { color: "#4a9e63", borderColor: "rgba(74,158,99,.5)" }
+                          : { color: "#9aa3af", borderColor: "rgba(154,163,175,.4)" }
+                      }
                     >
                       {r.excluded ? "Include" : "Skip"}
                     </button>
                   </div>
                 );
               })}
-              <div className="text-rebar text-[11px] py-2">
-                Skipped workers are left untouched and stay in this list. Workers with 0h on Job B are
+              <div className="text-rebar text-[11px] py-3 leading-relaxed">
+                Skipped workers stay untouched and remain in this list. Anyone with 0h on Job B is
                 just assigned Job A (no split).
               </div>
             </div>

@@ -3182,7 +3182,17 @@ function ReconPanel({
       <div className="max-w-3xl mx-auto p-4 pb-28">
         {/* Header */}
         <div className="flex items-center justify-between mb-4">
-          <div className="w-14" />
+          {view === "find" ? (
+            <button
+              onClick={() => setCardMode((m) => !m)}
+              className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+              aria-label="Toggle worker or card view"
+            >
+              {cardMode ? "Card" : "Worker"}
+            </button>
+          ) : (
+            <div className="w-14" />
+          )}
           <div className="font-bold text-concrete text-lg">{tr.reconTitle}</div>
           <button
             onClick={onClose}
@@ -3318,22 +3328,6 @@ function ReconPanel({
                 </div>
               );
             })()}
-
-            {/* By worker / By card toggle */}
-            <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-4">
-              <button
-                onClick={() => setCardMode(false)}
-                className={`flex-1 rounded-full py-2 text-sm font-bold ${!cardMode ? "bg-safety text-steel" : "text-rebar"}`}
-              >
-                By worker
-              </button>
-              <button
-                onClick={() => setCardMode(true)}
-                className={`flex-1 rounded-full py-2 text-sm font-bold ${cardMode ? "bg-safety text-steel" : "text-rebar"}`}
-              >
-                By card
-              </button>
-            </div>
 
             {cardMode ? (
               <CardBrowser

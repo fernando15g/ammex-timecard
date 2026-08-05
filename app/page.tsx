@@ -2512,7 +2512,9 @@ function SchedulePanel({
       {/* Job picker modal */}
       {showJobPicker && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[65] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            jobQuery ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setShowJobPicker(false)}
         >
           <div
@@ -2565,7 +2567,9 @@ function SchedulePanel({
       {/* Worker picker modal — search on top, list below, multi-add */}
       {workerFor !== null && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[65] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            workerQuery ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => {
             setWorkerFor(null);
             setWorkerQuery("");

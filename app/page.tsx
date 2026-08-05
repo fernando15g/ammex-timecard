@@ -3696,7 +3696,9 @@ function ReconPanel({
       {/* Worker picker modal */}
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[65] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[65] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            workerQuery ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setPickerOpen(false)}
         >
           <div
@@ -4045,7 +4047,9 @@ function ReconEditModal({
       {/* Project picker (searchable) */}
       {projPickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            projQuery ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setProjPickerOpen(false)}
         >
           <div
@@ -4096,7 +4100,9 @@ function ReconEditModal({
       {/* Foreman picker (roster, excluding rodbusters) */}
       {fmPickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            fmQuery ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setFmPickerOpen(false)}
         >
           <div
@@ -4405,7 +4411,9 @@ function ReconSplitModal({
 
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setPickerOpen(false)}
         >
           <div
@@ -6060,7 +6068,9 @@ function ReconAddModal({
 
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setPickerOpen(false)}
         >
           <div
@@ -6940,7 +6950,9 @@ function ReconBulkEditModal({
 
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[80] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[80] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setPickerOpen(false)}
         >
           <div
@@ -7235,7 +7247,9 @@ function SiteVisitsPanel({
       {/* Job picker */}
       {pickerOpen && (
         <div
-          className="fixed inset-0 z-[75] bg-black/50 flex items-center justify-center p-4"
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
           onClick={() => setPickerOpen(false)}
         >
           <div

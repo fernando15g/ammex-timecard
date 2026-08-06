@@ -6627,8 +6627,8 @@ function ReconCardBrowser({
                               </div>
                               {cov && cov.submitted > 0 && (
                                 <div className="text-xs mt-1 font-semibold" style={{ color: "#e0a63b" }}>
-                                  {cov.submitted} of {cov.total} submitted
-                                  {cov.submittedBy ? ` · card by ${cov.submittedBy}` : ""}
+                                  {cov.submitted}/{cov.total} submitted
+                                  {cov.submittedBy ? ` · ${cov.submittedBy}` : ""}
                                 </div>
                               )}
                               {expandable && (

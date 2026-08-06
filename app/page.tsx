@@ -6438,8 +6438,16 @@ function ReconCardBrowser({
   type Card = { job: string; projectId: string; foreman: string; date: string; entries: Entry[] };
   const [submitted, setSubmitted] = useState<Card[]>([]);
   const [missing, setMissing] = useState<
-    { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[]
+    {
+      foreman: string; jobName: string; date: string; jobId: string; crewCount: number;
+      coverage?: {
+        submitted: number; total: number; submittedBy: string;
+        people: { worker: string; logged: boolean; elsewhereJob: string }[];
+        walkOns: { worker: string; hours: number }[];
+      };
+    }[]
   >([]);
+  const [covOpen, setCovOpen] = useState<Record<string, boolean>>({}); // expanded coverage dropdowns
   const [loading, setLoading] = useState(true);
   const [openKey, setOpenKey] = useState<string>("");
   const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({});
@@ -6589,33 +6597,95 @@ function ReconCardBrowser({
                     >
                       {prettyDate(date, lang)}
                     </div>
-                    {byDate.get(date)!.map((m, i) => (
-                      <div
-                        key={`${m.jobId}|${m.date}|${i}`}
-                        className="rounded-xl px-3 py-3 mb-2"
-                        style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
-                      >
-                        <div className="flex items-start gap-2">
-                          <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-concrete font-bold text-sm">{m.jobName}</div>
-                            <div className="text-rebar text-xs mt-0.5">
-                              {m.foreman
-                                ? `${m.foreman} hasn't submitted`
-                                : "no foreman on schedule"}
-                              {` · ${m.crewCount} crew`}
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => setCloseMissing(m)}
-                            aria-label="Close card"
-                            className="shrink-0 text-rebar text-xs font-bold bg-graphite border border-line rounded-full px-2.5 py-1 active:text-safety"
+                    {byDate.get(date)!.map((m, i) => {
+                      const key = `${m.jobId}|${m.date}`;
+                      const cov = m.coverage;
+                      // Only offer the dropdown when it has something to say:
+                      // someone submitted for this job, or walk-ons worked it.
+                      const expandable = !!cov && (cov.submitted > 0 || cov.walkOns.length > 0);
+                      const open = expandable && !!covOpen[key];
+                      return (
+                        <div
+                          key={`${key}|${i}`}
+                          className="rounded-xl px-3 py-3 mb-2"
+                          style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
+                        >
+                          <div
+                            className="flex items-start gap-2"
+                            onClick={() => {
+                              if (expandable) setCovOpen((c) => ({ ...c, [key]: !c[key] }));
+                            }}
                           >
-                            Close
-                          </button>
+                            <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-concrete font-bold text-sm">{m.jobName}</div>
+                              <div className="text-rebar text-xs mt-0.5">
+                                {m.foreman
+                                  ? `${m.foreman} hasn't submitted`
+                                  : "no foreman on schedule"}
+                                {` · ${m.crewCount} crew`}
+                              </div>
+                              {cov && cov.submitted > 0 && (
+                                <div className="text-xs mt-1 font-semibold" style={{ color: "#e0a63b" }}>
+                                  {cov.submitted} of {cov.total} submitted
+                                  {cov.submittedBy ? ` · card by ${cov.submittedBy}` : ""}
+                                </div>
+                              )}
+                              {expandable && (
+                                <div className="text-rebar text-[11px] mt-0.5">
+                                  {open ? "▾ hide crew" : "▸ tap to see who's in"}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCloseMissing(m);
+                              }}
+                              aria-label="Close card"
+                              className="shrink-0 text-rebar text-xs font-bold bg-graphite border border-line rounded-full px-2.5 py-1 active:text-safety"
+                            >
+                              Close
+                            </button>
+                          </div>
+
+                          {open && cov && (
+                            <div className="mt-2 pt-2 space-y-1" style={{ borderTop: "1px solid rgba(229,83,60,.25)" }}>
+                              {cov.people.map((p, pi) => (
+                                <div key={pi} className="flex items-center gap-2 text-sm">
+                                  {p.logged ? (
+                                    <span className="text-[11px] font-bold w-3 shrink-0" style={{ color: "#4a9e63" }}>✓</span>
+                                  ) : (
+                                    <span className="w-3 shrink-0" />
+                                  )}
+                                  <span
+                                    className="min-w-0 truncate"
+                                    style={p.logged ? { color: "#f4f3f0" } : { color: "#f4f3f0", opacity: 0.45 }}
+                                  >
+                                    {p.worker}
+                                  </span>
+                                  {!p.logged && p.elsewhereJob && (
+                                    <span className="text-rebar text-[11px] shrink-0">at {p.elsewhereJob}</span>
+                                  )}
+                                  {!p.logged && !p.elsewhereJob && (
+                                    <span className="text-[11px] shrink-0" style={{ color: "#e5533c" }}>missing</span>
+                                  )}
+                                </div>
+                              ))}
+                              {cov.walkOns.map((w, wi) => (
+                                <div key={`w${wi}`} className="flex items-center gap-2 text-sm">
+                                  <span className="w-3 shrink-0" />
+                                  <span className="min-w-0 truncate" style={{ color: "#e0a63b" }}>{w.worker}</span>
+                                  <span className="text-[11px] font-bold shrink-0" style={{ color: "#e0a63b" }}>
+                                    {w.hours}h · not scheduled
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ));
               })()}

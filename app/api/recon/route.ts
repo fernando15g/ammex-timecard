@@ -337,13 +337,29 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   const loggedWorkerOnJobDate = new Set<string>(); // `${worker}|${jobId}|${date}`
   const loggedWorkerAnyDate = new Set<string>(); // `${worker}|${date}` (any job)
   const loggedJobByWorkerDate = new Map<string, string>(); // `${worker}|${date}` → job name logged
+  // Who actually submitted cards per job+date (for the coverage note on a
+  // missing-lead card), and every logged worker+hours per job+date (to show
+  // walk-ons who worked the job without being scheduled).
+  const submittersByJobDate = new Map<string, Set<string>>(); // `${jobId}|${date}` → foremen
+  const loggedPeopleByJobDate = new Map<string, Map<string, number>>(); // `${jobId}|${date}` → workerLower → hours
+  const displayName = new Map<string, string>(); // workerLower → display casing
   for (const c of live) {
     loggedWorkerAnyDate.add(`${c.worker.toLowerCase()}|${c.date}`);
     const wd = `${c.worker.toLowerCase()}|${c.date}`;
     if (!loggedJobByWorkerDate.has(wd)) loggedJobByWorkerDate.set(wd, c.projectName || c.job || "");
     if (c.projectId) {
-      loggedOnJobDate.add(`${c.projectId}|${c.date}`);
+      const jk = `${c.projectId}|${c.date}`;
+      loggedOnJobDate.add(jk);
       loggedWorkerOnJobDate.add(`${c.worker.toLowerCase()}|${c.projectId}|${c.date}`);
+      if (c.foreman) {
+        if (!submittersByJobDate.has(jk)) submittersByJobDate.set(jk, new Set());
+        submittersByJobDate.get(jk)!.add(c.foreman);
+      }
+      if (!loggedPeopleByJobDate.has(jk)) loggedPeopleByJobDate.set(jk, new Map());
+      const m = loggedPeopleByJobDate.get(jk)!;
+      const k = c.worker.toLowerCase();
+      m.set(k, Math.round(((m.get(k) || 0) + (c.hours || 0)) * 100) / 100);
+      if (!displayName.has(k)) displayName.set(k, c.worker);
     }
   }
 
@@ -381,7 +397,14 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   // submitting his own crew no longer hides the lead's un-submitted card.
   // Fallback: if a job+date has NO marked lead, keep the old rule (missing if
   // nobody logged it) so nothing that flags today silently stops flagging.
-  const missingCards: { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[] = [];
+  const missingCards: {
+    foreman: string; jobName: string; date: string; jobId: string; crewCount: number;
+    coverage?: {
+      submitted: number; total: number; submittedBy: string;
+      people: { worker: string; logged: boolean; elsewhereJob: string }[];
+      walkOns: { worker: string; hours: number }[];
+    };
+  }[] = [];
   for (const [jk, rec] of crewByJobDate) {
     if (daysAgo(rec.date, todayISO) < 0) continue; // future
     const lead = leadByJobDate.get(jk); // scheduled lead foreman for this job+date
@@ -394,12 +417,33 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
       isMissing = !loggedOnJobDate.has(jk);
     }
     if (isMissing && !closedMissing.has(`${rec.jobId}|${rec.date}`)) {
+      // Coverage: even though the LEAD hasn't submitted, another foreman may
+      // have covered the crew. Show how many scheduled people have a card on
+      // this job+date, who submitted, plus amber walk-ons — so the owner can
+      // see at a glance whether it's safe to manually close.
+      const scheduledLower = new Set(rec.crew.map((c) => c.worker.toLowerCase()));
+      const loggedHere = loggedPeopleByJobDate.get(jk) || new Map<string, number>();
+      const walkOns: { worker: string; hours: number }[] = [];
+      for (const [k, hrs] of loggedHere) {
+        if (!scheduledLower.has(k)) walkOns.push({ worker: displayName.get(k) || k, hours: hrs });
+      }
+      walkOns.sort((a, b) => a.worker.localeCompare(b.worker));
+      const submitters = Array.from(submittersByJobDate.get(jk) || []).filter(
+        (f) => f.toLowerCase() !== (lead || "").toLowerCase()
+      );
       missingCards.push({
         foreman: rec.foreman,
         jobName: rec.jobName || "(job)",
         date: rec.date,
         jobId: rec.jobId,
         crewCount: rec.total,
+        coverage: {
+          submitted: rec.logged,
+          total: rec.total,
+          submittedBy: submitters.join(", "),
+          people: rec.crew.map((c) => ({ worker: c.worker, logged: c.logged, elsewhereJob: c.elsewhereJob })),
+          walkOns,
+        },
       });
     }
   }

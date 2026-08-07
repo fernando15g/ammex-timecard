@@ -1723,7 +1723,10 @@ interface SchedJob {
   jobPageId: string;
   name: string;
   jobId: string;
-  crew: { worker: string; isLead: boolean }[];
+  crew: { worker: string; isLead: boolean; hours?: number | null; unscheduled?: boolean; elsewhere?: string }[];
+  cancelled?: boolean;
+  cancelPartial?: boolean;
+  cancelNote?: string;
 }
 
 function tomorrowISO(): string {
@@ -2159,62 +2162,94 @@ function SchedulePanel({
 
           {!histLoading && !histEmpty &&
             histJobs.map((j) => (
-              <div key={j.jobPageId} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="text-concrete font-bold text-[15px] truncate">{j.name}</div>
-                  {j.jobId && (
-                    <span className="text-rebar text-xs bg-steel border border-line rounded-full px-2.5 py-1 shrink-0">
-                      {j.jobId}
-                    </span>
+              <div
+                key={j.jobPageId}
+                className="relative bg-graphite border border-line rounded-2xl p-4 mb-3 overflow-hidden"
+              >
+                {j.cancelled && (
+                  <>
+                    {/* Grey shadowy X across the whole card */}
+                    <svg
+                      className="absolute inset-0 w-full h-full pointer-events-none"
+                      preserveAspectRatio="none"
+                      viewBox="0 0 100 100"
+                      aria-hidden="true"
+                    >
+                      <line x1="4" y1="4" x2="96" y2="96" stroke="rgba(154,163,175,.28)" strokeWidth="2.5" />
+                      <line x1="96" y1="4" x2="4" y2="96" stroke="rgba(154,163,175,.28)" strokeWidth="2.5" />
+                    </svg>
+                  </>
+                )}
+                <div className="relative">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="text-concrete font-bold text-[15px] truncate">{j.name}</div>
+                    {j.jobId && (
+                      <span className="text-rebar text-xs bg-steel border border-line rounded-full px-2.5 py-1 shrink-0">
+                        {j.jobId}
+                      </span>
+                    )}
+                  </div>
+
+                  {j.cancelled && (
+                    <div
+                      className="text-sm font-bold mb-2"
+                      style={{ color: "#e5533c" }}
+                    >
+                      {j.cancelPartial ? "Partially cancelled" : "Job cancelled"}
+                      {j.cancelNote && j.cancelNote !== "Job cancelled" && j.cancelNote !== "Partially cancelled"
+                        ? ` — ${j.cancelNote}`
+                        : ""}
+                    </div>
                   )}
-                </div>
-                <div className="space-y-1">
-                  {j.crew.map((c: any, i: number) => {
-                    const worked = c.hours != null;
-                    return (
-                      <div key={i} className="flex items-center gap-2 text-sm">
-                        <span
-                          style={
-                            c.unscheduled
-                              ? { color: "#e0a63b" }                 // worked here, not scheduled
-                              : worked
-                              ? { color: "#f4f3f0" }                 // scheduled and showed up
-                              : { color: "#f4f3f0", opacity: 0.45 }  // scheduled, no hours
-                          }
-                        >
-                          {c.worker}
-                        </span>
-                        {worked && !c.unscheduled && (
-                          <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
-                        )}
-                        {worked && (
+
+                  <div className="space-y-1">
+                    {j.crew.map((c: any, i: number) => {
+                      const worked = c.hours != null;
+                      return (
+                        <div key={i} className="flex items-center gap-2 text-sm">
                           <span
-                            className="text-[11px] font-bold"
-                            style={{ color: c.unscheduled ? "#e0a63b" : "#f4f3f0" }}
+                            style={
+                              c.unscheduled
+                                ? { color: "#e0a63b" }
+                                : worked
+                                ? { color: "#f4f3f0" }
+                                : { color: "#f4f3f0", opacity: 0.45 }
+                            }
                           >
-                            {c.hours}h
+                            {c.worker}
                           </span>
-                        )}
-                        {c.isLead && (
-                          <span
-                            className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
-                            style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
-                          >
-                            FOREMAN
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                  {j.crew.length === 0 && <div className="text-rebar text-xs">No crew listed.</div>}
-                </div>
-                <div className="text-rebar text-[11px] mt-2">
-                  {j.crew.filter((c: any) => !c.unscheduled).length} scheduled
-                  {j.crew.some((c: any) => c.unscheduled) && (
-                    <span style={{ color: "#e0a63b" }}>
-                      {" "}· {j.crew.filter((c: any) => c.unscheduled).length} not scheduled
-                    </span>
-                  )}
+                          {worked && !c.unscheduled && (
+                            <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
+                          )}
+                          {worked && (
+                            <span
+                              className="text-[11px] font-bold"
+                              style={{ color: c.unscheduled ? "#e0a63b" : "#f4f3f0" }}
+                            >
+                              {c.hours}h
+                            </span>
+                          )}
+                          {c.isLead && (
+                            <span
+                              className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                              style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                            >
+                              FOREMAN
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {j.crew.length === 0 && <div className="text-rebar text-xs">No crew listed.</div>}
+                  </div>
+                  <div className="text-rebar text-[11px] mt-2">
+                    {j.crew.filter((c: any) => !c.unscheduled).length} scheduled
+                    {j.crew.some((c: any) => c.unscheduled) && (
+                      <span style={{ color: "#e0a63b" }}>
+                        {" "}· {j.crew.filter((c: any) => c.unscheduled).length} not scheduled
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
@@ -4699,7 +4734,9 @@ function ReconReviewView({
   const [addFor, setAddFor] = useState<Disc | null>(null);
   const [crewOpen, setCrewOpen] = useState<Record<string, boolean>>({});
   const [viewCrew, setViewCrew] = useState<{ jobId: string; date: string; job: string; foreman: string; worker: string } | null>(null);
-  const [dismissAllFor, setDismissAllFor] = useState<Disc[] | null>(null);
+  const [dismissAllFor, setDismissAllFor] = useState<
+    { crew: Disc[]; jobId: string; jobName: string; date: string; loggedCount: number } | null
+  >(null);
   const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
   const [showMissing, setShowMissing] = useState(false);
   const [showCards, setShowCards] = useState(false);
@@ -5410,7 +5447,15 @@ function ReconReviewView({
                                   );
                                 })}
                                 <button
-                                  onClick={() => setDismissAllFor(crew)}
+                                  onClick={() =>
+                                    setDismissAllFor({
+                                      crew,
+                                      jobId: first.scheduledJobId,
+                                      jobName: first.scheduledJob,
+                                      date: first.date,
+                                      loggedCount: cHere + cElse,
+                                    })
+                                  }
                                   className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mt-1 active:text-safety"
                                 >
                                   Ignore all (job cancelled)
@@ -5647,11 +5692,29 @@ function ReconReviewView({
 
       {dismissAllFor && (
         <ReconDismissAllModal
-          count={dismissAllFor.length}
+          count={dismissAllFor.crew.length}
+          loggedCount={dismissAllFor.loggedCount}
+          jobName={dismissAllFor.jobName}
           onClose={() => setDismissAllFor(null)}
-          onConfirm={() => {
-            resolveMany(dismissAllFor, "Dismissed", "job cancelled — crew stood down");
+          onConfirm={async (note, keepLogged) => {
+            const d = dismissAllFor;
             setDismissAllFor(null);
+            // Stand down the crew that didn't log (unchanged behavior).
+            await resolveMany(d.crew, "Dismissed", note || "job cancelled — crew stood down");
+            // Write ONE job-level cancel record so the Past schedule shows it.
+            // partial = some crew had logged and were kept.
+            await fetch("/api/recon", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                op: "cancel_job",
+                jobId: d.jobId,
+                date: d.date,
+                jobName: d.jobName,
+                note: note || "",
+                partial: keepLogged && d.loggedCount > 0,
+              }),
+            }).catch(() => {});
           }}
         />
       )}
@@ -6249,24 +6312,80 @@ function ReconCrewModal({
 }
 
 // Bulk-dismiss safety: requires ticking a checkbox before Confirm enables.
+// When some scheduled crew already logged hours, it warns and lets the owner
+// keep those logged hours (partial cancel) vs. cancel the whole job. An
+// optional note carries through to the Past-schedule cancelled badge.
 function ReconDismissAllModal({
   count,
+  loggedCount,
+  jobName,
   onClose,
   onConfirm,
 }: {
   count: number;
+  loggedCount: number;
+  jobName: string;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: (note: string, keepLogged: boolean) => void;
 }) {
   const [checked, setChecked] = useState(false);
+  const [note, setNote] = useState("");
+  // When people logged, default to the SAFE choice: keep their hours.
+  const [keepLogged, setKeepLogged] = useState(true);
+  const hasLogged = loggedCount > 0;
   return (
     <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
       <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
-        <div className="text-concrete font-bold text-lg mb-2">Ignore whole crew?</div>
+        <div className="text-concrete font-bold text-lg mb-2">Cancel this job?</div>
+        <div className="text-rebar text-sm mb-1">{jobName}</div>
         <div className="text-rebar text-sm mb-4">
-          This dismisses all {count} scheduled {count === 1 ? "worker" : "workers"} for this job —
-          use it only when the job was cancelled and the crew was sent home. It can't be batch-undone.
+          This stands down the {count} scheduled {count === 1 ? "worker" : "workers"} who
+          haven&apos;t logged — use it when the job was cancelled and the crew was sent home.
         </div>
+
+        {hasLogged && (
+          <div
+            className="rounded-xl p-3 mb-4"
+            style={{ background: "rgba(224,166,59,.1)", border: "1px solid rgba(224,166,59,.4)" }}
+          >
+            <div className="text-sm font-bold mb-2" style={{ color: "#e0a63b" }}>
+              ⚠ {loggedCount} {loggedCount === 1 ? "person" : "people"} already logged hours here
+            </div>
+            <label className="flex items-start gap-2 mb-2 cursor-pointer">
+              <input
+                type="radio"
+                checked={keepLogged}
+                onChange={() => setKeepLogged(true)}
+                className="mt-0.5 w-4 h-4 shrink-0"
+              />
+              <span className="text-concrete text-sm">
+                Keep their hours — cancel only the rest (partial). <b>Safe.</b>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                checked={!keepLogged}
+                onChange={() => setKeepLogged(false)}
+                className="mt-0.5 w-4 h-4 shrink-0"
+              />
+              <span className="text-concrete text-sm">
+                Cancel all — I&apos;ll handle the logged hours separately.
+              </span>
+            </label>
+          </div>
+        )}
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason <span className="text-rebar font-normal normal-case">(optional — shows on the schedule)</span>
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. rained out, GC pushed it"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4 focus:border-rebar outline-none"
+        />
+
         <label className="flex items-start gap-2 mb-4 cursor-pointer">
           <input
             type="checkbox"
@@ -6275,7 +6394,8 @@ function ReconDismissAllModal({
             className="mt-0.5 w-5 h-5 shrink-0"
           />
           <span className="text-concrete text-sm">
-            I understand this dismisses all {count} and the job was cancelled.
+            I understand this cancels the job
+            {hasLogged && keepLogged ? " for everyone who didn't log" : ""}.
           </span>
         </label>
         <div className="flex gap-2">
@@ -6286,11 +6406,11 @@ function ReconDismissAllModal({
             Cancel
           </button>
           <button
-            onClick={onConfirm}
+            onClick={() => onConfirm(note.trim(), keepLogged)}
             disabled={!checked}
             className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
           >
-            Ignore all
+            {hasLogged && keepLogged ? "Cancel the rest" : "Cancel job"}
           </button>
         </div>
       </div>

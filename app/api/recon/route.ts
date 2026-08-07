@@ -1096,6 +1096,58 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true });
     }
 
+    if (op === "cancel_job") {
+      // Owner cancels a scheduled job (crew stood down). Writes ONE job-level
+      // record keyed by jobPageId|date so the Past schedule can show a canceled
+      // badge with the owner's note. `partial` marks that some crew had already
+      // logged hours and were kept — the schedule shows a softer label then.
+      const { jobId, date, jobName, note, partial } = body;
+      if (!jobId || !date)
+        return NextResponse.json({ ok: false, error: "jobId and date required" }, { status: 400 });
+      const label = partial ? "Partially cancelled" : "Job cancelled";
+      await notion.pages.create({
+        parent: { database_id: RECON_LOG_DB_ID },
+        properties: {
+          [RECON_PROPS.worker]: {
+            title: [{ text: { content: `${jobName || "Job"} — ${label}` } }],
+          },
+          [RECON_PROPS.kind]: { select: { name: "Job cancelled" } },
+          [RECON_PROPS.status]: { select: { name: "Dismissed" } },
+          [RECON_PROPS.date]: { date: { start: date } },
+          [RECON_PROPS.refs]: { rich_text: [{ text: { content: `${jobId}|${date}${partial ? "|partial" : ""}` } }] },
+          [RECON_PROPS.note]: {
+            rich_text: [{ text: { content: note ? note : label } }],
+          },
+        },
+      });
+      return NextResponse.json({ ok: true });
+    }
+
+    if (op === "uncancel_job") {
+      // Reverse a job cancellation: archive the "Job cancelled" record(s) for
+      // this jobPageId|date so the schedule badge clears.
+      const { jobId, date } = body;
+      if (!jobId || !date)
+        return NextResponse.json({ ok: false, error: "jobId and date required" }, { status: 400 });
+      const found = await notion.databases.query({
+        database_id: RECON_LOG_DB_ID,
+        filter: {
+          and: [
+            { property: RECON_PROPS.kind, select: { equals: "Job cancelled" } },
+            { property: RECON_PROPS.date, date: { equals: date } },
+          ],
+        },
+      });
+      for (const pg of found.results as any[]) {
+        const ref = (pg.properties?.[RECON_PROPS.refs]?.rich_text || [])
+          .map((t: any) => t.plain_text).join("");
+        if (ref.split("|")[0] === jobId) {
+          await notion.pages.update({ page_id: pg.id, archived: true });
+        }
+      }
+      return NextResponse.json({ ok: true });
+    }
+
     if (op === "set_custom_name") {
       // Give a card a custom label with no real project (e.g. change order that
       // can't map to the original project). Writes the label to the free-text

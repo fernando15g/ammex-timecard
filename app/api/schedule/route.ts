@@ -10,6 +10,8 @@ import {
   PAYROLL_RECIPIENT,
   TIMECARDS_DB_ID,
   TIMECARD_PROPS,
+  RECON_LOG_DB_ID,
+  RECON_PROPS,
 } from "@/lib/notion";
 import { buildSchedulePdf, ScheduleData, ScheduleJob } from "@/lib/schedule-pdf";
 
@@ -73,6 +75,37 @@ async function actualsForDate(
 
 
 
+// Job cancellations for a date, from the Rec Log. Keyed jobPageId -> note/partial.
+// Lets the Past schedule show a "cancelled" badge with the owner's reason,
+// distinguishing a real stand-down from an unexplained blank. Additive and
+// read-only — never blocks the schedule if the log is unavailable.
+async function cancelledForDate(
+  notion: Client,
+  dateISO: string
+): Promise<Map<string, { note: string; partial: boolean }>> {
+  const out = new Map<string, { note: string; partial: boolean }>();
+  try {
+    const resp: any = await notion.databases.query({
+      database_id: RECON_LOG_DB_ID,
+      filter: {
+        and: [
+          { property: RECON_PROPS.kind, select: { equals: "Job cancelled" } },
+          { property: RECON_PROPS.date, date: { equals: dateISO } },
+        ],
+      },
+    });
+    for (const pg of resp.results as any[]) {
+      const ref = (pg.properties?.[RECON_PROPS.refs]?.rich_text || [])
+        .map((t: any) => t.plain_text).join("");
+      const note = (pg.properties?.[RECON_PROPS.note]?.rich_text || [])
+        .map((t: any) => t.plain_text).join("");
+      const [jobPageId, , partialFlag] = ref.split("|");
+      if (jobPageId) out.set(jobPageId, { note, partial: partialFlag === "partial" });
+    }
+  } catch { /* additive — never block the schedule */ }
+  return out;
+}
+
 // Overlay actuals onto a day's scheduled jobs:
 //  - hours for scheduled crew who logged on that job
 //  - walk-ons (worked the job without being scheduled), appended
@@ -84,6 +117,16 @@ async function applyActuals(
   jobs: ScheduleJob[]
 ): Promise<void> {
   const actuals = await actualsForDate(notion, dateISO);
+  const cancels = await cancelledForDate(notion, dateISO);
+
+  for (const jg of jobs) {
+    const cx = cancels.get(jg.jobPageId);
+    if (cx) {
+      jg.cancelled = true;
+      jg.cancelPartial = cx.partial;
+      jg.cancelNote = cx.note;
+    }
+  }
 
   // Reverse index: worker -> every job they logged on that day.
   const byWorker = new Map<string, { jobPageId: string; hours: number }[]>();

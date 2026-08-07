@@ -12,6 +12,9 @@ export interface ScheduleJob {
   name: string;
   jobId: string;
   crew: ScheduleCrew[];
+  cancelled?: boolean;
+  cancelPartial?: boolean;
+  cancelNote?: string;
 }
 export interface ScheduleData {
   date: string; // YYYY-MM-DD
@@ -135,6 +138,22 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     if (job.jobId) pg.drawText(`#${job.jobId}`, { x: x + 4, y: yy - headH + 6, size: 8, font, color: gray });
     yy -= headH;
     pg.drawLine({ start: { x, y: yy }, end: { x: x + colW, y: yy }, thickness: 0.6, color: line });
+    if ((job as any).cancelled) {
+      // Cancelled marker: red label + note, plus a light diagonal line across
+      // the column so a cancelled job reads at a glance on the printed sheet.
+      const red = rgb(0.9, 0.33, 0.24);
+      yy -= 13;
+      const lbl = (job as any).cancelPartial ? "PARTIALLY CANCELLED" : "CANCELLED";
+      pg.drawText(lbl, { x: x + 4, y: yy, size: 8, font: bold, color: red });
+      const note = (job as any).cancelNote as string | undefined;
+      if (note && note !== "Job cancelled" && note !== "Partially cancelled") {
+        yy -= 10;
+        for (const nl of wrap(note, font, 7.5, colW - 8).slice(0, 2)) {
+          pg.drawText(nl, { x: x + 4, y: yy, size: 7.5, font, color: red });
+          yy -= 9;
+        }
+      }
+    }
     yy -= 14;
     for (const c of job.ordered as (ScheduleCrew & { gapBefore?: boolean; noHoursHead?: boolean })[]) {
       if (c.gapBefore) yy -= 5; // blank space between groups

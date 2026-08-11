@@ -7739,6 +7739,8 @@ function CloseMissingModal({
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Plain close: clears the card from Missing, no schedule effect (used when
+  // the work is covered or you just want it gone).
   async function close() {
     setBusy(true);
     try {
@@ -7761,6 +7763,43 @@ function CloseMissingModal({
     }
   }
 
+  // Cancel: closes the card AND writes a job-level cancel record so the Past
+  // schedule shows the grey X + note — same record the Pending "Ignore all"
+  // writes, so the two paths stay consistent.
+  async function cancelJob() {
+    setBusy(true);
+    try {
+      const closed = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "close_missing",
+          jobId: card.jobId,
+          date: card.date,
+          jobName: card.jobName,
+          foreman: card.foreman,
+          note: note.trim() || "Job cancelled",
+        }),
+      }).then((r) => r.json());
+      if (!closed?.ok) { setBusy(false); return; }
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "cancel_job",
+          jobId: card.jobId,
+          date: card.date,
+          jobName: card.jobName,
+          note: note.trim(),
+          partial: false,
+        }),
+      }).catch(() => {});
+      onDone();
+    } catch {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
       <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
@@ -7770,35 +7809,49 @@ function CloseMissingModal({
           {` · ${prettyDate(card.date, lang)}`}
         </div>
         <div className="text-rebar text-xs mb-4">
-          Use this when the work is actually covered (e.g. another foreman submitted for this
-          crew). It clears the card from Missing and won&apos;t come back.
+          <b>Close card</b> clears it from Missing (use when the work is covered).
+          {" "}
+          <b>Mark job cancelled</b> also stamps the schedule with a cancelled badge and your reason.
         </div>
 
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
-          Reason <span className="text-rebar font-normal normal-case">(optional)</span>
+          Reason{" "}
+          <span className="text-rebar font-normal normal-case">
+            (optional — shows on the schedule if cancelled)
+          </span>
         </label>
         <input
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="e.g. covered by another foreman"
-          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+          placeholder="e.g. covered by another foreman, or rained out"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4 focus:border-rebar outline-none"
         />
 
-        <div className="flex gap-2">
+        <div className="space-y-2">
           <button
-            onClick={onClose}
+            onClick={cancelJob}
             disabled={busy}
-            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            className="w-full rounded-xl py-3 font-bold disabled:opacity-60"
+            style={{ color: "#e5533c", background: "rgba(229,83,60,.12)", border: "1px solid rgba(229,83,60,.5)" }}
           >
-            Cancel
+            {busy ? "Working…" : "Mark job cancelled"}
           </button>
-          <button
-            onClick={close}
-            disabled={busy}
-            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
-          >
-            {busy ? "Closing…" : "Close card"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={close}
+              disabled={busy}
+              className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+            >
+              {busy ? "Closing…" : "Close card"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

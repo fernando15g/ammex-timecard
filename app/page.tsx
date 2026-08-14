@@ -2171,15 +2171,29 @@ function SchedulePanel({
               >
                 {j.cancelled && (
                   <>
-                    {/* Grey shadowy X across the whole card */}
+                    {/* Soft grey X across the whole card — rounded caps, inset
+                        from the corners, and thinner so it reads as a quiet
+                        watermark rather than a harsh strike-through. */}
                     <svg
                       className="absolute inset-0 w-full h-full pointer-events-none"
                       preserveAspectRatio="none"
                       viewBox="0 0 100 100"
                       aria-hidden="true"
                     >
-                      <line x1="4" y1="4" x2="96" y2="96" stroke="rgba(154,163,175,.28)" strokeWidth="2.5" />
-                      <line x1="96" y1="4" x2="4" y2="96" stroke="rgba(154,163,175,.28)" strokeWidth="2.5" />
+                      <line
+                        x1="10" y1="16" x2="90" y2="84"
+                        stroke="rgba(154,163,175,.22)"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <line
+                        x1="90" y1="16" x2="10" y2="84"
+                        stroke="rgba(154,163,175,.22)"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        vectorEffect="non-scaling-stroke"
+                      />
                     </svg>
                   </>
                 )}

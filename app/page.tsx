@@ -1861,6 +1861,9 @@ function SchedulePanel({
           jobPageId: j.jobPageId,
           name: j.name,
           jobId: j.jobId,
+          cancelled: j.cancelled,
+          cancelPartial: j.cancelPartial,
+          cancelNote: j.cancelNote,
           // Lead first, then scheduled crew, then anyone who worked the job
           // without being scheduled (shown last, in amber).
           crew: [...(j.crew || [])].sort((a: any, b: any) => {

@@ -105,7 +105,7 @@ export async function GET(req: NextRequest) {
         else if (p.type === "date") row[name] = p.date?.start || null;
         else if (p.type === "checkbox") row[name] = p.checkbox;
         else if (p.type === "number") row[name] = p.number;
-        else if (p.type === "relation") row[name] = `relation(${(p.relation || []).length})`;
+        else if (p.type === "relation") row[name] = `relation(${(p.relation || []).length})` + ((p.relation || []).length ? `: ${(p.relation || []).map((r: any) => r.id).join(",")}` : "");
         else row[name] = `(${p.type})`;
       }
       return row;

@@ -401,6 +401,18 @@ export async function GET(req: NextRequest) {
       await applyActuals(notion, targetDate, jobs);
     }
 
+    // TEMP diagnostic: ?debugcancel=1 reports what the cancel-reader found vs
+    // the job page IDs on this day, so a mismatch is visible without guessing.
+    if (req.nextUrl.searchParams.get("debugcancel") === "1") {
+      const cancels = await cancelledForDate(notion, targetDate);
+      return NextResponse.json({
+        date: targetDate,
+        cancelKeys: Array.from(cancels.keys()),
+        cancelValues: Array.from(cancels.entries()).map(([k, v]) => ({ jobPageId: k, ...v })),
+        scheduleJobPageIds: jobs.map((j) => ({ jobPageId: j.jobPageId, name: j.name, cancelled: !!j.cancelled })),
+      });
+    }
+
     return NextResponse.json({ date: targetDate, jobs });
   } catch (err: any) {
     return NextResponse.json(

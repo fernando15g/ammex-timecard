@@ -6820,24 +6820,6 @@ function ReconCardBrowser({
                                   {!p.logged && !p.elsewhereJob && (
                                     <span className="text-[11px] shrink-0 ml-1" style={{ color: "#e5533c" }}>missing</span>
                                   )}
-                                  {!p.logged && (
-                                    <button
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setAddToCard({
-                                          jobId: m.jobId,
-                                          jobName: m.jobName,
-                                          date: m.date,
-                                          foreman: m.foreman,
-                                          worker: p.worker,
-                                        });
-                                      }}
-                                      className="ml-auto shrink-0 text-[11px] font-bold rounded-full px-2.5 py-1 border"
-                                      style={{ color: "#8fbcff", borderColor: "rgba(47,115,216,.5)" }}
-                                    >
-                                      Add
-                                    </button>
-                                  )}
                                 </div>
                               ))}
                               {cov.walkOns.map((w, wi) => (
@@ -6849,21 +6831,6 @@ function ReconCardBrowser({
                                   </span>
                                 </div>
                               ))}
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setAddToCard({
-                                    jobId: m.jobId,
-                                    jobName: m.jobName,
-                                    date: m.date,
-                                    foreman: m.foreman,
-                                    worker: "",
-                                  });
-                                }}
-                                className="mt-1 text-[11px] font-bold text-rebar active:text-safety"
-                              >
-                                + Add worker
-                              </button>
                             </div>
                           )}
                         </div>
@@ -7027,6 +6994,20 @@ function ReconCardBrowser({
                                     );
                                   })}
                                 </div>
+                                <button
+                                  onClick={() =>
+                                    setAddToCard({
+                                      jobId: c.projectId || "",
+                                      jobName: c.job,
+                                      date: c.date,
+                                      foreman: c.foreman || "",
+                                      worker: "",
+                                    })
+                                  }
+                                  className="mt-2 text-xs font-bold text-rebar active:text-safety"
+                                >
+                                  + Add worker to this card
+                                </button>
                               </div>
                             )}
                           </div>
@@ -7934,10 +7915,10 @@ function CloseMissingModal({
   );
 }
 
-// Add a timecard straight from a missing card's coverage dropdown. Job, date,
-// and foreman are prefilled from the card; the owner supplies the worker (fixed
-// for a quick-add of a known missing person, or picked from the roster for a
-// walk-on the foreman forgot) and hours. Tagged owner-added.
+// Add a timecard to an already-submitted card (e.g. a foreman forgot someone
+// on a card he did submit). Job, date, and foreman are prefilled from the card;
+// the owner picks the worker from the roster and enters hours. Tagged
+// owner-added. The new entry joins the card on refresh.
 function CoverageAddModal({
   card,
   roster,

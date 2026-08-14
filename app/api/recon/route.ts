@@ -1318,7 +1318,7 @@ export async function POST(req: Request) {
     }
 
     if (op === "add") {
-      const { worker, date, job, hours, foreman, projectId } = body;
+      const { worker, date, job, hours, foreman, projectId, ownerAdded } = body;
       const props: any = {
         [TIMECARD_PROPS.worker]: { title: [{ text: { content: worker } }] },
         [TIMECARD_PROPS.date]: { date: { start: date } },
@@ -1327,6 +1327,9 @@ export async function POST(req: Request) {
       if (job) props[TIMECARD_PROPS.job] = { rich_text: [{ text: { content: job } }] };
       if (foreman) props[TIMECARD_PROPS.foreman] = { rich_text: [{ text: { content: foreman } }] };
       if (projectId) props[TIMECARD_PROPS.projectHelper] = { relation: [{ id: projectId }] };
+      // Tag owner-added entries so they're distinguishable from foreman-submitted
+      // ones (e.g. the owner filling in a card a foreman forgot).
+      if (ownerAdded) props[TIMECARD_PROPS.notes] = { rich_text: [{ text: { content: "Added by owner" } }] };
       const created = await notion.pages.create({
         parent: { database_id: TIMECARDS_DB_ID },
         properties: props,

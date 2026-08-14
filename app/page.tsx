@@ -6585,6 +6585,19 @@ function ReconCardBrowser({
     }[]
   >([]);
   const [covOpen, setCovOpen] = useState<Record<string, boolean>>({}); // expanded coverage dropdowns
+  // Add-to-card: when set, opens the add modal prefilled with this card's
+  // job/date/foreman. `worker` is set for a quick-add of a known missing
+  // person, or "" to pick anyone (walk-on the foreman forgot).
+  const [addToCard, setAddToCard] = useState<
+    { jobId: string; jobName: string; date: string; foreman: string; worker: string } | null
+  >(null);
+  const [rosterNames, setRosterNames] = useState<string[]>([]);
+  useEffect(() => {
+    fetch("/api/recon?action=roster")
+      .then((r) => r.json())
+      .then((d) => { if (Array.isArray(d?.workers)) setRosterNames(d.workers); })
+      .catch(() => {});
+  }, []);
   const [loading, setLoading] = useState(true);
   const [openKey, setOpenKey] = useState<string>("");
   const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({});
@@ -6805,7 +6818,25 @@ function ReconCardBrowser({
                                     <span className="text-rebar text-[11px] shrink-0">at {p.elsewhereJob}</span>
                                   )}
                                   {!p.logged && !p.elsewhereJob && (
-                                    <span className="text-[11px] shrink-0" style={{ color: "#e5533c" }}>missing</span>
+                                    <span className="text-[11px] shrink-0 ml-1" style={{ color: "#e5533c" }}>missing</span>
+                                  )}
+                                  {!p.logged && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setAddToCard({
+                                          jobId: m.jobId,
+                                          jobName: m.jobName,
+                                          date: m.date,
+                                          foreman: m.foreman,
+                                          worker: p.worker,
+                                        });
+                                      }}
+                                      className="ml-auto shrink-0 text-[11px] font-bold rounded-full px-2.5 py-1 border"
+                                      style={{ color: "#8fbcff", borderColor: "rgba(47,115,216,.5)" }}
+                                    >
+                                      Add
+                                    </button>
                                   )}
                                 </div>
                               ))}
@@ -6818,6 +6849,21 @@ function ReconCardBrowser({
                                   </span>
                                 </div>
                               ))}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setAddToCard({
+                                    jobId: m.jobId,
+                                    jobName: m.jobName,
+                                    date: m.date,
+                                    foreman: m.foreman,
+                                    worker: "",
+                                  });
+                                }}
+                                className="mt-1 text-[11px] font-bold text-rebar active:text-safety"
+                              >
+                                + Add worker
+                              </button>
                             </div>
                           )}
                         </div>
@@ -7005,6 +7051,19 @@ function ReconCardBrowser({
           onSaved={() => {
             setEditEntry(null);
             afterWrite();
+          }}
+        />
+      )}
+
+      {addToCard && (
+        <CoverageAddModal
+          card={addToCard}
+          roster={rosterNames}
+          lang={lang}
+          onClose={() => setAddToCard(null)}
+          onDone={() => {
+            setAddToCard(null);
+            afterWrite(); // refresh coverage so the added person flips to ✓
           }}
         />
       )}
@@ -7871,6 +7930,158 @@ function CloseMissingModal({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Add a timecard straight from a missing card's coverage dropdown. Job, date,
+// and foreman are prefilled from the card; the owner supplies the worker (fixed
+// for a quick-add of a known missing person, or picked from the roster for a
+// walk-on the foreman forgot) and hours. Tagged owner-added.
+function CoverageAddModal({
+  card,
+  roster,
+  lang,
+  onClose,
+  onDone,
+}: {
+  card: { jobId: string; jobName: string; date: string; foreman: string; worker: string };
+  roster: string[];
+  lang: Lang;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const fixedWorker = !!card.worker;
+  const [worker, setWorker] = useState(card.worker);
+  const [hours, setHours] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const filtered = roster.filter((n) => n.toLowerCase().includes(query.toLowerCase()));
+
+  async function add() {
+    const h = parseFloat(hours);
+    if (isNaN(h) || !worker) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "add",
+          worker,
+          date: card.date,
+          job: card.jobName,
+          hours: h,
+          foreman: card.foreman,
+          projectId: card.jobId || undefined,
+          ownerAdded: true,
+        }),
+      }).then((r) => r.json());
+      if (res?.ok) onDone();
+      else setSaving(false);
+    } catch {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Add to card</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {card.jobName} · {prettyDate(card.date, lang)}
+          {card.foreman ? ` · ${card.foreman}` : ""}
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Worker</label>
+        {fixedWorker ? (
+          <div className="w-full bg-steel border border-line rounded-xl h-11 px-3 mb-4 flex items-center text-concrete font-semibold">
+            {worker}
+          </div>
+        ) : (
+          <button
+            onClick={() => { setPickerOpen(true); setQuery(""); }}
+            className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+          >
+            <span className={worker ? "text-concrete" : "text-rebar"}>{worker || "Pick a worker…"}</span>
+            <span className="text-rebar">▾</span>
+          </button>
+        )}
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          autoFocus={fixedWorker}
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          placeholder="e.g. 8"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4 focus:border-rebar outline-none"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={add}
+            disabled={saving || !hours || !worker}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            {saving ? "Adding…" : "Add timecard"}
+          </button>
+        </div>
+      </div>
+
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[85] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick worker</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search a worker…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => { setWorker(n); setPickerOpen(false); setQuery(""); }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete"
+                >
+                  {n}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

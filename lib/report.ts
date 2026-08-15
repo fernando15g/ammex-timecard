@@ -61,12 +61,24 @@ export interface WorkerSummary {
   total: number;
 }
 
+// One owner-entered correction: hours missed on an already-paid card. Dated to
+// the day the work happened, but paid in the week `payWeekISO` names.
+export interface ShortPayEntry {
+  worker: string;
+  dateISO: string; // when the work happened
+  payWeekISO: string; // Monday of the week that pays it
+  hours: number;
+  job: string;
+  jobId: string;
+  reason: string;
+}
+
 export interface ReportData {
   weekStartISO: string; // Monday
   weekEndISO: string; // Saturday
   dayLabels: string[]; // ["Sun 6/22", ...]
   sections: JobSection[]; // assigned jobs first, then unassigned
-  noHours: string[]; // active roster names with zero hours this week
+  shortPay?: ShortPayEntry[]; // corrections PAID in this span (see report-run)
   flags: Flag[];
   overHoursThreshold: number;
   lang: ReportLang;
@@ -374,11 +386,6 @@ export function buildReport(
     const idx = dayIndex(weekStartISO, r.dateISO);
     if (idx >= 0 && idx < nDays) workedNames.add(r.worker);
   }
-  const noHours = ff
-    ? []
-    : activeRoster
-        .filter((n) => !workedNames.has(n))
-        .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
   // Flags
   const flags: Flag[] = [];
@@ -591,7 +598,6 @@ export function buildReport(
     weekEndISO,
     dayLabels: finalDayLabels,
     sections: finalSections,
-    noHours,
     flags: outFlags,
     overHoursThreshold,
     lang,

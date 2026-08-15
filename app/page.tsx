@@ -100,6 +100,7 @@ export default function Page() {
   const [showRecon, setShowRecon] = useState(false);
   const [showVisits, setShowVisits] = useState(false);
   const [showRoster, setShowRoster] = useState(false);
+  const [showShortPay, setShowShortPay] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   // PIN gates the hamburger (admin area); unlock lasts the session so Reports
   // and Schedule share one entry.
@@ -1127,6 +1128,19 @@ export default function Page() {
                 <button
                   onClick={() => {
                     setShowMenu(false);
+                    setShowShortPay(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 1v22" />
+                    <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                  </svg>
+                  Short pay
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
                     setShowRoster(true);
                   }}
                   className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
@@ -1183,6 +1197,9 @@ export default function Page() {
 
       {/* Crew roster management (owner-only) */}
       {showRoster && <RosterPanel onClose={() => setShowRoster(false)} />}
+
+      {/* Short pay (owner-only) */}
+      {showShortPay && <ShortPayPanel onClose={() => setShowShortPay(false)} />}
       {showMySubs && foremanUnlocked && (
         <MySubmissionsPanel
           foreman={foreman}
@@ -8144,6 +8161,309 @@ function CoverageAddModal({
 // validated server-side (name + PIN) and scoped to that foreman — nothing here
 // can read another foreman's data or any owner section. Read-only by design:
 // corrections go to the owner in Reconcile. Includes self-serve PIN change.
+// Short Pay — owner-only. Records hours a worker was shorted on a card that has
+// already been paid, so they ride the CURRENT check without reopening a closed
+// week. The entry is an ordinary timecard row on the original date and project,
+// so job totals correct themselves; `Pay Week` alone decides which check it
+// rides in.
+function ShortPayPanel({ onClose }: { onClose: () => void }) {
+  type Entry = {
+    id: string;
+    worker: string;
+    dateISO: string;
+    payWeekISO: string;
+    hours: number;
+    job: string;
+    jobId: string;
+    reason: string;
+  };
+
+  function weekStartISO(offsetWeeks = 0): string {
+    const now = new Date();
+    const local = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = local.getDay();
+    const monOffset = dow === 0 ? -6 : 1 - dow;
+    const mon = new Date(local);
+    mon.setDate(local.getDate() + monOffset + offsetWeeks * 7);
+    return `${mon.getFullYear()}-${String(mon.getMonth() + 1).padStart(2, "0")}-${String(mon.getDate()).padStart(2, "0")}`;
+  }
+  function addDays(iso: string, n: number): string {
+    const [y, m, d] = iso.split("-").map(Number);
+    const dt = new Date(y, m - 1, d + n);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  }
+  function pretty(iso: string): string {
+    if (!iso) return "";
+    const [y, m, d] = iso.split("-").map(Number);
+    const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    return `${MO[m - 1]} ${d}`;
+  }
+
+  const [payWeek, setPayWeek] = useState(() => weekStartISO(0));
+  const [roster, setRoster] = useState<string[]>([]);
+  const [jobs, setJobs] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const [worker, setWorker] = useState("");
+  const [dateISO, setDateISO] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [hours, setHours] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => {
+    Promise.all([
+      fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/schedule-jobs").then((r) => r.json()).catch(() => ({})),
+    ]).then(([rd, jd]) => {
+      if (Array.isArray(rd?.workers)) setRoster(rd.workers);
+      if (Array.isArray(jd?.jobs)) setJobs(jd.jobs);
+    });
+  }, []);
+
+  function loadEntries(wk: string) {
+    setLoading(true);
+    fetch(`/api/short-pay?ownerPin=5314&start=${wk}&end=${addDays(wk, 6)}`)
+      .then((r) => r.json())
+      .then((d) => setEntries(Array.isArray(d?.entries) ? d.entries : []))
+      .catch(() => setEntries([]))
+      .finally(() => setLoading(false));
+  }
+  useEffect(() => {
+    loadEntries(payWeek);
+  }, [payWeek]);
+
+  async function add() {
+    const h = parseFloat(hours);
+    if (!worker) { setMsg("Pick a worker."); return; }
+    if (!Number.isFinite(h) || h <= 0) { setMsg("Enter the hours he was shorted."); return; }
+    setBusy(true);
+    setMsg("");
+    const proj = jobs.find((j) => j.id === projectId);
+    const res = await fetch("/api/short-pay", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ownerPin: "5314",
+        op: "add",
+        worker,
+        dateISO: dateISO || undefined,
+        projectId: projectId || undefined,
+        jobText: proj?.name || "",
+        hours: h,
+        payWeek,
+        reason,
+      }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) {
+      setMsg("Added.");
+      setWorker(""); setDateISO(""); setProjectId(""); setHours(""); setReason("");
+      loadEntries(payWeek);
+    } else setMsg(res?.error || "Couldn't save that entry.");
+  }
+
+  async function remove(id: string) {
+    setBusy(true);
+    await fetch("/api/short-pay", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerPin: "5314", op: "void", id }),
+    }).catch(() => null);
+    setBusy(false);
+    loadEntries(payWeek);
+  }
+
+  const total = Math.round(entries.reduce((s, e) => s + e.hours, 0) * 100) / 100;
+  const fieldCls =
+    "w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete";
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-1">
+          <div className="font-bold text-concrete text-lg">Short pay</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            Close
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          Hours missed on a card that was already paid. These get added to the pay
+          week you pick below.
+        </div>
+
+        {/* Pay week — the only thing that decides which check pays it */}
+        <div className="bg-graphite border border-line rounded-2xl p-4 mb-4">
+          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-2">
+            Pay week
+          </label>
+          <div className="flex gap-2 mb-2">
+            {[
+              { k: weekStartISO(0), label: "This week" },
+              { k: weekStartISO(1), label: "Next week" },
+            ].map((o) => (
+              <button
+                key={o.k}
+                onClick={() => setPayWeek(o.k)}
+                className={`flex-1 rounded-full h-10 text-sm font-bold ${
+                  payWeek === o.k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+          <div className="text-rebar text-xs">
+            {pretty(payWeek)} – {pretty(addDays(payWeek, 6))} · these hours ride that
+            week&apos;s payroll grid
+          </div>
+        </div>
+
+        {/* New entry */}
+        <div className="bg-graphite border border-line rounded-2xl p-4 mb-4">
+          <div className="text-concrete font-bold text-[15px] pb-2 mb-3 border-b border-white/10">
+            Add shorted hours
+          </div>
+
+          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+            Worker
+          </label>
+          <select
+            value={worker}
+            onChange={(e) => setWorker(e.target.value)}
+            className={`${fieldCls} mb-3`}
+          >
+            <option value="">Select worker…</option>
+            {roster.map((n) => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+
+          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+            Date shorted{" "}
+            <span className="font-normal normal-case text-rebar">(optional)</span>
+          </label>
+          <input
+            type="date"
+            value={dateISO}
+            onChange={(e) => setDateISO(e.target.value)}
+            className={`${fieldCls} mb-3`}
+          />
+
+          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+            Project
+          </label>
+          <select
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            className={`${fieldCls} mb-3`}
+          >
+            <option value="">Select project…</option>
+            {jobs.map((j) => (
+              <option key={j.id} value={j.id}>
+                {j.jobId ? `${j.name} (${j.jobId})` : j.name}
+              </option>
+            ))}
+          </select>
+
+          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+            Hours shorted
+          </label>
+          <input
+            type="number"
+            inputMode="decimal"
+            step="0.5"
+            min="0"
+            value={hours}
+            onChange={(e) => setHours(e.target.value)}
+            placeholder="0"
+            className={`${fieldCls} mb-3`}
+          />
+
+          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+            Reason{" "}
+            <span className="font-normal normal-case text-rebar">(optional)</span>
+          </label>
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Foreman entered 6 instead of 8"
+            className={`${fieldCls} mb-3`}
+          />
+
+          <button
+            onClick={add}
+            disabled={busy}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            {busy ? "…" : "Add to pay week"}
+          </button>
+          {msg && (
+            <div
+              className="text-xs mt-2 font-bold"
+              style={{ color: msg === "Added." ? "#4a9e63" : "#e5533c" }}
+            >
+              {msg}
+            </div>
+          )}
+        </div>
+
+        {/* What's already queued for this pay week */}
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-concrete font-bold text-[15px]">
+            Paying this week
+          </div>
+          <div className="text-concrete text-sm font-extrabold">{total}h</div>
+        </div>
+
+        {loading ? (
+          <div className="text-rebar text-sm">Loading…</div>
+        ) : entries.length === 0 ? (
+          <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">
+            Nothing added for this pay week.
+          </div>
+        ) : (
+          entries.map((e) => (
+            <div
+              key={e.id}
+              className="bg-graphite border border-line rounded-2xl p-4 mb-2"
+            >
+              <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                <div className="text-concrete font-bold text-[15px] truncate">
+                  {e.worker}
+                </div>
+                <div className="text-concrete text-sm font-extrabold shrink-0 ml-2">
+                  {e.hours}h
+                </div>
+              </div>
+              <div className="text-rebar text-xs">
+                {e.jobId ? `${e.job} (${e.jobId})` : e.job}
+                {e.dateISO ? ` · worked ${pretty(e.dateISO)}` : ""}
+              </div>
+              {e.reason && (
+                <div className="text-rebar text-xs mt-1 italic">{e.reason}</div>
+              )}
+              <button
+                onClick={() => remove(e.id)}
+                disabled={busy}
+                className="mt-3 text-xs font-bold rounded-full px-3 py-1.5 border disabled:opacity-40"
+                style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+              >
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MySubmissionsPanel({
   foreman,
   pin,

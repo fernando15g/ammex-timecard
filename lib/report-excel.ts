@@ -59,17 +59,6 @@ export function buildReportXlsx(rd: ReportData): Buffer {
     aoa.push([]);
   }
 
-  // No hours logged (only for the full roster report)
-  if (!rd.foremanReport) {
-    aoa.push([tr.noHoursHeader]);
-    if (rd.noHours.length === 0) {
-      aoa.push([tr.everyoneLogged]);
-    } else {
-      for (const n of rd.noHours) aoa.push([n.toUpperCase()]);
-    }
-    aoa.push([]);
-  }
-
   // Flags
   aoa.push([tr.flagsHeader]);
   if (rd.flags.length === 0) {

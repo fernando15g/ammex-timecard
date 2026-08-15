@@ -3,7 +3,7 @@
 // (e.g., "5 | 3", earliest job first) instead of a combined total. No-work
 // roster members are listed below. Read-only presentation of existing data.
 
-import { RawRow, prettifyJob, addDaysISO } from "./report";
+import { RawRow, prettifyJob, addDaysISO, ShortPayEntry } from "./report";
 import { ReportLang, DAY_NAMES } from "./report-i18n";
 
 export interface PayrollGridCell {
@@ -21,7 +21,7 @@ export interface PayrollGrid {
   weekEndISO: string;
   dayLabels: string[];
   rows: PayrollGridRow[]; // workers with hours, alphabetical
-  noHours: string[]; // active roster names with zero hours
+  shortPay?: ShortPayEntry[]; // corrections paid in this week
   grandTotal: number;
   lang: ReportLang;
 }
@@ -131,11 +131,6 @@ export function buildPayrollGrid(
     a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
   );
 
-  const worked = new Set(byWorker.keys()); // keys are lowercased
-  const noHours = activeRoster
-    .filter((n) => !worked.has(n.toLowerCase()))
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-
   const grandTotal = r2(gridRows.reduce((s, r) => s + r.total, 0));
 
   return {
@@ -143,7 +138,6 @@ export function buildPayrollGrid(
     weekEndISO,
     dayLabels,
     rows: gridRows,
-    noHours,
     grandTotal,
     lang,
   };

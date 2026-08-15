@@ -233,29 +233,50 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     y -= 30;
   }
 
-  // No hours logged (only meaningful for the full roster report)
-  if (!rd.foremanReport) {
-    ensure(40);
-    page.drawText(tr.noHoursHeader, { x: MARGIN, y: y - 12, size: 11, font: bold, color: steel });
-  y -= 20;
-  if (rd.noHours.length === 0) {
-    page.drawText(tr.everyoneLogged, { x: MARGIN, y: y - 10, size: 9, font, color: gray });
-    y -= 18;
-  } else {
-    // Lay names out in columns to save space
-    const perCol = Math.ceil(rd.noHours.length / 3);
-    const colWidth = (PAGE_W - MARGIN * 2) / 3;
-    const startY = y;
-    rd.noHours.forEach((n, i) => {
-      const col = Math.floor(i / perCol);
-      const row = i % perCol;
-      const yy = startY - 10 - row * 14;
-      ensure(0);
-      page.drawText(`• ${n.toUpperCase()}`, { x: MARGIN + col * colWidth, y: yy, size: 9, font, color: steel });
+  // Short Pay — corrections PAID in this span. Dated to the day the work
+  // happened, so they also appear in that earlier week's job totals; this
+  // section is what explains them and names the week that paid them.
+  const sp = rd.shortPay || [];
+  if (sp.length > 0) {
+    ensure(46);
+    page.drawRectangle({
+      x: MARGIN,
+      y: y - 18,
+      width: PAGE_W - MARGIN * 2,
+      height: 20,
+      color: flagBg,
     });
-    y = startY - 10 - perCol * 14 - 6;
-  }
-  y -= 10;
+    page.drawText(tr.shortPayHeader, {
+      x: MARGIN + 4, y: y - 13, size: 11, font: bold, color: steel,
+    });
+    y -= 26;
+    page.drawText(tr.shortPayNote, { x: MARGIN, y: y - 9, size: 8.5, font, color: gray });
+    y -= 20;
+    for (const e of sp) {
+      ensure(28);
+      page.drawText(`${e.worker.toUpperCase()} — ${e.hours} ${tr.hrs}`, {
+        x: MARGIN, y: y - 9, size: 9.5, font: bold, color: steel,
+      });
+      y -= 13;
+      const jobLine = e.jobId ? `${e.job} (${e.jobId})` : e.job;
+      const worked = e.dateISO ? `${tr.shortPayWorked} ${fmtNumericDate(e.dateISO)}` : "";
+      page.drawText([jobLine, worked].filter(Boolean).join("  ·  "), {
+        x: MARGIN + 10, y: y - 9, size: 9, font, color: gray,
+      });
+      y -= 13;
+      if (e.reason) {
+        ensure(14);
+        page.drawText(e.reason, { x: MARGIN + 10, y: y - 9, size: 8.5, font, color: gray });
+        y -= 13;
+      }
+      y -= 3;
+    }
+    ensure(20);
+    const spTotal = Math.round(sp.reduce((t, e) => t + e.hours, 0) * 100) / 100;
+    page.drawText(`${tr.shortPayTotal}: ${spTotal} ${tr.hrs}`, {
+      x: MARGIN, y: y - 10, size: 10, font: bold, color: safety,
+    });
+    y -= 26;
   }
 
   // Flags
@@ -668,22 +689,45 @@ export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> 
   });
   y -= 26;
 
-  // No-hours roster, grouped below
-  if (pg.noHours.length > 0) {
-    ensure(24, false);
-    page.drawText(tr.noHoursShort, { x: MARGIN, y: y - 8, size: 10.5, font: bold, color: steel });
+  // Short Pay — hours worked in an earlier, already-paid week that are PAID in
+  // this one. The grid above shows days actually worked, so these have no
+  // column: a row dated three weeks back has no day in this week. They are
+  // listed separately and added to the total the accountant pays.
+  const sp = pg.shortPay || [];
+  if (sp.length > 0) {
+    ensure(30, false);
+    page.drawText(tr.shortPayHeader, {
+      x: MARGIN, y: y - 8, size: 10.5, font: bold, color: steel,
+    });
+    y -= 16;
+    page.drawText(tr.shortPayNote, { x: MARGIN, y: y - 8, size: 8.5, font, color: gray });
     y -= 18;
-    const perRow = 3;
-    const colWidth = (PWP - MARGIN * 2) / perRow;
-    for (let i = 0; i < pg.noHours.length; i += perRow) {
-      ensure(14, false);
-      for (let k = 0; k < perRow && i + k < pg.noHours.length; k++) {
-        page.drawText(`•  ${pg.noHours[i + k].toUpperCase()}`, {
-          x: MARGIN + k * colWidth, y: y - 8, size: 9, font, color: gray,
-        });
-      }
-      y -= 13;
+    for (const e of sp) {
+      ensure(26, false);
+      page.drawText(`${e.worker.toUpperCase()}`, {
+        x: MARGIN, y: y - 8, size: 9.5, font: bold, color: steel,
+      });
+      page.drawText(`${e.hours} ${tr.hrs}`, {
+        x: PWP - MARGIN - 60, y: y - 8, size: 9.5, font: bold, color: safety,
+      });
+      y -= 12;
+      const jobLine = e.jobId ? `${e.job} (${e.jobId})` : e.job;
+      const worked = e.dateISO ? `${tr.shortPayWorked} ${fmtNumericDate(e.dateISO)}` : "";
+      const detail = [jobLine, worked, e.reason].filter(Boolean).join("  ·  ");
+      page.drawText(detail, { x: MARGIN + 10, y: y - 8, size: 8.5, font, color: gray });
+      y -= 15;
     }
+    const spTotal = Math.round(sp.reduce((t, e) => t + e.hours, 0) * 100) / 100;
+    ensure(34, false);
+    page.drawText(`${tr.shortPayTotal}: ${spTotal} ${tr.hrs}`, {
+      x: MARGIN, y: y - 8, size: 10, font: bold, color: steel,
+    });
+    y -= 18;
+    const payTotal = Math.round((pg.grandTotal + spTotal) * 100) / 100;
+    page.drawText(`${tr.totalToPay}: ${payTotal} ${tr.hrs}`, {
+      x: MARGIN, y: y - 8, size: 11.5, font: bold, color: safety,
+    });
+    y -= 24;
   }
 
   return pdf.save();

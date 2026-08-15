@@ -12,7 +12,7 @@ import {
   SCHEDULE_DB_ID,
   SCHEDULE_PROPS,
 } from "./notion";
-import { buildReport, RawRow } from "./report";
+import { buildReport, RawRow, ShortPayEntry, prettifyJob } from "./report";
 import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
 import { buildReportPdf, buildWorkerPdf, buildDailyPdf, buildPayrollGridPdf } from "./report-pdf";
 import { buildDailyReport } from "./report-daily";
@@ -135,7 +135,7 @@ export interface RunResult {
   weekEnd: string;
   jobs: number;
   unassigned: number;
-  noHours: number;
+  shortPay: number;
   flags: number;
   debug: any;
   pdfBase64?: string; // present in "view" mode
@@ -153,6 +153,93 @@ export interface RunOptions {
 // startISO..endISO is inclusive. Used by both the manual button and the cron.
 // Load all timecard rows in the span plus the active roster. Shared by the
 // on-demand report runner and the weekly auto-send bundle.
+// Short pay corrections PAID in this span. These are ordinary Timecard rows
+// dated to the day the work happened — often weeks earlier — so a date-range
+// query can never find them. They are located by `Pay Week` instead, which is
+// exactly what keeps them from being paid twice: the grid pays rows by Date,
+// this pays rows by Pay Week, and no row satisfies both rules.
+export async function loadShortPayForSpan(
+  startISO: string,
+  endISO: string
+): Promise<ShortPayEntry[]> {
+  const notion = new Client({ auth: NOTION_TOKEN });
+  const raw: any[] = [];
+  try {
+    let cursor: string | undefined = undefined;
+    do {
+      const res: any = await notion.databases.query({
+        database_id: TIMECARDS_DB_ID,
+        filter: {
+          and: [
+            { property: TIMECARD_PROPS.shortPay, checkbox: { equals: true } },
+            { property: TIMECARD_PROPS.payWeek, date: { on_or_after: startISO } },
+            { property: TIMECARD_PROPS.payWeek, date: { on_or_before: endISO } },
+            { property: TIMECARD_PROPS.voided, checkbox: { equals: false } },
+          ],
+        },
+        start_cursor: cursor,
+        page_size: 100,
+      });
+      raw.push(...res.results);
+      cursor = res.has_more ? res.next_cursor : undefined;
+    } while (cursor);
+  } catch {
+    // Properties may not exist until the first entry is saved — treat as none.
+    return [];
+  }
+
+  const needResolve = new Set<string>();
+  for (const pg of raw)
+    relationIds(pg.properties?.[TIMECARD_PROPS.projectHelper]).forEach((id) =>
+      needResolve.add(id)
+    );
+  const relTitle = new Map<string, string>();
+  for (const id of needResolve) {
+    try {
+      const pg: any = await notion.pages.retrieve({ page_id: id });
+      for (const key of Object.keys(pg.properties || {})) {
+        const pr = pg.properties[key];
+        if (pr?.type === "title") {
+          const t = (pr.title || []).map((x: any) => x.plain_text).join("").trim();
+          if (t) relTitle.set(id, t);
+          break;
+        }
+      }
+    } catch {
+      /* falls back to typed text */
+    }
+  }
+
+  const out: ShortPayEntry[] = [];
+  for (const pg of raw) {
+    const props = pg.properties || {};
+    const worker = normalizeName(readText(props[TIMECARD_PROPS.worker]));
+    if (!worker) continue;
+    let job = readText(props[TIMECARD_PROPS.projectHelper]);
+    if (!job)
+      job = relationIds(props[TIMECARD_PROPS.projectHelper])
+        .map((id) => relTitle.get(id) || "")
+        .filter(Boolean)
+        .join(", ");
+    if (!job) job = prettifyJob(readText(props[TIMECARD_PROPS.job]));
+    out.push({
+      worker,
+      dateISO: props[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "",
+      payWeekISO: props[TIMECARD_PROPS.payWeek]?.date?.start?.slice(0, 10) || "",
+      hours: typeof props[TIMECARD_PROPS.hours]?.number === "number"
+        ? props[TIMECARD_PROPS.hours].number
+        : 0,
+      job: job || "(job)",
+      jobId: readText(props[TIMECARD_PROPS.jobIdHelper]),
+      reason: readText(props[TIMECARD_PROPS.notes]),
+    });
+  }
+  out.sort(
+    (a, b) => a.worker.localeCompare(b.worker) || a.dateISO.localeCompare(b.dateISO)
+  );
+  return out;
+}
+
 export async function loadRowsAndRoster(
   startISO: string,
   endISO: string
@@ -375,11 +462,13 @@ export async function runWeeklyBundle(
 
   // Master report (job-grouped grid)
   const masterRd = buildReport(rows, activeRoster, startISO, THRESHOLD, endISO, undefined, "en", confirmedFlagKeys);
+  masterRd.shortPay = await loadShortPayForSpan(startISO, endISO);
   masterRd.onHold = await loadHeldRows(bundleNotion, startISO, endISO);
   const masterPdf = await buildReportPdf(masterRd);
 
   // Payroll Grid
   const pg = buildPayrollGrid(rows, activeRoster, startISO, endISO, "en");
+  pg.shortPay = await loadShortPayForSpan(startISO, endISO);
   const pgPdf = await buildPayrollGridPdf(pg);
 
   // Owner Review — Daily
@@ -527,6 +616,7 @@ export async function runReport(
   // 5-PG) Payroll Grid: every worker × day, PDF only.
   if (reportView === "payrollGrid") {
     const pg = buildPayrollGrid(rows, activeRoster, startISO, endISO, lang);
+    pg.shortPay = await loadShortPayForSpan(startISO, endISO);
     const pgPdf = await buildPayrollGridPdf(pg);
     const pgB64 = Buffer.from(pgPdf).toString("base64");
     const pgName = `Ammex_PayrollGrid_${startISO}_to_${endISO}`;
@@ -537,7 +627,7 @@ export async function runReport(
         weekEnd: endISO,
         jobs: pg.rows.length,
         unassigned: 0,
-        noHours: pg.noHours.length,
+        shortPay: pg.shortPay?.length || 0,
         flags: 0,
         debug: { workers: pg.rows.length },
         pdfBase64: pgB64,
@@ -553,7 +643,7 @@ export async function runReport(
         `Payroll Grid attached (PDF).\n\n` +
         `Range: ${startISO} to ${endISO}\n` +
         `Workers with hours: ${pg.rows.length}\n` +
-        `No hours: ${pg.noHours.length}`,
+        `Short pay entries: ${pg.shortPay?.length || 0}`,
       attachments: [{ filename: `${pgName}.pdf`, content: pgB64 }],
     });
     return {
@@ -562,7 +652,7 @@ export async function runReport(
       weekEnd: endISO,
       jobs: pg.rows.length,
       unassigned: 0,
-      noHours: pg.noHours.length,
+      shortPay: pg.shortPay?.length || 0,
       flags: 0,
       debug: { workers: pg.rows.length },
     };
@@ -611,7 +701,7 @@ export async function runReport(
         weekEnd: endISO,
         jobs: foremen.length,
         unassigned: 0,
-        noHours: 0,
+        shortPay: 0,
         flags: 0,
         debug: { foremen },
         pdfBase64: pdfB64All,
@@ -645,7 +735,7 @@ export async function runReport(
       weekEnd: endISO,
       jobs: foremen.length,
       unassigned: 0,
-      noHours: 0,
+      shortPay: 0,
       flags: 0,
       debug: { foremen },
     };
@@ -664,6 +754,9 @@ export async function runReport(
   );
   if (!flagsOn) rd.flags = [];
   rd.onHold = await loadHeldRows(notion, startISO, endISO, foreman || undefined);
+  // Short pay is a payroll matter, so it rides the master/owner report only —
+  // a foreman-filtered report shouldn't carry corrections he didn't submit.
+  if (!foreman) rd.shortPay = await loadShortPayForSpan(startISO, endISO);
 
   const isWorker = reportView === "worker";
   const isDaily = reportView === "daily";
@@ -689,7 +782,7 @@ export async function runReport(
       weekEnd: endISO,
       jobs: rd.sections.filter((s) => !s.unassigned).length,
       unassigned: rd.sections.filter((s) => s.unassigned).length,
-      noHours: rd.noHours.length,
+      shortPay: rd.shortPay?.length || 0,
       flags: rd.flags.length,
       debug: buildDebug(raw, rows),
       pdfBase64: pdfB64,
@@ -718,7 +811,6 @@ export async function runReport(
       `Range: ${startISO} to ${endISO}\n` +
       `Jobs: ${rd.sections.filter((s) => !s.unassigned).length}\n` +
       `Unassigned groups: ${rd.sections.filter((s) => s.unassigned).length}\n` +
-      `No hours logged: ${rd.noHours.length}\n` +
       `Flags: ${rd.flags.length}`,
     attachments: [
       { filename: `${fnameBase}.xlsx`, content: xlsxB64 },
@@ -732,7 +824,7 @@ export async function runReport(
     weekEnd: endISO,
     jobs: rd.sections.filter((s) => !s.unassigned).length,
     unassigned: rd.sections.filter((s) => s.unassigned).length,
-    noHours: rd.noHours.length,
+    shortPay: rd.shortPay?.length || 0,
     flags: rd.flags.length,
     debug: buildDebug(raw, rows),
   };

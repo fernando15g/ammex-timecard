@@ -58,6 +58,8 @@ export const TIMECARD_PROPS = {
   voided: "Voided", // Checkbox — void-not-delete for duplicates/corrections
   voidNote: "Void note", // Text (rich_text) — why it was voided
   underReview: "Under Review", // Checkbox — held pending owner review; excluded from counts
+  shortPay: "Short Pay", // Checkbox — owner-entered correction for hours missed on the original card
+  payWeek: "Pay Week", // Date — Monday of the week this correction gets PAID (not when worked)
   uncategorized: "Uncategorized", // Checkbox — intentionally no project (change order / paid training); stops the needs-project nag, bucketed as Uncategorized on reports
 };
 

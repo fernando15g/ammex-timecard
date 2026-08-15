@@ -34,6 +34,13 @@ function rt(prop: any): string {
   return "";
 }
 
+// Normalize a name/label for comparison: NFC, collapse whitespace, trim, lower.
+// Same helper the reports use, so a stray accent encoding or double space can
+// never split one person (or one job) into two.
+function nkey(s: string): string {
+  return (s || "").normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 // Ensure the PIN property exists on the roster (additive — never renames or
 // removes anything, so the owner platform is unaffected).
 async function ensurePinProperty(): Promise<void> {
@@ -49,7 +56,7 @@ async function ensurePinProperty(): Promise<void> {
 async function findRosterByName(
   name: string
 ): Promise<{ pageId: string; pin: string } | null> {
-  const target = name.trim().toLowerCase();
+  const target = nkey(name);
   if (!target) return null;
   let cursor: string | undefined;
   do {
@@ -60,7 +67,7 @@ async function findRosterByName(
     });
     for (const pg of res.results) {
       const n = rt(pg.properties?.[ROSTER_PROPS.name]);
-      if (n.trim().toLowerCase() === target) {
+      if (nkey(n) === target) {
         return { pageId: pg.id, pin: rt(pg.properties?.[PIN_PROP]).trim() };
       }
     }
@@ -118,43 +125,121 @@ export async function GET(req: NextRequest) {
         cursor = res.has_more ? res.next_cursor : undefined;
       } while (cursor);
 
-      const me = name.toLowerCase();
-      type Entry = { worker: string; hours: number; date: string; job: string };
+      const me = nkey(name);
+      type Entry = { worker: string; hours: number; date: string; job: string; jobKey: string };
       const mine: Entry[] = [];
+
+      // Resolve the assigned project the same way reports do: Project Helper
+      // (the project the owner assigns in Reconcile) is the source of truth,
+      // and the foreman's typed Job text is only a fallback for rows that
+      // haven't been assigned yet.
+      const relIds = (prop: any): string[] => {
+        if (!prop) return [];
+        if (prop.type === "relation") return (prop.relation || []).map((r: any) => r.id);
+        if (prop.type === "rollup" && prop.rollup?.type === "array") {
+          const out: string[] = [];
+          for (const sub of prop.rollup.array || []) {
+            if (sub?.type === "relation")
+              for (const r of sub.relation || []) out.push(r.id);
+          }
+          return out;
+        }
+        return [];
+      };
+      const needResolve = new Set<string>();
       for (const pg of rows) {
         const p = pg.properties || {};
-        const fm = rt(p[TIMECARD_PROPS.foreman]).trim().toLowerCase();
+        if (nkey(rt(p[TIMECARD_PROPS.foreman])) !== me) continue;
+        relIds(p[TIMECARD_PROPS.projectHelper]).forEach((id) => needResolve.add(id));
+      }
+      const relTitle = new Map<string, string>();
+      for (const id of needResolve) {
+        try {
+          const pg: any = await notion.pages.retrieve({ page_id: id });
+          for (const key of Object.keys(pg.properties || {})) {
+            const p = pg.properties[key];
+            if (p?.type === "title") {
+              const t = (p.title || []).map((x: any) => x.plain_text).join("").trim();
+              if (t) relTitle.set(id, t);
+              break;
+            }
+          }
+        } catch {
+          /* unresolved — falls back to typed text */
+        }
+      }
+
+      for (const pg of rows) {
+        const p = pg.properties || {};
+        const fm = nkey(rt(p[TIMECARD_PROPS.foreman]));
         // Scoping line — only this foreman's cards. `me` is guaranteed
         // non-empty by the PIN auth above, and the explicit !fm guard means a
         // blank-foreman card can never match anyone (defense in depth).
         if (!fm || fm !== me) continue;
+        let job = rt(p[TIMECARD_PROPS.projectHelper]);
+        if (!job) {
+          job = relIds(p[TIMECARD_PROPS.projectHelper])
+            .map((id) => relTitle.get(id) || "")
+            .filter(Boolean)
+            .join(", ");
+        }
+        if (!job) job = rt(p[TIMECARD_PROPS.job]); // unassigned — foreman's typed name
+        if (!job) job = "(job)";
         mine.push({
           worker: rt(p[TIMECARD_PROPS.worker]),
           hours: p[TIMECARD_PROPS.hours]?.number || 0,
           date: p[TIMECARD_PROPS.date]?.date?.start || "",
-          job: rt(p[TIMECARD_PROPS.job]) || "(job)",
+          job,
+          jobKey: nkey(job),
         });
       }
 
-      // Group: date (newest first) -> job -> crew
+      // Group: date (newest first) -> job -> crew. Jobs group on a normalized
+      // key so two spellings of the same unassigned typed name don't split into
+      // two cards; the label shown is the spelling used by the most rows.
       const byDate = new Map<string, Map<string, Entry[]>>();
       for (const e of mine) {
         if (!byDate.has(e.date)) byDate.set(e.date, new Map());
         const jm = byDate.get(e.date)!;
-        if (!jm.has(e.job)) jm.set(e.job, []);
-        jm.get(e.job)!.push(e);
+        if (!jm.has(e.jobKey)) jm.set(e.jobKey, []);
+        jm.get(e.jobKey)!.push(e);
       }
+      const bestLabel = (entries: Entry[], pick: (e: Entry) => string): string => {
+        const counts = new Map<string, number>();
+        for (const e of entries) {
+          const v = pick(e);
+          counts.set(v, (counts.get(v) || 0) + 1);
+        }
+        let best = pick(entries[0]);
+        let n = -1;
+        for (const [v, c] of counts) if (c > n) { best = v; n = c; }
+        return best;
+      };
       const days = Array.from(byDate.entries())
         .sort((a, b) => b[0].localeCompare(a[0]))
         .map(([date, jm]) => ({
           date,
-          jobs: Array.from(jm.entries()).map(([job, entries]) => ({
-            job,
-            total: Math.round(entries.reduce((s, e) => s + e.hours, 0) * 100) / 100,
-            crew: entries
-              .sort((a, b) => a.worker.localeCompare(b.worker))
-              .map((e) => ({ worker: e.worker, hours: e.hours })),
-          })),
+          jobs: Array.from(jm.values()).map((entries) => {
+            // Merge duplicate rows for the same worker (e.g. a worker added to
+            // the card after it was first submitted) into one line.
+            const byWorker = new Map<string, Entry[]>();
+            for (const e of entries) {
+              const k = nkey(e.worker);
+              if (!byWorker.has(k)) byWorker.set(k, []);
+              byWorker.get(k)!.push(e);
+            }
+            return {
+              job: bestLabel(entries, (e) => e.job),
+              total: Math.round(entries.reduce((s, e) => s + e.hours, 0) * 100) / 100,
+              crew: Array.from(byWorker.values())
+                .map((rowsForWorker) => ({
+                  worker: bestLabel(rowsForWorker, (e) => e.worker),
+                  hours:
+                    Math.round(rowsForWorker.reduce((s, e) => s + e.hours, 0) * 100) / 100,
+                }))
+                .sort((a, b) => a.worker.localeCompare(b.worker)),
+            };
+          }),
         }));
       const grand = Math.round(mine.reduce((s, e) => s + e.hours, 0) * 100) / 100;
       return NextResponse.json({ ok: true, days, grandTotal: grand });

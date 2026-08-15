@@ -8618,8 +8618,27 @@ function RosterEditModal({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then((r) => r.json()).catch(() => null);
-    if (res?.ok) onSaved();
-    else { setErr(res?.error || "Couldn't save — try again."); setBusy(false); }
+    if (!res?.ok) {
+      setErr(res?.error || "Couldn't save — try again.");
+      setBusy(false);
+      return;
+    }
+    // If a PIN was typed but "Set PIN" was never tapped, commit it here so the
+    // digits aren't silently discarded. Uses the just-saved name, so this still
+    // works when the name was renamed in the same save.
+    if (isEdit && pinInput.length === 4) {
+      const pinRes = await fetch("/api/foreman", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "set_pin", ownerPin: "5314", name: name.trim(), pin: pinInput }),
+      }).then((r) => r.json()).catch(() => ({ ok: false }));
+      if (!pinRes?.ok) {
+        setErr(pinRes?.error || "Saved, but the PIN didn't set. Try Set PIN again.");
+        setBusy(false);
+        return;
+      }
+    }
+    onSaved();
   }
 
   return (
@@ -8654,23 +8673,21 @@ function RosterEditModal({
                 (4 digits — lets this foreman open their read-only "My submissions")
               </span>
             </label>
-            <div className="flex gap-2">
-              <input
-                type="tel"
-                inputMode="numeric"
-                value={pinInput}
-                onChange={(e) => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
-                placeholder="••••"
-                className="flex-1 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center tracking-[0.4em]"
-              />
-              <button
-                onClick={savePin}
-                disabled={pinBusy || pinInput.length !== 4}
-                className="bg-steel border border-line text-concrete rounded-xl px-4 font-bold text-sm disabled:opacity-40"
-              >
-                {pinBusy ? "…" : "Set PIN"}
-              </button>
-            </div>
+            <input
+              type="tel"
+              inputMode="numeric"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              placeholder="••••"
+              className="w-full min-w-0 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center tracking-[0.4em]"
+            />
+            <button
+              onClick={savePin}
+              disabled={pinBusy || pinInput.length !== 4}
+              className="w-full mt-2 bg-steel border border-line text-concrete rounded-xl h-11 font-bold text-sm disabled:opacity-40"
+            >
+              {pinBusy ? "…" : "Set PIN"}
+            </button>
             {pinMsg && (
               <div className="text-xs mt-2" style={{ color: pinMsg.startsWith("PIN") ? "#4a9e63" : "#e5533c" }}>
                 {pinMsg}

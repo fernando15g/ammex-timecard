@@ -8161,87 +8161,75 @@ function CoverageAddModal({
 // validated server-side (name + PIN) and scoped to that foreman — nothing here
 // can read another foreman's data or any owner section. Read-only by design:
 // corrections go to the owner in Reconcile. Includes self-serve PIN change.
-// Type-to-filter picker. Defined at module scope on purpose — nesting it inside
-// the panel would remount it on every keystroke and the input would lose focus.
+// Search-and-scroll picker, same shape as the crew add box on the home screen:
+// search field on top, scrollable list underneath sized to about six rows. The
+// list stays visible after a pick so changing your mind is one tap, and the
+// current pick is highlighted rather than collapsing the control.
+//
+// Defined at module scope on purpose — nesting it inside the panel would
+// remount it on every keystroke and the keyboard would drop after each letter.
 function SearchPick({
   label,
   hint,
   placeholder,
-  selected,
+  selectedKey,
   options,
   onPick,
-  onClear,
 }: {
   label: string;
   hint?: string;
   placeholder: string;
-  selected: string; // display text of the current pick ("" when nothing picked)
+  selectedKey: string;
   options: { key: string; label: string }[];
   onPick: (key: string) => void;
-  onClear: () => void;
 }) {
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
   const matches = needle
     ? options.filter((o) => o.label.toLowerCase().includes(needle))
     : options;
-  const shown = matches.slice(0, 8);
 
   return (
     <div className="mb-3">
       <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
         {label}
-        {hint ? (
-          <span className="font-normal normal-case text-rebar"> {hint}</span>
-        ) : null}
+        {hint ? <span className="font-normal normal-case text-rebar"> {hint}</span> : null}
       </label>
-
-      {selected ? (
-        <div className="flex items-center justify-between bg-steel border border-line rounded-xl h-11 px-3">
-          <span className="text-concrete truncate">{selected}</span>
-          <button
-            onClick={() => {
-              onClear();
-              setQ("");
-            }}
-            className="shrink-0 ml-2 text-rebar text-xs font-bold bg-graphite rounded-full px-3 py-1.5"
-          >
-            Change
-          </button>
-        </div>
-      ) : (
-        <>
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder={placeholder}
-            className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete"
-          />
-          <div className="mt-2 rounded-xl overflow-hidden border border-line">
-            {shown.length === 0 ? (
-              <div className="text-rebar text-sm px-3 py-3 bg-steel">No matches.</div>
-            ) : (
-              shown.map((o) => (
+      <div className="bg-graphite rounded-2xl border border-line overflow-hidden">
+        <input
+          type="text"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={placeholder}
+          className="w-full bg-transparent px-4 py-3.5 text-concrete placeholder:text-rebar/60 outline-none border-b border-line/60"
+        />
+        {/* ~6 rows tall, then scrolls */}
+        <div className="max-h-[282px] overflow-y-auto overscroll-contain">
+          {matches.length === 0 ? (
+            <div className="px-4 py-3 text-rebar text-sm">No matches.</div>
+          ) : (
+            matches.map((o) => {
+              const on = o.key === selectedKey;
+              return (
                 <button
                   key={o.key}
-                  onClick={() => {
-                    onPick(o.key);
-                    setQ("");
-                  }}
-                  className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-b-0 truncate"
+                  onClick={() => onPick(o.key)}
+                  className={`w-full text-left px-4 py-3 border-b border-line/30 last:border-0 flex items-center justify-between gap-2 ${
+                    on ? "bg-steel text-concrete font-bold" : "text-concrete active:bg-steel"
+                  }`}
                 >
-                  {o.label}
+                  <span className="truncate">{o.label}</span>
+                  {on && (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e8801a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                  )}
                 </button>
-              ))
-            )}
-            {matches.length > shown.length && (
-              <div className="text-rebar text-xs px-3 py-2 bg-steel border-t border-line">
-                {matches.length - shown.length} more — keep typing to narrow.
-              </div>
-            )}
-          </div>
-        </>
-      )}
+              );
+            })
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -8418,10 +8406,9 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
           <SearchPick
             label="Worker"
             placeholder="Type a name…"
-            selected={worker}
+            selectedKey={worker}
             options={roster.map((n) => ({ key: n, label: n }))}
-            onPick={(k) => setWorker(k)}
-            onClear={() => setWorker("")}
+            onPick={(k) => setWorker(k === worker ? "" : k)}
           />
 
           <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
@@ -8438,21 +8425,12 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
           <SearchPick
             label="Project"
             placeholder="Type a job name or code…"
-            selected={
-              projectId
-                ? (() => {
-                    const j = jobs.find((x) => x.id === projectId);
-                    if (!j) return "";
-                    return j.jobId ? `${j.name} (${j.jobId})` : j.name;
-                  })()
-                : ""
-            }
+            selectedKey={projectId}
             options={jobs.map((j) => ({
               key: j.id,
               label: j.jobId ? `${j.name} (${j.jobId})` : j.name,
             }))}
-            onPick={(k) => setProjectId(k)}
-            onClear={() => setProjectId("")}
+            onPick={(k) => setProjectId(k === projectId ? "" : k)}
           />
 
           <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">

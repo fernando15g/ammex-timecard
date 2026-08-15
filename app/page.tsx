@@ -8161,6 +8161,91 @@ function CoverageAddModal({
 // validated server-side (name + PIN) and scoped to that foreman — nothing here
 // can read another foreman's data or any owner section. Read-only by design:
 // corrections go to the owner in Reconcile. Includes self-serve PIN change.
+// Type-to-filter picker. Defined at module scope on purpose — nesting it inside
+// the panel would remount it on every keystroke and the input would lose focus.
+function SearchPick({
+  label,
+  hint,
+  placeholder,
+  selected,
+  options,
+  onPick,
+  onClear,
+}: {
+  label: string;
+  hint?: string;
+  placeholder: string;
+  selected: string; // display text of the current pick ("" when nothing picked)
+  options: { key: string; label: string }[];
+  onPick: (key: string) => void;
+  onClear: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const matches = needle
+    ? options.filter((o) => o.label.toLowerCase().includes(needle))
+    : options;
+  const shown = matches.slice(0, 8);
+
+  return (
+    <div className="mb-3">
+      <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+        {label}
+        {hint ? (
+          <span className="font-normal normal-case text-rebar"> {hint}</span>
+        ) : null}
+      </label>
+
+      {selected ? (
+        <div className="flex items-center justify-between bg-steel border border-line rounded-xl h-11 px-3">
+          <span className="text-concrete truncate">{selected}</span>
+          <button
+            onClick={() => {
+              onClear();
+              setQ("");
+            }}
+            className="shrink-0 ml-2 text-rebar text-xs font-bold bg-graphite rounded-full px-3 py-1.5"
+          >
+            Change
+          </button>
+        </div>
+      ) : (
+        <>
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder={placeholder}
+            className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete"
+          />
+          <div className="mt-2 rounded-xl overflow-hidden border border-line">
+            {shown.length === 0 ? (
+              <div className="text-rebar text-sm px-3 py-3 bg-steel">No matches.</div>
+            ) : (
+              shown.map((o) => (
+                <button
+                  key={o.key}
+                  onClick={() => {
+                    onPick(o.key);
+                    setQ("");
+                  }}
+                  className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-b-0 truncate"
+                >
+                  {o.label}
+                </button>
+              ))
+            )}
+            {matches.length > shown.length && (
+              <div className="text-rebar text-xs px-3 py-2 bg-steel border-t border-line">
+                {matches.length - shown.length} more — keep typing to narrow.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Short Pay — owner-only. Records hours a worker was shorted on a card that has
 // already been paid, so they ride the CURRENT check without reopening a closed
 // week. The entry is an ordinary timecard row on the original date and project,
@@ -8330,19 +8415,14 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
             Add shorted hours
           </div>
 
-          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
-            Worker
-          </label>
-          <select
-            value={worker}
-            onChange={(e) => setWorker(e.target.value)}
-            className={`${fieldCls} mb-3`}
-          >
-            <option value="">Select worker…</option>
-            {roster.map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
+          <SearchPick
+            label="Worker"
+            placeholder="Type a name…"
+            selected={worker}
+            options={roster.map((n) => ({ key: n, label: n }))}
+            onPick={(k) => setWorker(k)}
+            onClear={() => setWorker("")}
+          />
 
           <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
             Date shorted{" "}
@@ -8355,21 +8435,25 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
             className={`${fieldCls} mb-3`}
           />
 
-          <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
-            Project
-          </label>
-          <select
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            className={`${fieldCls} mb-3`}
-          >
-            <option value="">Select project…</option>
-            {jobs.map((j) => (
-              <option key={j.id} value={j.id}>
-                {j.jobId ? `${j.name} (${j.jobId})` : j.name}
-              </option>
-            ))}
-          </select>
+          <SearchPick
+            label="Project"
+            placeholder="Type a job name or code…"
+            selected={
+              projectId
+                ? (() => {
+                    const j = jobs.find((x) => x.id === projectId);
+                    if (!j) return "";
+                    return j.jobId ? `${j.name} (${j.jobId})` : j.name;
+                  })()
+                : ""
+            }
+            options={jobs.map((j) => ({
+              key: j.id,
+              label: j.jobId ? `${j.name} (${j.jobId})` : j.name,
+            }))}
+            onPick={(k) => setProjectId(k)}
+            onClear={() => setProjectId("")}
+          />
 
           <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
             Hours shorted

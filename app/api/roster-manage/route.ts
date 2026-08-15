@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { Client } from "@notionhq/client";
 import { NOTION_TOKEN, CREW_ROSTER_DB_ID, ROSTER_PROPS } from "@/lib/notion";
 
-// Crew Roster management (owner-only, PIN-gated on the client).
+// Crew Roster management (owner-only). SERVER-SIDE gated: every request must
+// carry the owner PIN and is rejected without it. This endpoint is reachable on
+// the public deployment URL, so client-side gating alone was not protection —
+// especially now that it returns each foreman's access PIN.
 //
 // IMPORTANT: this writes to the SAME Crew Roster database the owner platform
 // reads read-only for capacity math. We MUST NOT rename or restructure any
@@ -13,6 +16,13 @@ import { NOTION_TOKEN, CREW_ROSTER_DB_ID, ROSTER_PROPS } from "@/lib/notion";
 export const dynamic = "force-dynamic";
 
 const notion = new Client({ auth: NOTION_TOKEN });
+
+const OWNER_PIN = "5314";
+const PIN_PROP = "PIN"; // rich_text on Crew Roster — foreman self-service PIN
+
+function ownerOk(pin: string | null | undefined): boolean {
+  return (pin || "").trim() === OWNER_PIN;
+}
 
 function readRole(prop: any): string {
   if (!prop) return "";
@@ -57,10 +67,12 @@ function rolePayload(roleType: string, value: string): any {
   return { rich_text: v ? [{ text: { content: v } }] : [] };
 }
 
-// GET — full roster with detail (for the management screen).
-export async function GET() {
+// GET — full roster with detail (for the management screen). Owner PIN required.
+export async function GET(req: NextRequest) {
   if (!NOTION_TOKEN)
     return NextResponse.json({ error: "Server not configured." }, { status: 500 });
+  if (!ownerOk(req.nextUrl.searchParams.get("ownerPin")))
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   try {
     const people: {
       id: string;
@@ -68,6 +80,7 @@ export async function GET() {
       role: string;
       active: boolean;
       status: string;
+      pin: string;
     }[] = [];
     let cursor: string | undefined;
     do {
@@ -86,6 +99,9 @@ export async function GET() {
           role: readRole(p[ROSTER_PROPS.role]),
           active: !!p[ROSTER_PROPS.active]?.checkbox,
           status: readText(p[ROSTER_PROPS.status]),
+          // Access PIN, if one has been issued. Only ever leaves the server on
+          // an owner-authenticated request.
+          pin: readText(p[PIN_PROP]).trim(),
         });
       }
       cursor = res.has_more ? res.next_cursor : undefined;
@@ -103,7 +119,7 @@ export async function GET() {
   }
 }
 
-// POST — add / edit / set-active. PIN checked client-side (same as other admin ops).
+// POST — add / edit / set-active. Owner PIN required server-side.
 export async function POST(req: NextRequest) {
   if (!NOTION_TOKEN)
     return NextResponse.json({ error: "Server not configured." }, { status: 500 });
@@ -113,6 +129,8 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Bad request." }, { status: 400 });
   }
+  if (!ownerOk(body.ownerPin))
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const op = body.op as string;
 
   try {

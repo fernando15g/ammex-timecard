@@ -1008,7 +1008,19 @@ export default function Page() {
             ) : !adminUnlocked ? (
               // PIN entry — gates the whole admin area.
               <div className="p-5">
-                <div className="text-concrete font-semibold mb-1">{tr.enterPin}</div>
+                <div className="flex items-start justify-between gap-3 mb-1">
+                  <div className="text-concrete font-semibold">{tr.enterPin}</div>
+                  <button
+                    onClick={() => {
+                      setShowMenu(false);
+                      setAdminPin("");
+                      setAdminPinError(false);
+                    }}
+                    className="shrink-0 -mt-1 -mr-1 text-rebar text-xs font-bold bg-steel border border-line rounded-full px-3 py-1.5"
+                  >
+                    {lang === "es" ? "Cerrar" : "Close"}
+                  </button>
+                </div>
                 <div className="text-rebar text-xs mb-3">{tr.pinSubtitle}</div>
                 <input
                   type="tel"

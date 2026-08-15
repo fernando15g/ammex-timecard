@@ -1,0 +1,9446 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Lang, t } from "@/lib/strings";
+
+// Locks the underlying page's scroll while a full-screen panel is open, so
+// touch scrolling can't grab the timesheet page behind Reports/Schedule/Review.
+function useLockBodyScroll() {
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    const prevPosition = document.body.style.position;
+    const prevTop = document.body.style.top;
+    const prevWidth = document.body.style.width;
+    const scrollY = window.scrollY;
+    document.body.style.overflow = "hidden";
+    document.body.style.position = "fixed";
+    document.body.style.top = `-${scrollY}px`;
+    document.body.style.width = "100%";
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.body.style.position = prevPosition;
+      document.body.style.top = prevTop;
+      document.body.style.width = prevWidth;
+      window.scrollTo(0, scrollY);
+    };
+  }, []);
+}
+
+interface Worker {
+  name: string;
+  hours: number | null;
+  isNew?: boolean;
+}
+
+const DRAFT_KEY = "ammex_tc_draft_v1";
+const FOREMAN_KEY = "ammex_tc_foreman_v1";
+const LANG_KEY = "ammex_tc_lang_v1";
+const LASTCREW_KEY = "ammex_tc_lastcrew_v1";
+
+const QUICK_HOURS = [4, 6, 8, 10];
+
+function todayISO(): string {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+// Friendly, bilingual date like "Tuesday, Jun 30" / "Martes, 30 jun".
+function friendlyDate(iso: string, lang: "en" | "es"): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const daysEn = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const daysEs = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
+  const monEn = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const monEs = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+  return lang === "es"
+    ? `${daysEs[dow]}, ${d} ${monEs[m - 1]}`
+    : `${daysEn[dow]}, ${monEn[m - 1]} ${d}`;
+}
+
+export default function Page() {
+  const [lang, setLang] = useState<Lang>("es");
+  const tr = t(lang);
+
+  const [foreman, setForeman] = useState<string>("");
+  const [showForemanPicker, setShowForemanPicker] = useState(false);
+
+  const [date, setDate] = useState<string>(todayISO());
+  // The date came from a leftover draft on a previous day and hasn't been
+  // confirmed by the worker. If so, we ask "which day?" at Review time.
+  const staleUnconfirmed = useRef(false);
+  const [showDatePrompt, setShowDatePrompt] = useState(false);
+  const dateFieldRef = useRef<HTMLDivElement>(null);
+  const [datePulse, setDatePulse] = useState(false);
+
+  // "Other date" from the prompt: close it, bring the date field into view,
+  // then pulse it so the worker sees where to change the date.
+  function goToDateField() {
+    setShowDatePrompt(false);
+    setTimeout(() => {
+      dateFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setDatePulse(true);
+      setTimeout(() => setDatePulse(false), 2600);
+    }, 60);
+  }
+  const [job, setJob] = useState("");
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [workDone, setWorkDone] = useState("");
+  const [notes, setNotes] = useState("");
+
+  const [roster, setRoster] = useState<string[]>([]);
+  const [foremen, setForemen] = useState<string[]>([]);
+  const [rosterLoaded, setRosterLoaded] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [justUpdated, setJustUpdated] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [showReports, setShowReports] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [showRecon, setShowRecon] = useState(false);
+  const [showVisits, setShowVisits] = useState(false);
+  const [showRoster, setShowRoster] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  // PIN gates the hamburger (admin area); unlock lasts the session so Reports
+  // and Schedule share one entry.
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminPin, setAdminPin] = useState("");
+  const [adminPinError, setAdminPinError] = useState(false);
+  // Foreman self-service: unlocked by the selected foreman's personal PIN
+  // (server-validated). Grants ONLY the read-only "My submissions" view.
+  const [foremanUnlocked, setForemanUnlocked] = useState(false);
+  const [foremanPin, setForemanPin] = useState("");
+  const [showMySubs, setShowMySubs] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const [screen, setScreen] = useState<"form" | "review">("form");
+  const [submitState, setSubmitState] = useState<
+    "idle" | "submitting" | "sent" | "error"
+  >("idle");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [selfRemoveName, setSelfRemoveName] = useState<string | null>(null);
+  const [validationMsg, setValidationMsg] = useState("");
+
+  const hydrated = useRef(false);
+  const addBoxRef = useRef<HTMLDivElement>(null);
+  // Tracks whether the foreman deliberately changed the date. If he hasn't,
+  // the date auto-follows "today" (including when the app returns to focus).
+  const dateManual = useRef(false);
+  // Tracks whether the foreman deliberately took himself out of the crew for
+  // this card, so we don't keep auto-adding him back.
+  const foremanRemoved = useRef(false);
+
+  // ---- Hydrate persisted state on first load ----
+  useEffect(() => {
+    try {
+      const savedLang = localStorage.getItem(LANG_KEY) as Lang | null;
+      if (savedLang === "en" || savedLang === "es") setLang(savedLang);
+
+      const savedForeman = localStorage.getItem(FOREMAN_KEY);
+      if (savedForeman) setForeman(savedForeman);
+      else setShowForemanPicker(true);
+
+      const draftRaw = localStorage.getItem(DRAFT_KEY);
+      if (draftRaw) {
+        const d = JSON.parse(draftRaw);
+        if (d.foremanRemoved) foremanRemoved.current = true;
+        let restored: Worker[] = Array.isArray(d.workers) ? d.workers : [];
+        if (savedForeman && !foremanRemoved.current) {
+          restored = ensureForeman(savedForeman, restored);
+        }
+        const draftHasHours = restored.some((w) => w.hours != null && w.hours > 0);
+
+        if (d.date) {
+          if (d.date < todayISO()) {
+            // Leftover draft from a previous day.
+            if (draftHasHours) {
+              // Real work on it — keep the old date but leave it UNCONFIRMED,
+              // so Review asks "which day?" before submitting.
+              setDate(d.date);
+              staleUnconfirmed.current = true;
+            } else {
+              // Empty/abandoned — silently freshen to today, no interruption.
+              setDate(todayISO());
+            }
+          } else {
+            setDate(d.date);
+            if (d.date !== todayISO()) dateManual.current = true;
+          }
+        }
+        if (typeof d.job === "string") setJob(d.job);
+        setWorkers(restored);
+        if (typeof d.workDone === "string") setWorkDone(d.workDone);
+        if (typeof d.notes === "string") setNotes(d.notes);
+      } else {
+        // No draft: prefill crew from last submitted crew, hours blank
+        let initial: Worker[] = [];
+        const lastRaw = localStorage.getItem(LASTCREW_KEY);
+        if (lastRaw) {
+          const last = JSON.parse(lastRaw) as string[];
+          if (Array.isArray(last) && last.length) {
+            initial = last.map((n) => ({ name: n, hours: null }));
+          }
+        }
+        if (savedForeman) initial = ensureForeman(savedForeman, initial);
+        setWorkers(initial);
+      }
+    } catch {
+      /* ignore */
+    }
+    hydrated.current = true;
+  }, []);
+
+  // ---- Fetch roster (reusable, used on load and by the refresh button) ----
+  const loadRoster = useCallback(async () => {
+    try {
+      const r = await fetch("/api/roster");
+      const d = await r.json();
+      if (Array.isArray(d.workers)) setRoster(d.workers);
+      if (Array.isArray(d.foremen)) setForemen(d.foremen);
+    } catch {
+      /* ignore */
+    } finally {
+      setRosterLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadRoster();
+  }, [loadRoster]);
+
+  // Refresh the roster only (never touches the form). Brief spin + confirm.
+  async function refreshRoster() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setJustUpdated(false);
+    await loadRoster();
+    setRefreshing(false);
+    setJustUpdated(true);
+    window.setTimeout(() => setJustUpdated(false), 1800);
+  }
+
+  // When the search box is focused, lift it toward the top so the matching
+  // names stay visible above the on-screen keyboard. Fires a few times to ride
+  // out the keyboard's open animation (iOS timing is inconsistent).
+  function liftSearchBox() {
+    const doScroll = () =>
+      addBoxRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    window.setTimeout(doScroll, 150);
+    window.setTimeout(doScroll, 400);
+    window.setTimeout(doScroll, 650);
+  }
+
+  // ---- Re-check today's date whenever the app returns to focus ----
+  // Foremen often leave the app open in the background overnight; this makes
+  // sure the date is correct for the current day when they come back, unless
+  // they deliberately picked a different date.
+  useEffect(() => {
+    function refresh() {
+      if (!dateManual.current && submitState !== "sent") {
+        setDate(todayISO());
+      }
+    }
+    function onVisible() {
+      if (document.visibilityState === "visible") refresh();
+    }
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [submitState]);
+
+  // ---- Persist draft whenever it changes ----
+  useEffect(() => {
+    if (!hydrated.current) return;
+    try {
+      localStorage.setItem(
+        DRAFT_KEY,
+        JSON.stringify({
+          date,
+          job,
+          workers,
+          workDone,
+          notes,
+          foremanRemoved: foremanRemoved.current,
+        })
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [date, job, workers, workDone, notes]);
+
+  useEffect(() => {
+    if (!hydrated.current) return;
+    try {
+      localStorage.setItem(LANG_KEY, lang);
+    } catch {
+      /* ignore */
+    }
+  }, [lang]);
+
+  // ---- Derived ----
+  const selectedNames = useMemo(
+    () => new Set(workers.map((w) => w.name.toLowerCase())),
+    [workers]
+  );
+
+  const suggestions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const pool = roster.filter((n) => !selectedNames.has(n.toLowerCase()));
+    if (!q) return pool.slice(0, 200);
+    // Rank: names that start with the query come first, then the rest —
+    // but every match is shown as an equal option (no single highlighted pick),
+    // so common first names don't hide the person you actually want.
+    const matches = pool.filter((n) => n.toLowerCase().includes(q));
+    matches.sort((a, b) => {
+      const aStarts = a.toLowerCase().startsWith(q) ? 0 : 1;
+      const bStarts = b.toLowerCase().startsWith(q) ? 0 : 1;
+      if (aStarts !== bStarts) return aStarts - bStarts;
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    });
+    return matches.slice(0, 200);
+  }, [query, roster, selectedNames]);
+
+  const exactExists = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      roster.some((n) => n.toLowerCase() === q) ||
+      workers.some((w) => w.name.toLowerCase() === q)
+    );
+  }, [query, roster, workers]);
+
+  const total = useMemo(
+    () => workers.reduce((s, w) => s + (w.hours || 0), 0),
+    [workers]
+  );
+
+  // ---- Actions ----
+  function addWorker(name: string, isNew = false) {
+    const clean = name.trim();
+    if (!clean) return;
+    if (workers.some((w) => w.name.toLowerCase() === clean.toLowerCase())) {
+      setQuery("");
+      return;
+    }
+    setWorkers((prev) => [...prev, { name: clean, hours: null, isNew }]);
+    setQuery("");
+    // Only scroll if the add-worker box has been pushed out of view. When it's
+    // already visible, leave the screen completely still (no jerk on rapid adds).
+    requestAnimationFrame(() => {
+      const el = addBoxRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      const fullyVisible = rect.top >= 0 && rect.bottom <= vh;
+      if (!fullyVisible) {
+        el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
+  }
+
+  function removeWorker(name: string) {
+    // Removing yourself (the foreman) asks for a quick confirm.
+    if (foreman && name.toLowerCase() === foreman.toLowerCase()) {
+      setSelfRemoveName(name);
+      return;
+    }
+    setWorkers((prev) => prev.filter((w) => w.name !== name));
+  }
+
+  function confirmSelfRemove() {
+    if (!selfRemoveName) return;
+    foremanRemoved.current = true;
+    setWorkers((prev) =>
+      prev.filter((w) => w.name.toLowerCase() !== selfRemoveName.toLowerCase())
+    );
+    setSelfRemoveName(null);
+  }
+
+  function setWorkerHours(name: string, hours: number | null) {
+    setWorkers((prev) =>
+      prev.map((w) => (w.name === name ? { ...w, hours } : w))
+    );
+  }
+
+  function applyAll(hours: number) {
+    setWorkers((prev) => prev.map((w) => ({ ...w, hours })));
+  }
+
+  function chooseForeman(name: string) {
+    const prev = foreman;
+    setForeman(name);
+    // Switching identity revokes any foreman-PIN unlock from the previous one.
+    setForemanUnlocked(false);
+    setForemanPin("");
+    try {
+      localStorage.setItem(FOREMAN_KEY, name);
+    } catch {}
+    foremanRemoved.current = false;
+    setWorkers((list) => {
+      let next = list;
+      // On a clean swap, drop the old foreman if he was added but untouched.
+      if (prev && prev.toLowerCase() !== name.toLowerCase()) {
+        next = next.filter(
+          (w) =>
+            !(w.name.toLowerCase() === prev.toLowerCase() && w.hours == null)
+        );
+      }
+      return ensureForeman(name, next);
+    });
+    setShowForemanPicker(false);
+  }
+
+  function validate(): string {
+    if (!foreman) return tr.noForeman;
+    if (!job.trim()) return tr.noJob;
+    if (date > todayISO()) return tr.noFutureDate;
+    if (workers.length === 0) return tr.noCrew;
+    if (workers.some((w) => !w.hours || w.hours <= 0)) return tr.noHours;
+    return "";
+  }
+
+  function goReview() {
+    const msg = validate();
+    if (msg) {
+      setValidationMsg(msg);
+      return;
+    }
+    // If the date came from a leftover previous-day draft and hasn't been
+    // confirmed, ask "which day?" before showing the review screen.
+    if (staleUnconfirmed.current && date !== todayISO()) {
+      setValidationMsg("");
+      setShowDatePrompt(true);
+      return;
+    }
+    setValidationMsg("");
+    setScreen("review");
+  }
+
+  async function submit() {
+    setSubmitState("submitting");
+    setErrorMsg("");
+    try {
+      const res = await fetch("/api/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          foreman,
+          date,
+          job: job.trim(),
+          workDone: workDone.trim(),
+          notes: notes.trim(),
+          workers: workers.map((w) => ({
+            name: w.name,
+            hours: w.hours,
+            isNew: !!w.isNew,
+          })),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || "fail");
+      }
+      // Success: remember crew, clear draft
+      try {
+        localStorage.setItem(
+          LASTCREW_KEY,
+          JSON.stringify(workers.map((w) => w.name))
+        );
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {}
+      setSubmitState("sent");
+    } catch (e: any) {
+      setSubmitState("error");
+      setErrorMsg(tr.failBody);
+    }
+  }
+
+  function clearForm(keepDate = false) {
+    setJob("");
+    foremanRemoved.current = false;
+    setWorkers(foreman ? ensureForeman(foreman, []) : []);
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    if (!keepDate) {
+      dateManual.current = false;
+      setDate(todayISO());
+    }
+    try {
+      localStorage.removeItem(DRAFT_KEY);
+    } catch {}
+    setShowClearConfirm(false);
+  }
+
+  function logAnotherTimecard() {
+    // After a successful submit: keep the crew, clear job + hours, and carry
+    // the last-used date forward (so a Saturday batch flows day to day).
+    // The carried date is session-only — a true cold start still defaults to
+    // today, and an unfinished card is preserved as-is by the draft system.
+    const last = workers.map((w) => w.name);
+    setJob("");
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    foremanRemoved.current = false;
+    // Carry the current date forward; mark it manual so the focus re-check
+    // doesn't snap it back to today during the batch.
+    dateManual.current = true;
+    let next = last.map((n) => ({ name: n, hours: null as number | null }));
+    if (foreman) next = ensureForeman(foreman, next);
+    setWorkers(next);
+    setSubmitState("idle");
+    setScreen("form");
+  }
+
+  function finishSession() {
+    // The clean exit from the "Sent" screen: a fresh card, date back to today,
+    // crew remembered for next time.
+    const last = workers.map((w) => w.name);
+    setJob("");
+    setWorkDone("");
+    setNotes("");
+    setQuery("");
+    dateManual.current = false;
+    setDate(todayISO());
+    foremanRemoved.current = false;
+    let next = last.map((n) => ({ name: n, hours: null as number | null }));
+    if (foreman) next = ensureForeman(foreman, next);
+    setWorkers(next);
+    setSubmitState("idle");
+    setScreen("form");
+  }
+
+  // ---- Foreman picker (first-run / change) ----
+  if (showForemanPicker) {
+    return (
+      <ForemanPicker
+        roster={foremen}
+        rosterLoaded={rosterLoaded}
+        tr={tr}
+        lang={lang}
+        setLang={setLang}
+        onPick={chooseForeman}
+        current={foreman}
+        onCancel={foreman ? () => setShowForemanPicker(false) : undefined}
+      />
+    );
+  }
+
+  // ---- Sent confirmation screen ----
+  if (submitState === "sent") {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center px-6 text-center">
+        <div className="text-safety text-6xl mb-4">✓</div>
+        <h1 className="text-2xl font-bold mb-2">{tr.sent}</h1>
+        <p className="text-rebar mb-10">{job}</p>
+        <button
+          onClick={logAnotherTimecard}
+          className="w-full max-w-sm bg-safety text-steel font-bold py-4 rounded-2xl mb-3 active:bg-safetyDark"
+        >
+          {tr.logAnotherCard}
+        </button>
+        <button
+          onClick={finishSession}
+          className="w-full max-w-sm bg-graphite text-concrete font-semibold py-4 rounded-2xl"
+        >
+          {tr.done}
+        </button>
+      </div>
+    );
+  }
+
+  // ---- Review screen ----
+  if (screen === "review") {
+    return (
+      <div className="min-h-screen flex flex-col">
+        <TopBar tr={tr} lang={lang} setLang={setLang} />
+        <div className="flex-1 overflow-y-auto px-5 pb-32">
+          <h2 className="text-xs font-bold text-rebar tracking-wide mt-4 mb-3">
+            {tr.reviewTitle.toUpperCase()}
+          </h2>
+
+          {/* Date heads-up: only when the card isn't dated today. */}
+          {date !== todayISO() && (
+            <div className="mb-3 rounded-2xl bg-safety/25 border-2 border-safety px-4 py-3 flex items-start gap-2">
+              <span className="text-safety text-xl leading-none mt-0.5">⚠</span>
+              <span className="text-base font-bold text-concrete">
+                {tr.dateNotToday.replace("{date}", friendlyDate(date, lang))}
+              </span>
+            </div>
+          )}
+
+          <div className="bg-concrete text-steel rounded-2xl p-5">
+            <div className="text-lg font-bold">{job}</div>
+            <div className="text-sm text-graphite/70 mb-4">
+              {prettyDate(date, lang)} · {foreman}
+            </div>
+            <div className="flex justify-between text-[11px] font-bold text-graphite/50 border-b border-graphite/20 pb-1 mb-2">
+              <span>{tr.workerHeader.toUpperCase()}</span>
+              <span>{tr.hoursHeader.toUpperCase()}</span>
+            </div>
+            {workers.map((w) => (
+              <button
+                key={w.name}
+                onClick={() => setScreen("form")}
+                className="w-full flex justify-between py-2 border-b border-graphite/10 text-left active:bg-graphite/5"
+              >
+                <span className="font-medium">{w.name}</span>
+                <span className="font-semibold tabular-nums">{w.hours}</span>
+              </button>
+            ))}
+            <div className="flex justify-between items-center pt-3 mt-1 border-t border-graphite/20">
+              <div>
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.workersCount.toUpperCase()}
+                </div>
+                <div className="text-2xl font-extrabold text-steel tabular-nums">
+                  {workers.length}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.total.toUpperCase()}
+                </div>
+                <div className="text-2xl font-extrabold text-safetyDark tabular-nums">
+                  {round2(total)}
+                </div>
+              </div>
+            </div>
+            {workDone.trim() && (
+              <div className="mt-4 text-sm">
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.workDone.toUpperCase()}
+                </div>
+                <div>{workDone}</div>
+              </div>
+            )}
+            {notes.trim() && (
+              <div className="mt-3 text-sm">
+                <div className="text-[11px] font-bold text-graphite/50">
+                  {tr.notes.toUpperCase()}
+                </div>
+                <div>{notes}</div>
+              </div>
+            )}
+          </div>
+
+          {submitState === "error" && (
+            <div className="mt-4 bg-red-500/15 border border-red-500/40 rounded-2xl p-4 text-red-200">
+              <div className="font-bold">{tr.failTitle}</div>
+              <div className="text-sm">{errorMsg}</div>
+            </div>
+          )}
+        </div>
+
+        {/* Sticky bottom bar */}
+        <div className="fixed bottom-0 inset-x-0 bg-steel border-t border-line p-4 flex gap-3">
+          <button
+            onClick={() => setScreen("form")}
+            disabled={submitState === "submitting"}
+            className="px-5 py-4 rounded-2xl bg-graphite text-concrete font-semibold disabled:opacity-50"
+          >
+            {tr.back}
+          </button>
+          <button
+            onClick={submit}
+            disabled={submitState === "submitting"}
+            className="flex-1 py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
+          >
+            {submitState === "submitting" ? tr.submitting : tr.submit}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Main form ----
+  // Proceed to the review screen once the date is settled.
+  function proceedToReview() {
+    staleUnconfirmed.current = false;
+    setShowDatePrompt(false);
+    setValidationMsg("");
+    setScreen("review");
+  }
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      {/* Date check at Review — only when the date came from a leftover draft on
+          a previous day and the worker hasn't confirmed it. Date-only buttons. */}
+      {showDatePrompt && (
+        <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-6">
+          <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5 relative">
+            <button
+              onClick={() => setShowDatePrompt(false)}
+              aria-label="Close"
+              className="absolute top-3 right-3 w-8 h-8 rounded-full bg-steel border border-line text-rebar flex items-center justify-center active:text-safety"
+            >
+              ✕
+            </button>
+            <div className="text-concrete text-xl font-bold text-center mt-1 mb-5">
+              {tr.staleTitle}
+            </div>
+            {/* Leftover draft date */}
+            <button
+              onClick={() => proceedToReview()}
+              className="w-full bg-steel border border-line rounded-xl py-4 mb-3 text-concrete text-lg font-bold active:bg-black/30"
+            >
+              {friendlyDate(date, lang)}
+            </button>
+            {/* Today */}
+            <button
+              onClick={() => {
+                setDate(todayISO());
+                proceedToReview();
+              }}
+              className="w-full bg-safety text-steel rounded-xl py-4 mb-3 text-lg font-bold active:opacity-90"
+            >
+              {friendlyDate(todayISO(), lang)}
+            </button>
+            {/* Other date — close the prompt, scroll to the date field on the
+                card and highlight it, so the worker changes it there (the field
+                that already works reliably on every device). */}
+            <button
+              onClick={goToDateField}
+              className="block w-full text-center text-rebar text-base font-semibold py-2.5 active:text-safety"
+            >
+              {tr.staleOtherDate} →
+            </button>
+          </div>
+        </div>
+      )}
+      <TopBar
+        tr={tr}
+        lang={lang}
+        setLang={setLang}
+        onRefresh={refreshRoster}
+        refreshing={refreshing}
+        justUpdated={justUpdated}
+        onMenu={() => setShowMenu(true)}
+        hideTitle
+      />
+
+      <div className="flex-1 overflow-y-auto px-5 pb-32">
+        {/* Foreman line — only the Change button is tappable now */}
+        <div className="w-full flex items-center justify-between mt-4 mb-5">
+          <div>
+            <div className="text-[11px] font-bold text-rebar tracking-wide">
+              {tr.foreman.toUpperCase()}
+            </div>
+            <div className="text-lg font-bold">{foreman}</div>
+          </div>
+          <button
+            onClick={() => setShowForemanPicker(true)}
+            className="text-safety text-xs font-bold px-3 py-1.5 rounded-full border border-safety/60 active:bg-safety/10 shrink-0"
+          >
+            {tr.changeForeman}
+          </button>
+        </div>
+
+        {/* Date + Job */}
+        <div className="grid grid-cols-2 gap-3 mb-5">
+          <Field label={tr.date}>
+            <div ref={dateFieldRef}>
+              <input
+                type="date"
+                value={date}
+                max={todayISO()}
+                onChange={(e) => {
+                  dateManual.current = true;
+                  staleUnconfirmed.current = false; // worker chose a date
+                  setDate(e.target.value);
+                }}
+                className={`w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete appearance-none transition-all duration-300 ${
+                  datePulse
+                    ? "ring-4 ring-safety ring-offset-2 ring-offset-steel"
+                    : "ring-0"
+                }`}
+              />
+            </div>
+          </Field>
+          <Field label={tr.job}>
+            <input
+              type="text"
+              value={job}
+              onChange={(e) => setJob(e.target.value)}
+              placeholder={tr.jobPlaceholder}
+              className="w-full min-w-0 box-border h-12 bg-graphite rounded-xl px-3 text-concrete placeholder:text-rebar/60"
+            />
+          </Field>
+        </div>
+
+        {/* Crew */}
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-[11px] font-bold text-rebar tracking-wide">
+            {tr.crew.toUpperCase()}
+          </div>
+          {workers.length > 1 && (
+            <ApplyAll tr={tr} onApply={applyAll} />
+          )}
+        </div>
+
+        {/* Selected workers with hours */}
+        <div className="space-y-2 mb-3">
+          {workers.map((w) => (
+            <div
+              key={w.name}
+              className="bg-graphite rounded-2xl p-3 flex items-center gap-3"
+            >
+              <button
+                onClick={() => removeWorker(w.name)}
+                aria-label={tr.remove}
+                className="text-rebar text-xl leading-none w-7 h-7 flex items-center justify-center rounded-full bg-steel/60"
+              >
+                ×
+              </button>
+              <div className="flex-1 min-w-0">
+                <div className="font-semibold truncate">{w.name}</div>
+                {w.isNew && (
+                  <div className="text-[10px] text-safety font-bold">
+                    {lang === "es" ? "NUEVO" : "NEW"}
+                  </div>
+                )}
+              </div>
+              <HoursControl
+                value={w.hours}
+                onChange={(h) => setWorkerHours(w.name, h)}
+                lang={lang}
+              />
+            </div>
+          ))}
+        </div>
+
+        {/* Add / search box — visible inline so a foreman can add the whole
+            crew quickly: type to filter, tap names from the list below. */}
+        <div ref={addBoxRef} className="bg-graphite rounded-2xl border border-line overflow-hidden scroll-mt-3">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onFocus={() => {
+              setSearchFocused(true);
+              liftSearchBox();
+            }}
+            onBlur={() => setSearchFocused(false)}
+            placeholder={tr.addWorkerSearch}
+            className="w-full bg-transparent px-4 py-3.5 text-concrete placeholder:text-rebar/60 outline-none border-b border-line/60"
+          />
+
+          <div className="max-h-[46vh] overflow-y-auto overscroll-contain">
+            {suggestions.map((n) => (
+              <button
+                key={n}
+                onClick={() => addWorker(n)}
+                className="w-full text-left px-4 py-3 active:bg-steel text-concrete border-b border-line/30 last:border-0"
+              >
+                {n}
+              </button>
+            ))}
+
+            {!rosterLoaded && (
+              <div className="px-4 py-3 text-rebar text-sm">{tr.loading}</div>
+            )}
+
+            {rosterLoaded && suggestions.length === 0 && !query.trim() && (
+              <div className="px-4 py-3 text-rebar text-sm">Start typing a name…</div>
+            )}
+
+            {/* Create-new option LAST, so it's never an accidental tap */}
+            {!exactExists && query.trim() && (
+              <button
+                onClick={() => addWorker(query, true)}
+                className="w-full text-left px-4 py-3 bg-safety/15 text-safety font-semibold"
+              >
+                + {tr.addNew} “{query.trim()}”
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Work done + notes */}
+        <div className="mt-5 space-y-4">
+          <Field label={tr.workDone}>
+            <textarea
+              value={workDone}
+              onChange={(e) => setWorkDone(e.target.value)}
+              placeholder={tr.workDonePlaceholder}
+              rows={2}
+              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete placeholder:text-rebar/60 resize-none"
+            />
+          </Field>
+          <Field label={tr.notes}>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={tr.notesPlaceholder}
+              rows={2}
+              className="w-full bg-graphite rounded-xl px-3 py-3 text-concrete placeholder:text-rebar/60 resize-none"
+            />
+          </Field>
+        </div>
+
+        {/* Clear */}
+        <button
+          onClick={() => setShowClearConfirm(true)}
+          className="mt-6 text-rebar text-sm font-semibold underline underline-offset-4"
+        >
+          {tr.clear}
+        </button>
+      </div>
+
+      {/* Sticky review bar — hidden while searching so it doesn't float over
+          the name list above the keyboard */}
+      {!searchFocused && (
+        <div className="fixed bottom-0 inset-x-0 bg-steel border-t border-line p-4">
+          {validationMsg && (
+            <div className="text-red-300 text-sm font-semibold mb-2 text-center">
+              {validationMsg}
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <div className="text-rebar text-sm">
+              {tr.crewLabel}:{" "}
+              <span className="text-concrete font-bold tabular-nums">
+                {workers.length}
+              </span>
+              <span className="text-rebar/50 mx-2">|</span>
+              {tr.total}:{" "}
+              <span className="text-concrete font-bold tabular-nums">
+                {round2(total)}
+              </span>
+            </div>
+            <button
+              onClick={goReview}
+              className="px-8 py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark"
+            >
+              {tr.review}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Clear confirm */}
+      {showClearConfirm && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center p-4 z-50">
+          <div className="bg-graphite rounded-3xl p-6 w-full max-w-sm">
+            <div className="font-bold text-lg mb-5">{tr.clearConfirm}</div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowClearConfirm(false)}
+                className="flex-1 py-4 rounded-2xl bg-steel text-concrete font-semibold"
+              >
+                {tr.no}
+              </button>
+              <button
+                onClick={() => clearForm(false)}
+                className="flex-1 py-4 rounded-2xl bg-safety text-steel font-bold"
+              >
+                {tr.yes}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Self-removal confirm (foreman taking himself off the crew) */}
+      {selfRemoveName && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center p-4 z-50">
+          <div className="bg-graphite rounded-3xl p-6 w-full max-w-sm">
+            <div className="font-bold text-lg mb-5">{tr.selfRemoveConfirm}</div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setSelfRemoveName(null)}
+                className="flex-1 py-4 rounded-2xl bg-steel text-concrete font-semibold"
+              >
+                {tr.no}
+              </button>
+              <button
+                onClick={confirmSelfRemove}
+                className="flex-1 py-4 rounded-2xl bg-safety text-steel font-bold"
+              >
+                {tr.yes}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Hamburger dropdown menu */}
+      {showMenu && (
+        <div
+          className="fixed inset-0 z-[55] bg-black/40"
+          onClick={() => {
+            setShowMenu(false);
+            setAdminPin("");
+            setAdminPinError(false);
+          }}
+        >
+          <div
+            className="absolute top-16 left-4 bg-graphite rounded-2xl shadow-xl overflow-hidden min-w-[220px] border border-line"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {foremanUnlocked && !adminUnlocked ? (
+              // Foreman menu — their PIN opens ONLY this.
+              <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowMySubs(true);
+                }}
+                className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                  <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  <path d="M9 13h6M9 17h3" />
+                </svg>
+                {lang === "es" ? "Mis tarjetas" : "My submissions"}
+              </button>
+            ) : !adminUnlocked ? (
+              // PIN entry — gates the whole admin area.
+              <div className="p-5">
+                <div className="text-concrete font-semibold mb-1">{tr.enterPin}</div>
+                <div className="text-rebar text-xs mb-3">{tr.pinSubtitle}</div>
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  autoFocus
+                  value={adminPin}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, "").slice(0, 4);
+                    setAdminPin(digits);
+                    setAdminPinError(false);
+                    if (digits.length === 4) {
+                      if (digits === "5314") {
+                        setAdminUnlocked(true);
+                        setAdminPinError(false);
+                      } else if (foreman) {
+                        // Not the owner PIN — try it as the selected foreman's
+                        // personal PIN (validated server-side). Opens ONLY the
+                        // foreman's read-only "My submissions" menu.
+                        fetch(
+                          `/api/foreman?action=verify&name=${encodeURIComponent(foreman)}&pin=${digits}`
+                        )
+                          .then((r) => r.json())
+                          .then((d) => {
+                            if (d?.ok) {
+                              setForemanPin(digits);
+                              setForemanUnlocked(true);
+                              setAdminPinError(false);
+                            } else {
+                              setAdminPinError(true);
+                              setTimeout(() => setAdminPin(""), 350);
+                            }
+                          })
+                          .catch(() => {
+                            setAdminPinError(true);
+                            setTimeout(() => setAdminPin(""), 350);
+                          });
+                      } else {
+                        setAdminPinError(true);
+                        setTimeout(() => setAdminPin(""), 350);
+                      }
+                    }
+                  }}
+                  placeholder="••••"
+                  className={`w-full bg-steel rounded-xl px-4 h-12 text-concrete text-center tracking-[0.5em] text-xl ${
+                    adminPinError ? "ring-2 ring-red-500" : ""
+                  }`}
+                />
+              </div>
+            ) : (
+              <>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowReports(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                    <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                    <path d="M9 13h6M9 17h3" />
+                  </svg>
+                  {tr.reportsTitle}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowSchedule(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="4" width="18" height="18" rx="2" />
+                    <path d="M16 2v4M8 2v4M3 10h18" />
+                  </svg>
+                  {tr.scheduleTitle}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowRecon(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9 11l3 3L22 4" />
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                  </svg>
+                  {tr.reconTitle}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowVisits(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z" />
+                    <circle cx="12" cy="10" r="3" />
+                  </svg>
+                  Site visits
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowRoster(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                    <circle cx="9" cy="7" r="4" />
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                  </svg>
+                  Crew roster
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Reports admin panel */}
+      {showReports && (
+        <ReportsPanel
+          tr={tr}
+          unlockedPin={adminUnlocked ? "5314" : ""}
+          onClose={() => setShowReports(false)}
+        />
+      )}
+
+      {/* Schedule panel */}
+      {showSchedule && (
+        <SchedulePanel
+          tr={tr}
+          pin={adminUnlocked ? "5314" : ""}
+          onClose={() => setShowSchedule(false)}
+        />
+      )}
+
+      {/* Reconciliation panel */}
+      {showRecon && (
+        <ReconPanel
+          tr={tr}
+          lang={lang}
+          onClose={() => setShowRecon(false)}
+        />
+      )}
+
+      {/* Site visits panel */}
+      {showVisits && (
+        <SiteVisitsPanel
+          tr={tr}
+          lang={lang}
+          onClose={() => setShowVisits(false)}
+        />
+      )}
+
+      {/* Crew roster management (owner-only) */}
+      {showRoster && <RosterPanel onClose={() => setShowRoster(false)} />}
+      {showMySubs && foremanUnlocked && (
+        <MySubmissionsPanel
+          foreman={foreman}
+          pin={foremanPin}
+          lang={lang}
+          onClose={() => setShowMySubs(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------- Subcomponents ----------
+
+function TopBar({
+  tr,
+  lang,
+  setLang,
+  onRefresh,
+  refreshing,
+  justUpdated,
+  onMenu,
+  hideTitle,
+}: {
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  setLang: (l: Lang) => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  justUpdated?: boolean;
+  onMenu?: () => void;
+  hideTitle?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between px-5 pt-5 pb-2">
+      <div className="flex items-center gap-2">
+        {onMenu && (
+          <button
+            onClick={onMenu}
+            aria-label="Menu"
+            className="w-9 h-9 rounded-lg bg-graphite text-concrete flex items-center justify-center mr-1"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+              <path d="M3 6h18M3 12h18M3 18h18" />
+            </svg>
+          </button>
+        )}
+        <div className="w-2.5 h-6 bg-safety rounded-sm" />
+        <img
+          src="/ammex-wordmark-white.png"
+          alt="AMMEX"
+          className="h-[18px] w-auto"
+        />
+        {!hideTitle && (
+          <span className="font-extrabold tracking-tight text-concrete leading-none relative top-[2px]">{tr.appTitle}</span>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        {justUpdated && (
+          <span className="text-xs font-bold text-safety">{tr.updated}</span>
+        )}
+        {onRefresh && (
+          <button
+            onClick={onRefresh}
+            aria-label={tr.refresh}
+            className="bg-graphite w-9 h-9 rounded-full text-concrete flex items-center justify-center"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={refreshing ? "animate-spin" : ""}
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+        )}
+        <button
+          onClick={() => setLang(lang === "es" ? "en" : "es")}
+          className="text-xs font-bold bg-graphite px-3 py-2 rounded-full text-concrete"
+        >
+          {lang === "es" ? "EN" : "ES"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block min-w-0">
+      <div className="text-[11px] font-bold text-rebar tracking-wide mb-1">
+        {label.toUpperCase()}
+      </div>
+      {children}
+    </label>
+  );
+}
+
+function fmtShort(iso: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const [y, m, d] = iso.split("-").map(Number);
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${months[m - 1]} ${d}`;
+}
+
+function weekOptions(): { iso: string; label: string }[] {
+  const now = new Date();
+  const off = now.getTimezoneOffset();
+  const today = new Date(now.getTime() - off * 60000);
+  const dow = today.getUTCDay();
+  // Week runs Monday..Sunday. Find this week's Monday.
+  const backToMonday = (dow + 6) % 7;
+  const thisMon = new Date(today);
+  thisMon.setUTCDate(thisMon.getUTCDate() - backToMonday);
+  const fmt = (d: Date) => `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+  const mk = (weeksBack: number, name: string) => {
+    const s = new Date(thisMon);
+    s.setUTCDate(s.getUTCDate() - 7 * weeksBack);
+    const e = new Date(s);
+    e.setUTCDate(e.getUTCDate() + 6);
+    return {
+      iso: s.toISOString().slice(0, 10),
+      label: `${name} (${fmt(s)} – ${fmt(e)})`,
+    };
+  };
+  // This week first (default), then last week. Recomputed every open.
+  return [mk(0, "This week"), mk(1, "Last week")];
+}
+
+function ReportsPanel({
+  tr,
+  onClose,
+  unlockedPin = "",
+}: {
+  tr: ReturnType<typeof t>;
+  onClose: () => void;
+  unlockedPin?: string;
+}) {
+  useLockBodyScroll();
+  const [pin, setPin] = useState(unlockedPin);
+  const [pinOk, setPinOk] = useState(unlockedPin === "5314");
+  const [pinError, setPinError] = useState(false);
+
+  const weeks = useMemo(() => weekOptions(), []);
+  const [weekStart, setWeekStart] = useState(weeks[0]?.iso || "");
+  const thisWeekStart = weeks[0]?.iso || "";
+  const thisWeekEnd = useMemo(() => {
+    if (!thisWeekStart) return "";
+    const [y, m, d] = thisWeekStart.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + 6));
+    return dt.toISOString().slice(0, 10);
+  }, [thisWeekStart]);
+  const [customStart, setCustomStart] = useState(thisWeekStart);
+  const [customEnd, setCustomEnd] = useState(thisWeekEnd);
+  const [flagsOn, setFlagsOn] = useState(true);
+  const [foremen, setForemen] = useState<string[]>([]);
+  const [foreman, setForeman] = useState(""); // "" = All
+  const [reportType, setReportType] = useState<
+    "job" | "worker" | "daily" | "payrollGrid" | "foreman"
+  >("job");
+  const [lang, setLang] = useState<"en" | "es">("en");
+  const [langTouched, setLangTouched] = useState(false);
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">(
+    "idle"
+  );
+  const [resultMsg, setResultMsg] = useState("");
+  const [debugText, setDebugText] = useState("");
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugCopied, setDebugCopied] = useState(false);
+
+  // Load the foreman list once the panel is unlocked.
+  useEffect(() => {
+    if (!pinOk) return;
+    let alive = true;
+    fetch("/api/roster")
+      .then((r) => r.json())
+      .then((d) => {
+        if (alive && Array.isArray(d.foremen)) setForemen(d.foremen);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [pinOk]);
+
+  // Auto-suggest language: Spanish for a foreman report (it's for them),
+  // English for the master/worker reports — unless the user set it manually.
+  function onReportTypeChange(
+    v: "job" | "worker" | "daily" | "payrollGrid" | "foreman"
+  ) {
+    setReportType(v);
+    if (!langTouched) setLang(v === "foreman" ? "es" : "en");
+  }
+
+  function onForemanChange(v: string) {
+    setForeman(v);
+  }
+
+  function onPinChange(v: string) {
+    const digits = v.replace(/\D/g, "").slice(0, 4);
+    setPin(digits);
+    setPinError(false);
+    if (digits.length === 4) {
+      if (digits === "5314") {
+        setPinOk(true);
+        setPinError(false);
+      } else {
+        setPinError(true);
+        setTimeout(() => setPin(""), 350);
+      }
+    }
+  }
+
+  function reqBody(mode: "view" | "email") {
+    const base: any = {
+      pin,
+      flags: flagsOn,
+      lang,
+      mode,
+      // Map the report type to the backend's foreman + reportView params.
+      foreman: reportType === "foreman" ? foreman : "",
+      reportView:
+        reportType === "worker"
+          ? "worker"
+          : reportType === "daily"
+          ? "daily"
+          : reportType === "payrollGrid"
+          ? "payrollGrid"
+          : reportType === "foreman" && !foreman
+          ? "foremanAll" // foreman report with "All" → per-foreman breakout
+          : "job",
+    };
+    if (weekStart === "custom") {
+      base.startISO = customStart;
+      base.endISO = customEnd;
+    } else {
+      base.weekStart = weekStart;
+    }
+    return base;
+  }
+
+  // Last generated PDF, kept so "Share / send" can reuse it without regenerating.
+  const lastPdf = useRef<{ b64: string; filename: string } | null>(null);
+
+  function b64ToBlobUrl(b64: string): string {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+  }
+
+  // Share sheet (send / copy / save to Files) — reuses the cached PDF.
+  async function sharePdf() {
+    const cached = lastPdf.current;
+    if (!cached) return;
+    try {
+      const bin = atob(cached.b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const nav: any = navigator;
+      const file = new File([blob], cached.filename, { type: "application/pdf" });
+      if (nav.canShare && nav.canShare({ files: [file] })) {
+        await nav.share({ files: [file], title: cached.filename });
+        return;
+      }
+      // no share support → just open it
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch { /* user cancelled or blocked; ignore */ }
+  }
+
+  async function generate(mode: "view" | "email") {
+    // For "view": open the window SYNCHRONOUSLY (same tap) so iOS never
+    // blocks it, then point it at the PDF when ready. This is the reliable
+    // one-tap preview — no share sheet involved.
+    let win: Window | null = null;
+    if (mode === "view" && typeof window !== "undefined") {
+      win = window.open("", "_blank");
+      if (win) {
+        try {
+          win.document.write(
+            '<body style="background:#1c2127;color:#9aa3af;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">Generating report…</body>'
+          );
+        } catch { /* ignore */ }
+      }
+    }
+    setState("sending");
+    setResultMsg("");
+    setDebugText("");
+    try {
+      const res = await fetch("/api/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody(mode)),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(d.error || "fail");
+      setState("sent");
+      setResultMsg(
+        `${d.jobs} job(s), ${d.unassigned} unassigned, ${d.noHours} no-hours, ${d.flags} flag(s)`
+      );
+      if (d.debug) setDebugText(JSON.stringify(d.debug, null, 2));
+      if (mode === "view" && d.pdfBase64) {
+        lastPdf.current = { b64: d.pdfBase64, filename: d.filename || "Ammex_Payroll.pdf" };
+        const url = b64ToBlobUrl(d.pdfBase64);
+        if (win) {
+          win.location.href = url; // preview in the tab we already opened
+        } else {
+          window.open(url, "_blank"); // fallback (desktop / popup allowed)
+        }
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      } else if (win) {
+        win.close();
+      }
+    } catch (e: any) {
+      if (win) { try { win.close(); } catch {} }
+      setState("error");
+      setResultMsg(e?.message || "");
+    }
+  }
+
+  // ---- PIN gate: compact popup anchored near the top ----
+  if (!pinOk) {
+    return (
+      <div
+        className="fixed inset-0 bg-black/60 z-[60] flex items-start justify-center px-4 pt-20"
+        onClick={onClose}
+      >
+        <div
+          className="bg-graphite rounded-3xl p-6 w-full max-w-sm relative"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={onClose}
+            aria-label={tr.close}
+            className="absolute top-4 right-4 w-8 h-8 rounded-full bg-steel text-rebar flex items-center justify-center text-lg font-bold"
+          >
+            ✕
+          </button>
+          <div className="text-[11px] font-bold text-rebar tracking-wide mb-4 mt-1">
+            {tr.enterPin.toUpperCase()}
+          </div>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoFocus
+            value={pin}
+            onChange={(e) => onPinChange(e.target.value)}
+            className="w-full text-center text-3xl tracking-[0.5em] bg-steel rounded-2xl py-4 text-concrete"
+            placeholder="••••"
+          />
+          {pinError && (
+            <div className="text-red-300 text-sm font-semibold mt-3 text-center">
+              {tr.wrongPin}
+            </div>
+          )}
+          <button
+            onClick={onClose}
+            className="mt-5 w-full py-4 rounded-2xl bg-steel text-concrete font-bold"
+          >
+            {tr.close}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Unlocked: the Reports panel ----
+  return (
+    <div className="fixed inset-0 bg-steel z-[60] flex flex-col">
+      <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-line">
+        <span className="font-extrabold text-lg">{tr.reportsTitle}</span>
+        <button
+          onClick={onClose}
+          className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+        >
+          {tr.close}
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
+        <Field label={tr.weekLabel}>
+          <select
+            value={weekStart}
+            onChange={(e) => setWeekStart(e.target.value)}
+            className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+          >
+            {weeks.map((w) => (
+              <option key={w.iso} value={w.iso}>
+                {w.label}
+              </option>
+            ))}
+            <option value="custom">{tr.customRange}</option>
+          </select>
+        </Field>
+
+        {weekStart === "custom" && (
+          <div className="space-y-4">
+            <Field label={tr.fromLabel}>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="appearance-none block w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete text-left"
+              />
+            </Field>
+            <Field label={tr.toLabel}>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="appearance-none block w-full box-border bg-graphite rounded-xl px-3 h-12 text-concrete text-left"
+              />
+              {customStart && (
+                <div className="text-[11px] text-rebar mt-1">
+                  {tr.fromLabel} {fmtShort(customStart)}
+                </div>
+              )}
+            </Field>
+          </div>
+        )}
+
+        <Field label={tr.reportTypeLabel}>
+          <select
+            value={reportType}
+            onChange={(e) =>
+              onReportTypeChange(
+                e.target.value as
+                  | "job"
+                  | "worker"
+                  | "daily"
+                  | "payrollGrid"
+                  | "foreman"
+              )
+            }
+            className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+          >
+            <option value="job">{tr.reportTypeJob}</option>
+            <option value="worker">{tr.reportTypeWorker}</option>
+            <option value="daily">{tr.reportTypeDaily}</option>
+            <option value="payrollGrid">{tr.reportTypePayrollGrid}</option>
+            <option value="foreman">{tr.reportTypeForeman}</option>
+          </select>
+        </Field>
+
+        {reportType === "foreman" && (
+          <Field label={tr.foremanLabel}>
+            <select
+              value={foreman}
+              onChange={(e) => onForemanChange(e.target.value)}
+              className="w-full bg-graphite rounded-xl px-3 h-12 text-concrete"
+            >
+              <option value="">{tr.allForemen}</option>
+              {foremen.map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        <div className="flex items-center justify-between bg-graphite rounded-xl px-4 py-3">
+          <span className="font-semibold">{tr.reportLanguage}</span>
+          <div className="flex bg-steel rounded-full p-1">
+            <button
+              onClick={() => {
+                setLang("en");
+                setLangTouched(true);
+              }}
+              className={`px-3 py-1 rounded-full text-sm font-bold ${
+                lang === "en" ? "bg-safety text-steel" : "text-rebar"
+              }`}
+            >
+              EN
+            </button>
+            <button
+              onClick={() => {
+                setLang("es");
+                setLangTouched(true);
+              }}
+              className={`px-3 py-1 rounded-full text-sm font-bold ${
+                lang === "es" ? "bg-safety text-steel" : "text-rebar"
+              }`}
+            >
+              ES
+            </button>
+          </div>
+        </div>
+
+        <button
+          onClick={() => setFlagsOn((f) => !f)}
+          className="w-full flex items-center justify-between bg-graphite rounded-xl px-4 py-3"
+        >
+          <span className="font-semibold">{tr.includeFlags}</span>
+          <span
+            className={`w-12 h-7 rounded-full flex items-center px-1 transition ${
+              flagsOn ? "bg-safety justify-end" : "bg-steel justify-start"
+            }`}
+          >
+            <span className="w-5 h-5 rounded-full bg-concrete" />
+          </span>
+        </button>
+
+        <button
+          onClick={() => generate("view")}
+          disabled={state === "sending"}
+          className="w-full py-4 rounded-2xl bg-safety text-steel text-lg font-extrabold active:bg-safetyDark disabled:opacity-60"
+        >
+          {state === "sending" ? tr.generating : tr.generateView}
+        </button>
+        <button
+          onClick={() => generate("email")}
+          disabled={state === "sending"}
+          className="w-full py-3.5 rounded-2xl bg-graphite text-concrete font-bold active:bg-steel disabled:opacity-60"
+        >
+          {tr.generateSend}
+        </button>
+
+        {state === "sent" && (
+          <div className="bg-safety/15 border border-safety/40 rounded-2xl p-4">
+            <div className="font-bold text-safety">{tr.reportSent}</div>
+            <div className="text-sm text-rebar mt-1">{resultMsg}</div>
+            {lastPdf.current && (
+              <button
+                onClick={() => sharePdf()}
+                className="mt-3 w-full py-3 rounded-xl bg-graphite border border-line text-concrete font-bold active:bg-steel"
+              >
+                Share / save PDF…
+              </button>
+            )}
+          </div>
+        )}
+        {debugText && (
+          <div className="bg-graphite rounded-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2.5">
+              <button
+                onClick={() => setDebugOpen((o) => !o)}
+                className="flex items-center gap-2 text-[11px] font-bold text-rebar tracking-wide"
+              >
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className={`transition-transform ${debugOpen ? "rotate-90" : ""}`}
+                >
+                  <path d="M9 6l6 6-6 6" />
+                </svg>
+                DIAGNOSTIC
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(debugText);
+                  } catch {
+                    /* clipboard may be blocked; the expanded box is selectable */
+                  }
+                  setDebugCopied(true);
+                  setTimeout(() => setDebugCopied(false), 1500);
+                }}
+                className="text-[11px] font-bold bg-steel text-concrete px-3 py-1.5 rounded-full"
+              >
+                {debugCopied ? "✓ Copied" : "Copy"}
+              </button>
+            </div>
+            {debugOpen && (
+              <textarea
+                readOnly
+                value={debugText}
+                onFocus={(e) => e.currentTarget.select()}
+                className="w-full h-56 bg-steel rounded-b-xl p-3 text-[11px] text-concrete font-mono"
+              />
+            )}
+          </div>
+        )}
+        {state === "error" && (
+          <div className="bg-red-500/15 border border-red-500/40 rounded-2xl p-4 text-red-200">
+            <div className="font-bold">{tr.reportFail}</div>
+            {resultMsg && <div className="text-sm mt-1">{resultMsg}</div>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Schedule ----------
+
+interface SchedJob {
+  jobPageId: string;
+  name: string;
+  jobId: string;
+  crew: { worker: string; isLead: boolean; hours?: number | null; unscheduled?: boolean; elsewhere?: string }[];
+  cancelled?: boolean;
+  cancelPartial?: boolean;
+  cancelNote?: string;
+}
+
+function tomorrowISO(): string {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+}
+
+function SchedulePanel({
+  tr,
+  pin,
+  onClose,
+}: {
+  tr: ReturnType<typeof t>;
+  pin: string;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  const [date, setDate] = useState(tomorrowISO());
+  const [jobs, setJobs] = useState<SchedJob[]>([]);
+  const [roster, setRoster] = useState<string[]>([]);
+  const [availJobs, setAvailJobs] = useState<
+    { id: string; name: string; jobId: string }[]
+  >([]);
+  const [loading, setLoading] = useState(true);
+  const [showJobPicker, setShowJobPicker] = useState(false);
+  const [jobQuery, setJobQuery] = useState("");
+  const [workerFor, setWorkerFor] = useState<string | null>(null); // jobPageId
+  const [workerQuery, setWorkerQuery] = useState("");
+  const [showReview, setShowReview] = useState(false);
+  // Past-schedules review mode (read-only history)
+  const [historyMode, setHistoryMode] = useState(false);
+  const [histDate, setHistDate] = useState<string>("");
+  const [histJobs, setHistJobs] = useState<SchedJob[]>([]);
+  const [histLoading, setHistLoading] = useState(false);
+  const [histEmpty, setHistEmpty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<"idle" | "saved" | "error">("idle");
+  const [resultMsg, setResultMsg] = useState("");
+  const [kbOpen, setKbOpen] = useState(false);
+  const [restored, setRestored] = useState(false);
+  const newJobRef = useRef<HTMLDivElement>(null);
+  const jobSearchRef = useRef<HTMLInputElement>(null);
+  const workerSearchRef = useRef<HTMLInputElement>(null);
+
+  // Remember the working state between sessions: restore the last date + jobs
+  // on open, and re-save whenever they change. So closing the app and coming
+  // back leaves the screen exactly as you left it.
+  const DRAFT_KEY = "ammex_schedule_state_v1";
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved?.date) setDate(saved.date);
+        if (Array.isArray(saved?.jobs)) setJobs(saved.jobs);
+      }
+    } catch {}
+    setRestored(true);
+  }, []);
+  useEffect(() => {
+    if (!restored) return; // don't overwrite before we've restored
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ date, jobs }));
+    } catch {}
+  }, [date, jobs, restored]);
+
+  // Hide the sticky review bar while the on-screen keyboard is up (it otherwise
+  // overlaps the search). Detected via the visual viewport shrinking.
+  useEffect(() => {
+    const vv = (typeof window !== "undefined" && window.visualViewport) || null;
+    if (!vv) return;
+    const onResize = () => {
+      setKbOpen(window.innerHeight - vv.height > 150);
+    };
+    vv.addEventListener("resize", onResize);
+    return () => vv.removeEventListener("resize", onResize);
+  }, []);
+
+  // Load roster + available jobs (re-runnable via the Refresh button so newly
+  // added Notion jobs/workers show up without reopening).
+  const [refreshing, setRefreshing] = useState(false);
+  function loadData(isRefresh = false) {
+    if (isRefresh) setRefreshing(true);
+    return Promise.all([
+      fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/schedule-jobs").then((r) => r.json()).catch(() => ({})),
+    ]).then(([rosterData, jobsData]) => {
+      if (Array.isArray(rosterData?.workers)) setRoster(rosterData.workers);
+      if (Array.isArray(jobsData?.jobs)) setAvailJobs(jobsData.jobs);
+      setLoading(false);
+      setRefreshing(false);
+    });
+  }
+  useEffect(() => {
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function carryOver() {
+    fetch("/api/schedule?recent=1")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.jobs) && d.jobs.length > 0) {
+          setJobs(
+            d.jobs.map((j: any) => ({
+              jobPageId: j.jobPageId,
+              name: j.name,
+              jobId: j.jobId,
+              // Lead first, then the rest — so the foreman shows on top.
+              crew: [...(j.crew || [])].sort(
+                (a: any, b: any) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0)
+              ),
+            }))
+          );
+        } else {
+          setResultMsg("No previous schedule found to carry over.");
+          setTimeout(() => setResultMsg(""), 3000);
+        }
+      })
+      .catch(() => {});
+  }
+
+  // ---- Past-schedules review mode (read-only) ----
+  const [histMsg, setHistMsg] = useState("");
+  function applyHist(d: any, jumpedDate?: string) {
+    if (d?.date) {
+      setHistDate(d.date);
+      setHistJobs(
+        (d.jobs || []).map((j: any) => ({
+          jobPageId: j.jobPageId,
+          name: j.name,
+          jobId: j.jobId,
+          cancelled: j.cancelled,
+          cancelPartial: j.cancelPartial,
+          cancelNote: j.cancelNote,
+          // Lead first, then scheduled crew, then anyone who worked the job
+          // without being scheduled (shown last, in amber).
+          crew: [...(j.crew || [])].sort((a: any, b: any) => {
+            const aU = a.unscheduled ? 1 : 0;
+            const bU = b.unscheduled ? 1 : 0;
+            if (aU !== bU) return aU - bU;
+            return (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0);
+          }),
+        }))
+      );
+      setHistEmpty((d.jobs || []).length === 0);
+    } else if (jumpedDate) {
+      // Specific date with no rows — show the date with an empty state.
+      setHistDate(jumpedDate);
+      setHistJobs([]);
+      setHistEmpty(true);
+    } else {
+      // Prev/Next found nothing further in that direction — stay put.
+      setHistMsg("No more scheduled days in that direction.");
+      setTimeout(() => setHistMsg(""), 2500);
+    }
+  }
+  function loadHist(url: string, jumpedDate?: string) {
+    setHistLoading(true);
+    fetch(url)
+      .then((r) => r.json())
+      .then((d) => {
+        applyHist(d, jumpedDate);
+        setHistLoading(false);
+      })
+      .catch(() => setHistLoading(false));
+  }
+  function openHistory() {
+    setHistoryMode(true);
+    setHistMsg("");
+    const today = localISO(new Date()).slice(0, 10);
+    // Default: today; if today has nothing, walk back to the last scheduled day.
+    loadHist(`/api/schedule?recent=1&actuals=1&before=${today}`);
+  }
+  function histPrev() {
+    if (!histDate) return;
+    loadHist(`/api/schedule?recent=1&actuals=1&before=${isoAddDays(histDate, -1)}`);
+  }
+  function histNext() {
+    if (!histDate) return;
+    loadHist(`/api/schedule?recent=1&actuals=1&after=${isoAddDays(histDate, 1)}`);
+  }
+  function histJump(d: string) {
+    if (!d) return;
+    loadHist(`/api/schedule?date=${d}&actuals=1`, d);
+  }
+
+  function addJob(j: { id: string; name: string; jobId: string }) {
+    if (jobs.some((x) => x.jobPageId === j.id)) {
+      setJobQuery("");
+      return;
+    }
+    // New job lands at the END of the sequence (right on iPad, bottom on phone),
+    // matching the left-to-right flow of the paper schedule.
+    setJobs((prev) => [
+      ...prev,
+      { jobPageId: j.id, name: j.name, jobId: j.jobId, crew: [] },
+    ]);
+    // Stay open for adding several jobs in a row; the picked job drops off the
+    // list. Clear the search and keep the cursor in the box so you can keep
+    // typing the next one without re-clicking.
+    setJobQuery("");
+    jobSearchRef.current?.focus();
+    requestAnimationFrame(() =>
+      newJobRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "end",
+        behavior: "smooth",
+      })
+    );
+  }
+
+  function removeJob(jobPageId: string) {
+    setJobs((prev) => prev.filter((j) => j.jobPageId !== jobPageId));
+  }
+
+  function addWorker(jobPageId: string, name: string) {
+    setJobs((prev) =>
+      prev.map((j) => {
+        if (j.jobPageId !== jobPageId) return j;
+        if (j.crew.some((c) => c.worker === name)) return j;
+        return { ...j, crew: [...j.crew, { worker: name, isLead: false }] };
+      })
+    );
+    // Clear search and keep the cursor in the box for rapid multi-add.
+    setWorkerQuery("");
+    workerSearchRef.current?.focus();
+  }
+
+  function removeWorker(jobPageId: string, name: string) {
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.jobPageId === jobPageId
+          ? { ...j, crew: j.crew.filter((c) => c.worker !== name) }
+          : j
+      )
+    );
+  }
+
+  function setLead(jobPageId: string, name: string) {
+    setJobs((prev) =>
+      prev.map((j) => {
+        if (j.jobPageId !== jobPageId) return j;
+        const crew = j.crew.map((c) => ({ ...c, isLead: c.worker === name }));
+        // Keep the lead on top.
+        crew.sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
+        return { ...j, crew };
+      })
+    );
+  }
+
+  // Which jobs (other than this one) a worker is already on, for the warning.
+  function otherJobs(name: string, exceptJobId: string): string[] {
+    return jobs
+      .filter((j) => j.jobPageId !== exceptJobId && j.crew.some((c) => c.worker === name))
+      .map((j) => j.name);
+  }
+
+  const totalCrew = jobs.reduce((s, j) => s + j.crew.length, 0);
+
+  const [exporting, setExporting] = useState<"" | "day" | "week" | "lastweek">("");
+  const [exportOpen, setExportOpen] = useState(false);
+  // Download the past-schedule PDF (plan + actuals) for the day being viewed,
+  // or the Mon–Sun week containing it.
+  async function exportSchedulePdf(range: "day" | "week" | "lastweek") {
+    if (!histDate) return;
+    setExporting(range);
+    try {
+      const r = await fetch(`/api/schedule?export=${range}&date=${histDate}`);
+      const d = await r.json();
+      if (!d?.ok || !d.pdf) {
+        alert(d?.error || "Couldn't build the PDF.");
+      } else {
+        const bin = atob(d.pdf);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = d.filename || "schedule.pdf";
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      }
+    } catch {
+      alert("Couldn't build the PDF.");
+    }
+    setExporting("");
+  }
+
+  async function save() {
+    setSaving(true);
+    setResult("idle");
+    const assignments: any[] = [];
+    for (const j of jobs) {
+      for (const c of j.crew) {
+        // People shown only because they WORKED this job (not scheduled) are
+        // display-only actuals — never write them back into the schedule.
+        if ((c as any).unscheduled) continue;
+        assignments.push({
+          worker: c.worker,
+          jobPageId: j.jobPageId,
+          jobName: j.name,
+          jobId: j.jobId,
+          isLead: c.isLead,
+        });
+      }
+    }
+    try {
+      const resp = await fetch("/api/schedule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin, date, assignments }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
+        setResult("saved");
+      } else {
+        setResult("error");
+        setResultMsg(data.error || "Save failed.");
+      }
+    } catch (e: any) {
+      setResult("error");
+      setResultMsg(e?.message || "Save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Review screen
+  // ---- Past schedules (read-only review mode) ----
+  if (historyMode) {
+    return (
+      <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+        <div className="max-w-2xl mx-auto p-5 pb-24">
+          <div className="flex items-center justify-between mb-4">
+            <div className="relative">
+              <button
+                onClick={() => setExportOpen((o) => !o)}
+                disabled={!!exporting || !histDate}
+                className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {exporting ? "…" : "PDF"}
+                <span className="text-[10px]">▾</span>
+              </button>
+              {exportOpen && !exporting && (
+                <div className="absolute left-0 mt-1 z-30 bg-graphite border border-line rounded-xl overflow-hidden shadow-xl min-w-[150px]">
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("day"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel border-b border-line/60"
+                  >
+                    This day
+                  </button>
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("week"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel border-b border-line/60"
+                  >
+                    This week
+                  </button>
+                  <button
+                    onClick={() => { setExportOpen(false); exportSchedulePdf("lastweek"); }}
+                    className="w-full text-left px-4 py-2.5 text-sm text-concrete active:bg-steel"
+                  >
+                    Last week
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+            >
+              {tr.close}
+            </button>
+          </div>
+
+          {/* Plan / Past toggle — Past active */}
+          <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-6">
+            <button
+              onClick={() => setHistoryMode(false)}
+              className="flex-1 rounded-full py-2.5 text-sm font-bold text-rebar"
+            >
+              Plan schedule
+            </button>
+            <button className="flex-1 rounded-full py-2.5 text-sm font-bold bg-safety text-steel">
+              Past schedules
+            </button>
+          </div>
+
+          {/* Prominent date */}
+          <div className="text-center mb-4">
+            <div className="text-safety text-2xl font-extrabold tracking-tight">
+              {histDate ? prettyScheduleDate(histDate) : "—"}
+            </div>
+            <div className="text-rebar text-xs mt-1">read-only</div>
+          </div>
+
+          {/* Day navigation — fixed sides, centered picker, no wrapping */}
+          <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 max-w-sm mx-auto mb-6">
+            <button
+              onClick={histPrev}
+              disabled={histLoading}
+              className="whitespace-nowrap bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
+            >
+              ‹ Prev
+            </button>
+            <input
+              type="date"
+              value={histDate}
+              onChange={(e) => histJump(e.target.value)}
+              className="w-full min-w-0 box-border bg-graphite border border-line rounded-full px-3 h-10 text-concrete text-sm text-center appearance-none"
+            />
+            <button
+              onClick={histNext}
+              disabled={histLoading}
+              className="whitespace-nowrap bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-bold text-sm disabled:opacity-50"
+            >
+              Next ›
+            </button>
+          </div>
+
+          {histMsg && (
+            <div className="text-center text-rebar text-sm mb-4">{histMsg}</div>
+          )}
+
+          {histLoading && <div className="text-rebar text-sm text-center py-8">Loading…</div>}
+
+          {!histLoading && histEmpty && (
+            <div className="text-center py-12">
+              <div className="text-rebar text-sm">No schedule saved for this day.</div>
+            </div>
+          )}
+
+          {!histLoading && !histEmpty &&
+            histJobs.map((j) => (
+              <div
+                key={j.jobPageId}
+                className="relative bg-graphite border border-line rounded-2xl p-4 mb-3 overflow-hidden"
+              >
+                {j.cancelled && (
+                  <>
+                    {/* Soft grey X across the whole card — rounded caps, inset
+                        from the corners, and thinner so it reads as a quiet
+                        watermark rather than a harsh strike-through. */}
+                    <svg
+                      className="absolute inset-0 w-full h-full pointer-events-none"
+                      preserveAspectRatio="none"
+                      viewBox="0 0 100 100"
+                      aria-hidden="true"
+                    >
+                      <line
+                        x1="10" y1="16" x2="90" y2="84"
+                        stroke="rgba(154,163,175,.22)"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                      <line
+                        x1="90" y1="16" x2="10" y2="84"
+                        stroke="rgba(154,163,175,.22)"
+                        strokeWidth="1.6"
+                        strokeLinecap="round"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    </svg>
+                  </>
+                )}
+                <div className="relative">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="text-concrete font-bold text-[15px] truncate">{j.name}</div>
+                    {j.jobId && (
+                      <span className="text-rebar text-xs bg-steel border border-line rounded-full px-2.5 py-1 shrink-0">
+                        {j.jobId}
+                      </span>
+                    )}
+                  </div>
+
+                  {j.cancelled && (
+                    <div
+                      className="text-sm font-bold mb-2"
+                      style={{ color: "#e5533c" }}
+                    >
+                      {j.cancelPartial ? "Partially cancelled" : "Job cancelled"}
+                      {j.cancelNote && j.cancelNote !== "Job cancelled" && j.cancelNote !== "Partially cancelled"
+                        ? ` — ${j.cancelNote}`
+                        : ""}
+                    </div>
+                  )}
+
+                  <div className="space-y-1">
+                    {j.crew.map((c: any, i: number) => {
+                      const worked = c.hours != null;
+                      return (
+                        <div key={i} className="flex items-center gap-2 text-sm">
+                          <span
+                            style={
+                              c.unscheduled
+                                ? { color: "#e0a63b" }
+                                : worked
+                                ? { color: "#f4f3f0" }
+                                : { color: "#f4f3f0", opacity: 0.45 }
+                            }
+                          >
+                            {c.worker}
+                          </span>
+                          {worked && !c.unscheduled && (
+                            <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
+                          )}
+                          {worked && (
+                            <span
+                              className="text-[11px] font-bold"
+                              style={{ color: c.unscheduled ? "#e0a63b" : "#f4f3f0" }}
+                            >
+                              {c.hours}h
+                            </span>
+                          )}
+                          {c.isLead && (
+                            <span
+                              className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                              style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                            >
+                              FOREMAN
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {j.crew.length === 0 && <div className="text-rebar text-xs">No crew listed.</div>}
+                  </div>
+                  <div className="text-rebar text-[11px] mt-2">
+                    {j.crew.filter((c: any) => !c.unscheduled).length} scheduled
+                    {j.crew.some((c: any) => c.unscheduled) && (
+                      <span style={{ color: "#e0a63b" }}>
+                        {" "}· {j.crew.filter((c: any) => c.unscheduled).length} not scheduled
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (showReview) {
+    const warnings: string[] = [];
+    for (const j of jobs) {
+      if (!j.crew.some((c) => c.isLead) && j.crew.length > 0)
+        warnings.push(`${j.name}: no foreman marked`);
+    }
+    const seen = new Map<string, number>();
+    for (const j of jobs)
+      for (const c of j.crew) seen.set(c.worker, (seen.get(c.worker) || 0) + 1);
+    for (const [w, n] of seen) if (n > 1) warnings.push(`${w} is on ${n} jobs today`);
+
+    return (
+      <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
+        <div className="max-w-2xl mx-auto p-5 pb-32">
+          <div className="flex items-center justify-between mb-4">
+            <button onClick={() => setShowReview(false)} className="text-rebar font-semibold">
+              ← Back to edit
+            </button>
+            <div className="text-rebar text-sm">{prettyScheduleDate(date)}</div>
+          </div>
+
+          {result === "saved" ? (
+            <div className="text-center py-16">
+              <div className="text-safety text-5xl mb-4">✓</div>
+              <div className="text-concrete text-xl font-bold mb-2">Schedule saved</div>
+              <div className="text-rebar mb-8">
+                Saved to Notion and emailed for {prettyScheduleDate(date)}.
+              </div>
+              <button
+                onClick={() => {
+                  // Return to the Schedule builder (not out to the timesheet).
+                  setResult("idle");
+                  setShowReview(false);
+                }}
+                className="bg-safety text-steel font-bold rounded-xl px-8 py-3"
+              >
+                Done
+              </button>
+            </div>
+          ) : (
+            <>
+              <h2 className="text-concrete text-2xl font-bold mb-1">Review schedule</h2>
+              <div className="text-rebar mb-5">
+                {jobs.length} jobs · {totalCrew} crew
+              </div>
+
+              {warnings.length > 0 && (
+                <div className="bg-[#3a2a18] border border-safety/40 rounded-xl p-4 mb-5">
+                  <div className="text-safety font-semibold mb-2 text-sm">Heads up</div>
+                  {warnings.map((w, i) => (
+                    <div key={i} className="text-concrete/90 text-sm">• {w}</div>
+                  ))}
+                </div>
+              )}
+
+              <div className="space-y-4 mb-6">
+                {jobs.map((j) => {
+                  const lead = j.crew.find((c) => c.isLead);
+                  const others = j.crew.filter((c) => !c.isLead);
+                  return (
+                    <div key={j.jobPageId} className="bg-graphite rounded-2xl p-4 border border-line">
+                      <div className="text-concrete font-bold">
+                        {j.name} {j.jobId && <span className="text-rebar text-sm">({j.jobId})</span>}
+                      </div>
+                      <div className="border-b border-line my-2" />
+                      {lead && (
+                        <div className="text-blue-400 font-semibold text-sm">
+                          Foreman: {lead.worker.toUpperCase()}
+                        </div>
+                      )}
+                      {others.map((c) => (
+                        <div key={c.worker} className="text-concrete/90 text-sm ml-2">
+                          {c.worker.toUpperCase()}
+                        </div>
+                      ))}
+                      {j.crew.length === 0 && (
+                        <div className="text-rebar text-sm">(no crew)</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {result === "error" && (
+                <div className="text-red-400 text-sm mb-4">{resultMsg}</div>
+              )}
+
+              <button
+                onClick={save}
+                disabled={saving || totalCrew === 0}
+                className="w-full bg-safety text-steel font-bold rounded-xl py-4 text-lg disabled:opacity-50"
+              >
+                {saving ? "Saving…" : "Save to Notion & Email"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Main builder screen
+  const filteredRoster = (jobPageId: string) => {
+    const onJob = new Set(
+      jobs.find((j) => j.jobPageId === jobPageId)?.crew.map((c) => c.worker) || []
+    );
+    const q = workerQuery.trim().toLowerCase();
+    return roster
+      .filter((n) => !onJob.has(n))
+      .filter((n) => !q || n.toLowerCase().includes(q));
+  };
+  const filteredJobs = () => {
+    const q = jobQuery.trim().toLowerCase();
+    const onBoard = new Set(jobs.map((j) => j.jobPageId));
+    return availJobs
+      .filter((j) => !onBoard.has(j.id))
+      .filter((j) => !q || j.name.toLowerCase().includes(q) || j.jobId.toLowerCase().includes(q));
+  };
+
+  return (
+    <div
+      className={`fixed inset-0 z-[60] bg-steel ${
+        showJobPicker || workerFor !== null ? "overflow-hidden" : "overflow-y-auto"
+      }`}
+    >
+      <div className="max-w-7xl mx-auto p-4 pb-28">
+        {/* Header — Close on the right to match the rest of the app */}
+        {/* Header — Refresh + title + Close, as circular icon pills to match
+            the rest of the app */}
+        <div className="flex items-center justify-between mb-4">
+          <button
+            onClick={() => loadData(true)}
+            disabled={refreshing}
+            aria-label="Refresh"
+            className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center active:text-safety disabled:opacity-50"
+          >
+            <svg
+              width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+              className={refreshing ? "animate-spin" : ""}
+            >
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+              <path d="M21 3v6h-6" />
+            </svg>
+          </button>
+          <div className="font-bold text-concrete text-lg">{tr.scheduleTitle}</div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            {tr.close}
+          </button>
+        </div>
+
+        {/* Plan / Past toggle */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-4">
+          <button className="flex-1 rounded-full py-2.5 text-sm font-bold bg-safety text-steel">
+            Plan schedule
+          </button>
+          <button
+            onClick={openHistory}
+            className="flex-1 rounded-full py-2.5 text-sm font-bold text-rebar"
+          >
+            Past schedules
+          </button>
+        </div>
+
+        {/* Controls — wrap instead of overflowing. All inline on iPad; on a
+            narrow phone the actions wrap to the next line (never off-screen). */}
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete text-sm w-[150px] shrink-0"
+          />
+          <button
+            onClick={carryOver}
+            className="bg-graphite border border-line rounded-full px-4 h-10 text-concrete font-semibold text-sm inline-flex items-center gap-1.5 active:text-safety shrink-0"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9 9 0 0 0-6.36 2.64L3 8" />
+              <path d="M3 3v5h5" />
+            </svg>
+            Carry over
+          </button>
+          {jobs.length > 0 && (
+            <button
+              onClick={() => setJobs([])}
+              className="text-rebar border border-line rounded-full px-4 h-10 text-sm active:text-safety shrink-0"
+            >
+              Clear all
+            </button>
+          )}
+        </div>
+
+        {resultMsg && !showReview && (
+          <div className="text-rebar text-sm mb-2">{resultMsg}</div>
+        )}
+
+        {/* Add job — on top */}
+        <button
+          onClick={() => setShowJobPicker(true)}
+          className="w-full border border-dashed border-line rounded-2xl py-4 text-safety font-bold mb-4 active:bg-graphite"
+        >
+          + Add job
+        </button>
+
+        {loading && <div className="text-rebar text-center py-8">Loading…</div>}
+
+        {/* Job cards — vertical stack on phone, horizontal scrolling row on
+            iPad/desktop (jobs side by side in the order added, scroll across).
+            On desktop the scroll row fills the remaining viewport height so the
+            horizontal scroll works across the whole area, not just a short band
+            sized to a small job list. */}
+        <div className="flex flex-col md:flex-row md:overflow-x-auto gap-4 md:pb-3 md:-mx-1 md:px-1 md:min-h-[60vh] md:items-start md:content-start">
+          {jobs.map((j, idx) => (
+            <div
+              key={j.jobPageId}
+              ref={idx === jobs.length - 1 ? newJobRef : undefined}
+              className="bg-graphite rounded-2xl p-4 border border-line w-full md:w-[330px] md:flex-shrink-0 md:self-start"
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="font-bold text-concrete">{j.name}</div>
+                  <div className="text-rebar text-xs">Job ID: {j.jobId || "—"}</div>
+                </div>
+                <button
+                  onClick={() => removeJob(j.jobPageId)}
+                  className="text-rebar text-lg px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="text-rebar text-xs mt-1 mb-2">{j.crew.length} crew</div>
+
+              <div className="space-y-1.5">
+                {j.crew.map((c) => (
+                  <div
+                    key={c.worker}
+                    onClick={() => setLead(j.jobPageId, c.worker)}
+                    className={`flex items-center gap-2 bg-steel rounded-xl px-3 py-2.5 border ${
+                      c.isLead ? "border-blue-500" : "border-transparent"
+                    }`}
+                  >
+                    <span className="flex-1 text-concrete text-sm">{c.worker}</span>
+                    {c.isLead && (
+                      <span className="bg-blue-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
+                        Lead
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeWorker(j.jobPageId, c.worker);
+                      }}
+                      className="text-rebar"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Add worker — opens a modal picker (search on top, list below) */}
+              <button
+                onClick={() => {
+                  setWorkerFor(j.jobPageId);
+                  setWorkerQuery("");
+                }}
+                className="mt-2 w-full border border-dashed border-line rounded-xl py-2.5 text-rebar text-sm active:text-safety"
+              >
+                + Add worker
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {!loading && jobs.length === 0 && (
+          <div className="text-rebar text-center py-10">
+            Tap “Add job” to start, or “Carry over last”.
+          </div>
+        )}
+      </div>
+
+      {/* Job picker modal */}
+      {showJobPicker && (
+        <div
+          className={`fixed inset-0 z-[65] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            jobQuery ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setShowJobPicker(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Sticky header: title + close, then the search box stays on top */}
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Add job</div>
+                <button
+                  onClick={() => {
+                    setShowJobPicker(false);
+                    setJobQuery("");
+                  }}
+                  aria-label="Close"
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                ref={jobSearchRef}
+                value={jobQuery}
+                onChange={(e) => setJobQuery(e.target.value)}
+                placeholder="Search active jobs…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            {/* Scrollable list below the fixed search box */}
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredJobs().map((j) => (
+                <button
+                  key={j.id}
+                  onClick={() => addJob(j)}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{j.name}</span>
+                  <span className="text-rebar text-sm">{j.jobId}</span>
+                </button>
+              ))}
+              {filteredJobs().length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No active jobs match.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Worker picker modal — search on top, list below, multi-add */}
+      {workerFor !== null && (
+        <div
+          className={`fixed inset-0 z-[65] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            workerQuery ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => {
+            setWorkerFor(null);
+            setWorkerQuery("");
+          }}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold truncate pr-2">
+                  Add worker{" "}
+                  <span className="text-rebar font-normal">
+                    · {jobs.find((j) => j.jobPageId === workerFor)?.name || ""}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    setWorkerFor(null);
+                    setWorkerQuery("");
+                  }}
+                  aria-label="Close"
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                ref={workerSearchRef}
+                value={workerQuery}
+                onChange={(e) => setWorkerQuery(e.target.value)}
+                placeholder="Search worker…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredRoster(workerFor).map((n) => {
+                const elsewhere = otherJobs(n, workerFor);
+                return (
+                  <button
+                    key={n}
+                    onClick={() => addWorker(workerFor, n)}
+                    className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                  >
+                    <span>{n}</span>
+                    {elsewhere.length > 0 && (
+                      <span className="text-safety text-[11px]">
+                        on {elsewhere.join(", ")}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+              {filteredRoster(workerFor).length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {jobs.length > 0 && !kbOpen && (
+        <div
+          className="fixed bottom-0 left-0 right-0 bg-graphite/95 border-t border-line backdrop-blur z-[62]"
+          style={{ paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+        >
+          <div className="max-w-7xl mx-auto flex items-center gap-3 px-4 pt-3">
+            <div className="text-rebar text-sm whitespace-nowrap">
+              {jobs.length} jobs · {totalCrew} crew
+            </div>
+            <button
+              onClick={() => setShowReview(true)}
+              className="ml-auto bg-safety text-steel font-bold rounded-xl px-6 py-2.5 whitespace-nowrap"
+            >
+              Review schedule →
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function prettyScheduleDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const mons = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${days[dt.getUTCDay()]}, ${mons[m - 1]} ${d}, ${y}`;
+}
+
+function HoursControl({
+  value,
+  onChange,
+  lang,
+}: {
+  value: number | null;
+  onChange: (h: number | null) => void;
+  lang: Lang;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [raw, setRaw] = useState(value != null ? String(value) : "");
+
+  useEffect(() => {
+    setRaw(value != null ? String(value) : "");
+  }, [value]);
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        inputMode="decimal"
+        step="0.25"
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        onBlur={() => {
+          const n = parseFloat(raw);
+          onChange(isNaN(n) ? null : n);
+          setEditing(false);
+        }}
+        className="w-20 text-center bg-steel rounded-xl py-2 font-bold text-concrete"
+      />
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1">
+      <div className="hidden">{lang}</div>
+      {QUICK_HOURS.map((h) => (
+        <button
+          key={h}
+          onClick={() => onChange(h)}
+          className={`w-9 h-10 rounded-lg text-sm font-bold ${
+            value === h
+              ? "bg-safety text-steel"
+              : "bg-steel/70 text-rebar"
+          }`}
+        >
+          {h}
+        </button>
+      ))}
+      <button
+        onClick={() => setEditing(true)}
+        className={`min-w-[2.75rem] h-10 px-2 rounded-lg text-sm font-bold ${
+          value != null && !QUICK_HOURS.includes(value)
+            ? "bg-safety text-steel"
+            : "bg-steel/70 text-concrete"
+        }`}
+      >
+        {value != null && !QUICK_HOURS.includes(value) ? value : "·.·"}
+      </button>
+    </div>
+  );
+}
+
+function ApplyAll({
+  tr,
+  onApply,
+}: {
+  tr: ReturnType<typeof t>;
+  onApply: (h: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [raw, setRaw] = useState("8");
+
+  function confirm() {
+    const n = parseFloat(raw);
+    if (!isNaN(n)) onApply(n);
+    setOpen(false);
+  }
+
+  return (
+    <>
+      <button
+        onClick={() => {
+          setRaw("8");
+          setOpen(true);
+        }}
+        className="text-safety text-xs font-bold px-3 py-1.5 rounded-full border border-safety/60 active:bg-safety/10"
+      >
+        {tr.applyAll}
+      </button>
+
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-8"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="w-full max-w-xs bg-graphite rounded-3xl p-5 shadow-2xl border border-safety/40"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="text-sm font-bold text-concrete">
+                {tr.applyAllTitle}
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+                className="w-8 h-8 -mr-1 flex items-center justify-center rounded-full bg-steel/70 text-rebar text-lg active:bg-steel"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex items-center justify-center gap-3">
+              <input
+                type="number"
+                inputMode="decimal"
+                step="0.25"
+                value={raw}
+                onChange={(e) => setRaw(e.target.value)}
+                autoFocus
+                className="w-20 text-center text-2xl bg-steel rounded-xl py-3 font-extrabold text-concrete"
+              />
+              <button
+                onClick={confirm}
+                className="bg-safety text-steel font-extrabold px-5 py-3 rounded-xl"
+              >
+                {tr.done}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ForemanPicker({
+  roster,
+  rosterLoaded,
+  tr,
+  lang,
+  setLang,
+  onPick,
+  current,
+  onCancel,
+}: {
+  roster: string[];
+  rosterLoaded: boolean;
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  setLang: (l: Lang) => void;
+  onPick: (n: string) => void;
+  current: string;
+  onCancel?: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const list = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return roster;
+    return roster.filter((n) => n.toLowerCase().includes(query));
+  }, [q, roster]);
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <TopBar tr={tr} lang={lang} setLang={setLang} />
+      <div className="px-5 flex-1 flex flex-col">
+        <h1 className="text-2xl font-extrabold mt-6 mb-1">{tr.pickForeman}</h1>
+        <input
+          type="text"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={tr.searchForeman}
+          className="w-full bg-graphite rounded-xl px-4 py-3 my-4 text-concrete placeholder:text-rebar/60"
+        />
+        <div className="flex-1 overflow-y-auto space-y-2 pb-6">
+          {!rosterLoaded && (
+            <div className="text-rebar">{tr.loading}</div>
+          )}
+          {list.map((n) => (
+            <button
+              key={n}
+              onClick={() => onPick(n)}
+              className={`w-full text-left px-4 py-4 rounded-2xl font-semibold ${
+                n === current
+                  ? "bg-safety text-steel"
+                  : "bg-graphite text-concrete active:bg-line"
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+          {rosterLoaded && list.length === 0 && (
+            <div className="text-rebar text-sm">
+              {q.trim()
+                ? lang === "es"
+                  ? "Sin resultados"
+                  : "No matches"
+                : ""}
+            </div>
+          )}
+        </div>
+        {onCancel && (
+          <button
+            onClick={onCancel}
+            className="mb-6 py-4 rounded-2xl bg-graphite text-concrete font-semibold"
+          >
+            {tr.back}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- helpers ----------
+// Put the foreman in the crew (at the top) if he's not already there.
+function ensureForeman(name: string, list: Worker[]): Worker[] {
+  if (!name) return list;
+  if (list.some((w) => w.name.toLowerCase() === name.toLowerCase())) return list;
+  return [{ name, hours: null }, ...list];
+}
+
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
+}
+
+function prettyDate(iso: string, lang: Lang) {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const monthsEs = [
+    "ene", "feb", "mar", "abr", "may", "jun",
+    "jul", "ago", "sep", "oct", "nov", "dic",
+  ];
+  const monthsEn = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  const daysEs = [
+    "Domingo", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado",
+  ];
+  const daysEn = [
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+  ];
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const day = (lang === "es" ? daysEs : daysEn)[dow];
+  const mo = (lang === "es" ? monthsEs : monthsEn)[m - 1];
+  return `${day}, ${d} ${mo} ${y}`;
+}
+
+// ============================================================================
+// Reconciliation cockpit — admin tool with two views (Find + Review).
+// Find: pull up any worker, see their timecard entries + flags, edit/void/note.
+// Review: schedule-vs-actual discrepancies (built next stage).
+// ============================================================================
+
+type ReconEntry = {
+  id: string;
+  worker: string;
+  date: string;
+  job: string;
+  projectName: string;
+  projectId: string;
+  hours: number;
+  foreman: string;
+  notes: string;
+  voided: boolean;
+  voidNote: string;
+  underReview?: boolean;
+  uncategorized?: boolean;
+};
+
+function isoAddDays(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  return dt.toISOString().slice(0, 10);
+}
+function mondayOf(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun
+  const back = (dow + 6) % 7; // days since Monday
+  return isoAddDays(iso, -back);
+}
+
+const FLAG_LABEL: Record<string, string> = {
+  duplicate: "Duplicate",
+  multi_job: "Two jobs same day",
+  over_hours: "Over 11 hrs that day",
+  single_high: "High hours",
+};
+
+function ReconPanel({
+  tr,
+  lang,
+  onClose,
+}: {
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  const today = (() => {
+    const d = new Date();
+    const off = d.getTimezoneOffset();
+    return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+  })();
+
+  const [view, setView] = useState<"find" | "review">("review");
+
+  // date range
+  const [rangeMode, setRangeMode] = useState<"this" | "last" | "custom">("this");
+  const [customStart, setCustomStart] = useState(today);
+  const [customEnd, setCustomEnd] = useState(today);
+
+  const { start, end } = useMemo(() => {
+    if (rangeMode === "this") {
+      const mon = mondayOf(today);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    if (rangeMode === "last") {
+      const mon = isoAddDays(mondayOf(today), -7);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    return { start: customStart, end: customEnd };
+  }, [rangeMode, customStart, customEnd, today]);
+
+  // worker search
+  const [workers, setWorkers] = useState<string[]>([]);
+  const [worker, setWorker] = useState<string>("");
+  const [workerQuery, setWorkerQuery] = useState("");
+  const [cardMode, setCardMode] = useState(false); // Lookup: by-worker vs by-card
+  const [cards, setCards] = useState<any[]>([]);
+  const [cardsLoading, setCardsLoading] = useState(false);
+  const [openCard, setOpenCard] = useState<any | null>(null);
+  const [cardBulk, setCardBulk] = useState<"" | "project" | "split" | "void">("");
+  function loadCards(): Promise<any[]> {
+    setCardsLoading(true);
+    return fetch(`/api/recon?action=cards&start=${start}&end=${end}&today=${todayISO()}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const list = d?.submitted || [];
+        setCards(list);
+        setCardsLoading(false);
+        return list;
+      })
+      .catch(() => { setCards([]); setCardsLoading(false); return []; });
+  }
+  // After an edit from the card view: refetch and re-point the open card at the
+  // fresh copy (matched by job+foreman+date). If it no longer exists (e.g. the
+  // whole card was voided), close the detail view.
+  async function refreshOpenCard() {
+    const list = await loadCards();
+    setOpenCard((cur: any) => {
+      if (!cur) return cur;
+      const match = list.find(
+        (c: any) =>
+          (c.projectId || c.job) === (cur.projectId || cur.job) &&
+          c.foreman === cur.foreman &&
+          c.date === cur.date
+      );
+      return match || null;
+    });
+  }
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const [entries, setEntries] = useState<ReconEntry[]>([]);
+  const [flags, setFlags] = useState<Record<string, string[]>>({});
+  const [confirmed, setConfirmed] = useState<{ key: string; refs: string; pageId: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [showVoided, setShowVoided] = useState(false);
+
+  // Lookup flags overview — everyone with an open data-sanity flag in the range
+  const [flagWorkers, setFlagWorkers] = useState<
+    { worker: string; days: { worker: string; date: string; flags: string[]; job: string }[] }[]
+  >([]);
+  const [flagConfirmed, setFlagConfirmed] = useState<{ key: string; refs: string; pageId: string }[]>([]);
+  const [flagsLoading, setFlagsLoading] = useState(false);
+
+  // load roster once
+  useEffect(() => {
+    fetch("/api/recon?action=roster")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.workers)) setWorkers(d.workers);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load cards when in card mode (and when the date range changes).
+  useEffect(() => {
+    if (view === "find" && cardMode) loadCards();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, cardMode, start, end]);
+
+  // Flags overview — refresh when on Lookup tab or the range changes.
+  const loadFlagsOverview = useCallback(() => {
+    setFlagsLoading(true);
+    fetch(`/api/recon?action=all_flags&start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setFlagWorkers(d.workers || []);
+          setFlagConfirmed(d.confirmed || []);
+        }
+        setFlagsLoading(false);
+      })
+      .catch(() => setFlagsLoading(false));
+  }, [start, end]);
+
+  useEffect(() => {
+    if (view === "find") loadFlagsOverview();
+  }, [view, loadFlagsOverview]);
+
+  const search = useCallback((override?: string) => {
+    const w = override || worker;
+    if (!w) return;
+    setLoading(true);
+    setMsg("");
+    const url = `/api/recon?start=${start}&end=${end}&worker=${encodeURIComponent(w)}`;
+    fetch(url)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setEntries(d.entries || []);
+          setFlags(d.flags || {});
+          setConfirmed(d.confirmed || []);
+          if ((d.entries || []).length === 0) setMsg("No timecards for this worker in that range.");
+        } else {
+          setMsg(d?.error || "Search failed.");
+        }
+        setLoading(false);
+      })
+      .catch(() => {
+        setMsg("Search failed.");
+        setLoading(false);
+      });
+  }, [worker, start, end]);
+
+  // auto-search when worker or range changes
+  useEffect(() => {
+    if (worker) search();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worker, start, end]);
+
+  const filteredWorkers = workers.filter((w) =>
+    w.toLowerCase().includes(workerQuery.toLowerCase())
+  );
+
+  // ---- edit / void / note modals ----
+  const [editEntry, setEditEntry] = useState<ReconEntry | null>(null);
+  const [voidEntry, setVoidEntry] = useState<ReconEntry | null>(null);
+  const [splitEntry, setSplitEntry] = useState<ReconEntry | null>(null);
+  const [recentSplits, setRecentSplits] = useState<
+    {
+      origId: string;
+      origPriorHours: number;
+      origPriorProjectId: string;
+      newId: string;
+      worker: string;
+      date: string;
+      label: string;
+    }[]
+  >([]);
+
+  function refreshAfterWrite() {
+    search();
+    loadFlagsOverview();
+    if (cardMode) void refreshOpenCard();
+  }
+
+  async function undoSplit(s: {
+    origId: string;
+    origPriorHours: number;
+    origPriorProjectId: string;
+    newId: string;
+    worker: string;
+    date: string;
+    label: string;
+  }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "undo_split",
+        origId: s.origId,
+        origPriorHours: s.origPriorHours,
+        origPriorProjectId: s.origPriorProjectId,
+        newId: s.newId,
+        logWorker: s.worker,
+        logDate: s.date,
+      }),
+    });
+    setRecentSplits((cur) => cur.filter((x) => x.newId !== s.newId));
+    refreshAfterWrite();
+  }
+
+  const flagLabel = (f: string) => FLAG_LABEL[f] || f;
+
+  // The exact set of entry IDs that share a given flag on a given date
+  // (worker is fixed by the search). Used for strict "reviewed" matching.
+  function flagSetIds(date: string, flagCode: string): string {
+    return entries
+      .filter((e) => !e.voided && e.date === date && (flags[e.id] || []).includes(flagCode))
+      .map((e) => e.id)
+      .sort()
+      .join(",");
+  }
+
+  // A flag is "reviewed OK" only if a log record matches worker+date+kind AND
+  // the exact same entry set (Refs). Older records with empty Refs match on
+  // worker+date+kind alone (lean fallback), so nothing breaks.
+  function findReview(e: ReconEntry, f: string) {
+    const key = `${e.worker.toLowerCase()}|${e.date}|${flagLabel(f).toLowerCase()}`;
+    const setIds = flagSetIds(e.date, f);
+    return confirmed.find((c) => c.key === key && (c.refs === "" || c.refs === setIds));
+  }
+  const isFlagOk = (e: ReconEntry, f: string) => !!findReview(e, f);
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto">
+      <div className="max-w-3xl mx-auto p-4 pb-28">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          {view === "find" ? (
+            <button
+              onClick={() => setCardMode((m) => !m)}
+              className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+              aria-label="Toggle worker or card view"
+            >
+              {cardMode ? "Card" : "Worker"}
+            </button>
+          ) : (
+            <div className="w-14" />
+          )}
+          <div className="font-bold text-concrete text-lg">{tr.reconTitle}</div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            {tr.close}
+          </button>
+        </div>
+
+        {/* Toggle */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-5">
+          <button
+            onClick={() => setView("review")}
+            className={`flex-1 rounded-full py-2.5 text-sm font-bold ${
+              view === "review" ? "bg-safety text-steel" : "text-rebar"
+            }`}
+          >
+            Reconcile
+          </button>
+          <button
+            onClick={() => setView("find")}
+            className={`flex-1 rounded-full py-2.5 text-sm font-bold ${
+              view === "find" ? "bg-safety text-steel" : "text-rebar"
+            }`}
+          >
+            Lookup
+          </button>
+        </div>
+
+        {/* Range selector — shared by both views */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+          {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(
+            ([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setRangeMode(k)}
+                className={`flex-1 rounded-full py-2 text-xs font-bold ${
+                  rangeMode === k ? "bg-steel text-concrete border border-line" : "text-rebar"
+                }`}
+              >
+                {label}
+              </button>
+            )
+          )}
+        </div>
+        {rangeMode === "custom" && (
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              type="date"
+              value={customStart}
+              max={today}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+            <span className="text-rebar text-sm">to</span>
+            <input
+              type="date"
+              value={customEnd}
+              max={today}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+          </div>
+        )}
+
+        {view === "find" ? (
+          <>
+            {/* Flags to review — everyone with an open flag in this range */}
+            {(() => {
+              const isOpen = (wname: string, date: string, f: string) => {
+                const key = `${wname.toLowerCase()}|${date}|${(FLAG_LABEL[f] || f).toLowerCase()}`;
+                return !flagConfirmed.some((c) => c.key === key);
+              };
+              // keep only worker-days that still have at least one open flag
+              const openWorkers = flagWorkers
+                .map((w) => ({
+                  worker: w.worker,
+                  days: w.days.filter((d) => d.flags.some((f) => isOpen(w.worker, d.date, f))),
+                }))
+                .filter((w) => w.days.length > 0);
+              const total = openWorkers.reduce((s, w) => s + w.days.length, 0);
+              return (
+                <div className="mb-4">
+                  {flagsLoading ? (
+                    <div className="text-rebar text-sm px-1">Checking flags…</div>
+                  ) : total === 0 ? (
+                    <div className="flex items-center gap-2 text-sm px-1">
+                      <span style={{ color: "#4a9e63" }} className="font-bold">✓</span>
+                      <span className="text-rebar">All flags clear in this range.</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2 mb-2 px-1">
+                        <span className="text-xs font-bold uppercase tracking-wider" style={{ color: "#e0a63b" }}>
+                          Flags to review
+                        </span>
+                        <span className="text-rebar text-xs">{total}</span>
+                      </div>
+                      {openWorkers.map((w) => (
+                        <button
+                          key={w.worker}
+                          onClick={() => {
+                            setWorker(w.worker);
+                            search(w.worker);
+                          }}
+                          className="w-full text-left bg-graphite border border-line rounded-2xl p-3.5 mb-2"
+                          style={{ borderLeft: "4px solid #e0a63b" }}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-concrete font-bold text-[15px]">{w.worker}</span>
+                            <span className="text-rebar text-xs">
+                              {w.days.length} {w.days.length === 1 ? "day" : "days"} ›
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5 mt-1.5">
+                            {Array.from(
+                              new Set(w.days.flatMap((d) => d.flags.filter((f) => isOpen(w.worker, d.date, f))))
+                            ).map((f) => (
+                              <span
+                                key={f}
+                                className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+                                style={{ color: "#f0cf8f", background: "rgba(224,166,59,.16)" }}
+                              >
+                                ⚑ {FLAG_LABEL[f] || f}
+                              </span>
+                            ))}
+                          </div>
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              );
+            })()}
+
+            {cardMode ? (
+              <CardBrowser
+                cards={cards}
+                loading={cardsLoading}
+                start={start}
+                end={end}
+                lang={lang}
+                onOpen={(c) => setOpenCard(c)}
+              />
+            ) : (
+            <>
+            {/* Look up a specific worker */}
+            <div className="flex gap-2 mb-4">
+              <button
+                onClick={() => {
+                  setPickerOpen(true);
+                  setWorkerQuery("");
+                }}
+                className="flex-1 bg-safety text-steel rounded-xl py-3.5 font-bold"
+              >
+                {worker ? `Looking up: ${worker}` : "Find a worker"}
+              </button>
+              {worker && (
+                <button
+                  onClick={() => {
+                    setWorker("");
+                    setEntries([]);
+                    setFlags({});
+                    setMsg("");
+                  }}
+                  aria-label="Clear worker"
+                  className="w-12 rounded-xl bg-graphite border border-line text-rebar font-bold active:text-safety shrink-0"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Results */}
+            {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
+            {!loading && msg && <div className="text-rebar text-sm px-1 py-2">{msg}</div>}
+            {!loading && worker && entries.length > 0 && (
+              <div className="flex items-center justify-between mb-2 px-1">
+                <span className="text-rebar text-xs">
+                  {entries.length} {entries.length === 1 ? "entry" : "entries"} · {prettyDate(start, lang).split(",")[1]?.trim() || start} – {prettyDate(end, lang).split(",")[1]?.trim() || end} · <span className="text-concrete font-bold">{round2(entries.filter((e) => !e.voided && !e.underReview).reduce((s, e) => s + (e.hours || 0), 0))}h</span>
+                </span>
+                <button
+                  onClick={() => search()}
+                  aria-label="Refresh"
+                  className="w-8 h-8 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center active:text-safety shrink-0"
+                >
+                  ↻
+                </button>
+              </div>
+            )}
+
+            {!loading &&
+              (() => {
+                // One card per DAY: two jobs on the same date share a single
+                // card (one date header) with a divider between them.
+                const live = entries.filter((e) => !e.voided);
+                const byDate = new Map<string, typeof live>();
+                for (const e of live) {
+                  if (!byDate.has(e.date)) byDate.set(e.date, [] as any);
+                  byDate.get(e.date)!.push(e);
+                }
+                return Array.from(byDate.entries()).map(([dayDate, dayEntries]) => {
+                  // Day edge: green when every flag on the day is confirmed OK,
+                  // amber when any remain open (same rule, applied per day).
+                  const dayHasFlags = dayEntries.some((x) => (flags[x.id] || []).length > 0);
+                  const dayAllOk =
+                    dayHasFlags &&
+                    dayEntries.every((x) => (flags[x.id] || []).every((f) => isFlagOk(x, f)));
+                  const dayEdge = dayHasFlags
+                    ? dayAllOk
+                      ? "4px solid #4a9e63"
+                      : "4px solid #e0a63b"
+                    : undefined;
+                  return (
+                    <div
+                      key={dayDate}
+                      className="bg-graphite border border-line rounded-2xl p-4 mb-3"
+                      style={dayEdge ? { borderLeft: dayEdge } : undefined}
+                    >
+                      <div className="text-safety text-xs font-bold uppercase tracking-wide mb-2">
+                        {prettyDate(dayDate, lang)}
+                      </div>
+                      {dayEntries.map((e, di) => {
+                const efl = flags[e.id] || [];
+                const displayName = e.projectName || e.job || "—";
+                const allOk = efl.length > 0 && efl.every((f) => isFlagOk(e, f));
+                const needsProject = !e.projectId && !e.uncategorized;
+                return (
+                  <div
+                    key={e.id}
+                    className={di > 0 ? "mt-3 pt-3" : ""}
+                    style={di > 0 ? { borderTop: "1px solid rgba(244,243,240,.15)" } : undefined}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-concrete font-bold text-[15px]">
+                          {displayName}
+                          {e.underReview && (
+                            <span className="ml-2 text-[11px] font-bold" style={{ color: "#e0a63b" }}>
+                              ⟳ on hold
+                            </span>
+                          )}
+                          {e.uncategorized && (
+                            <span
+                              className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                              style={{ color: "#9aa3af", background: "rgba(154,163,175,.15)" }}
+                            >
+                              UNCATEGORIZED
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-rebar text-xs mt-0.5">
+                          Foreman: {e.foreman || "—"}
+                          {e.projectName && e.job && e.job !== e.projectName && (
+                            <span className="text-rebar/70"> · logged as "{e.job}"</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-1.5">
+                        <div className="text-concrete text-xl font-extrabold">{e.hours}h</div>
+                        {needsProject && (
+                          <button
+                            onClick={() => setEditEntry(e)}
+                            className="text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
+                            style={{ color: "#8fbcff", background: "rgba(47,115,216,.16)" }}
+                          >
+                            Set project ▸
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {efl.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2 items-center">
+                        {efl.map((f) => {
+                          const ok = isFlagOk(e, f);
+                          return (
+                            <span
+                              key={f}
+                              className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+                              style={
+                                ok
+                                  ? { color: "#9fdcb4", background: "rgba(74,158,99,.16)" }
+                                  : { color: "#f0cf8f", background: "rgba(224,166,59,.16)" }
+                              }
+                            >
+                              {ok ? "✓" : "⚑"} {flagLabel(f)}
+                            </span>
+                          );
+                        })}
+                        {!allOk ? (
+                          <button
+                            onClick={async () => {
+                              const toConfirm = efl.filter((f) => !isFlagOk(e, f));
+                              const optimistic: { key: string; refs: string; pageId: string }[] = [];
+                              for (const f of toConfirm) {
+                                const refs = flagSetIds(e.date, f);
+                                await fetch("/api/recon", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    op: "log",
+                                    worker: e.worker,
+                                    date: e.date,
+                                    kind: flagLabel(f),
+                                    status: "Confirmed OK",
+                                    note: displayName,
+                                    refs,
+                                  }),
+                                });
+                                optimistic.push({
+                                  key: `${e.worker.toLowerCase()}|${e.date}|${flagLabel(f).toLowerCase()}`,
+                                  refs,
+                                  pageId: "pending",
+                                });
+                              }
+                              setConfirmed((c) => [...c, ...optimistic]);
+                              loadFlagsOverview();
+                            }}
+                            className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
+                          >
+                            Looks OK
+                          </button>
+                        ) : (
+                          <button
+                            onClick={async () => {
+                              // undo: archive each matching log record
+                              const toUndo = efl
+                                .map((f) => findReview(e, f))
+                                .filter((r): r is { key: string; refs: string; pageId: string } => !!r);
+                              for (const r of toUndo) {
+                                if (r.pageId && r.pageId !== "pending") {
+                                  await fetch("/api/recon", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ op: "unlog", pageId: r.pageId }),
+                                  });
+                                }
+                              }
+                              refreshAfterWrite();
+                            }}
+                            className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-line text-rebar active:text-safety"
+                          >
+                            Undo OK
+                          </button>
+                        )}
+                        {!e.underReview && (
+                          <button
+                            onClick={async () => {
+                              // optimistic: mark held locally so the flag drops instantly
+                              setEntries((cur) =>
+                                cur.map((x) => (x.id === e.id ? { ...x, underReview: true } : x))
+                              );
+                              setFlags((cur) => {
+                                const next = { ...cur };
+                                delete next[e.id];
+                                return next;
+                              });
+                              try {
+                                const res = await fetch("/api/recon", {
+                                  method: "POST",
+                                  headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify({
+                                    op: "hold",
+                                    ids: [e.id],
+                                    held: true,
+                                    logWorker: e.worker,
+                                    logDate: e.date,
+                                  }),
+                                }).then((r) => r.json());
+                                if (!res?.ok) throw new Error("hold failed");
+                                loadFlagsOverview();
+                              } catch {
+                                refreshAfterWrite(); // rollback via refetch
+                              }
+                            }}
+                            className="text-[11px] font-bold px-2.5 py-0.5 rounded-full border"
+                            style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                          >
+                            Hold for review
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 mt-3 flex-wrap">
+                      <button
+                        onClick={() => setEditEntry(e)}
+                        className="bg-graphite border border-line text-concrete rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => setSplitEntry(e)}
+                        className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Split
+                      </button>
+                      <button
+                        onClick={() => setVoidEntry(e)}
+                        className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Void
+                      </button>
+                    </div>
+                  </div>
+                );
+                      })}
+                    </div>
+                  );
+                });
+              })()}
+
+            {/* Collapsible voided section */}
+            {!loading && entries.some((e) => e.voided) && (
+              <div className="mt-4">
+                <button
+                  onClick={() => setShowVoided((v) => !v)}
+                  className="w-full flex items-center justify-between text-rebar text-sm font-bold py-2 px-1"
+                >
+                  <span>Voided ({entries.filter((e) => e.voided).length})</span>
+                  <span>{showVoided ? "▾" : "▸"}</span>
+                </button>
+                {showVoided &&
+                  entries.filter((e) => e.voided).map((e) => (
+                    <div key={e.id} className="bg-graphite border border-line rounded-2xl p-4 mb-3 opacity-60">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                            {prettyDate(e.date, lang)}
+                          </div>
+                          <div className="text-concrete font-bold text-[15px]">
+                            {e.projectName || e.job || "—"}{" "}
+                            <span className="text-rebar text-xs font-normal">(voided)</span>
+                          </div>
+                          <div className="text-rebar text-xs mt-0.5">Foreman: {e.foreman || "—"}</div>
+                          {e.voidNote && (
+                            <div className="text-rebar text-xs italic mt-1">Void note: {e.voidNote}</div>
+                          )}
+                        </div>
+                        <div className="text-rebar text-xl font-extrabold">{e.hours}h</div>
+                      </div>
+                      <button
+                        onClick={async () => {
+                          await fetch("/api/recon", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ op: "void", id: e.id, voided: false, note: "" }),
+                          });
+                          refreshAfterWrite();
+                        }}
+                        className="mt-3 text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
+                      >
+                        Un-void
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            )}
+
+            {/* Recently split — session undo */}
+            {recentSplits.length > 0 && (
+              <div className="mt-5 pt-4 border-t border-line">
+                <div className="text-rebar text-xs font-bold uppercase tracking-wider mb-2 px-1">
+                  Recently split
+                </div>
+                {recentSplits.map((s) => (
+                  <div
+                    key={s.newId || `${s.origId}-${s.date}`}
+                    className="flex items-center justify-between gap-3 bg-graphite border border-line rounded-xl px-3 py-2 mb-2"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-concrete text-sm font-semibold truncate">{s.worker}</div>
+                      <div className="text-rebar text-xs truncate">
+                        {prettyDate(s.date, lang).split(",")[0]} · {s.label}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => undoSplit(s)}
+                      className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                    >
+                      Undo
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            </>
+            )}
+          </>
+        ) : (
+          <ReconReviewView tr={tr} lang={lang} start={start} end={end} />
+        )}
+      </div>
+
+      {/* Worker picker modal */}
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[65] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            workerQuery ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Find worker</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={workerQuery}
+                onChange={(ev) => setWorkerQuery(ev.target.value)}
+                placeholder="Type a name…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredWorkers.map((w) => (
+                <button
+                  key={w}
+                  onClick={() => {
+                    setWorker(w);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete"
+                >
+                  {w}
+                </button>
+              ))}
+              {filteredWorkers.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit modal */}
+      {openCard && (
+        <CardDetailModal
+          card={openCard}
+          lang={lang}
+          onClose={() => setOpenCard(null)}
+          onEditEntry={(e) => setEditEntry(e)}
+          onVoidEntry={(e) => setVoidEntry(e)}
+          onSplitEntry={(e) => setSplitEntry(e)}
+          onBulk={(kind) => setCardBulk(kind)}
+        />
+      )}
+
+      {/* Whole-card actions launched from the card view — reuse the same bulk
+          modals as the Reconcile needs-project section. */}
+      {openCard && cardBulk === "project" && (
+        <ReconBulkProjectModal
+          jobName={openCard.job}
+          dateLabel={prettyDate(openCard.date, lang)}
+          entries={openCard.entries}
+          onClose={() => setCardBulk("")}
+          onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+      {openCard && cardBulk === "split" && (
+        <ReconBulkSplitModal
+          jobName={openCard.job}
+          dateLabel={prettyDate(openCard.date, lang)}
+          entries={openCard.entries}
+          onClose={() => setCardBulk("")}
+          onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+      {openCard && cardBulk === "void" && (
+        <ReconVoidCardModal
+          jobName={openCard.job}
+          dateLabel={prettyDate(openCard.date, lang)}
+          entries={openCard.entries}
+          onClose={() => setCardBulk("")}
+          onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+
+      {editEntry && (
+        <ReconEditModal
+          entry={editEntry}
+          lang={lang}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => {
+            setEditEntry(null);
+            refreshAfterWrite();
+          }}
+        />
+      )}
+
+      {/* Void modal */}
+      {voidEntry && (
+        <ReconVoidModal
+          entry={voidEntry}
+          lang={lang}
+          onClose={() => setVoidEntry(null)}
+          onSaved={() => {
+            setVoidEntry(null);
+            refreshAfterWrite();
+          }}
+        />
+      )}
+
+      {splitEntry && (
+        <ReconSplitModal
+          entry={splitEntry}
+          lang={lang}
+          onClose={() => setSplitEntry(null)}
+          onSaved={(undo) => {
+            setSplitEntry(null);
+            setRecentSplits((cur) => [undo, ...cur].slice(0, 20));
+            refreshAfterWrite();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReconEditModal({
+  entry,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  entry: ReconEntry;
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [hours, setHours] = useState(String(entry.hours));
+  const [job, setJob] = useState(entry.job);
+  const [foreman, setForeman] = useState(entry.foreman);
+  const [projectId, setProjectId] = useState(entry.projectId);
+  const [projectName, setProjectName] = useState(entry.projectName);
+  const [dateVal, setDateVal] = useState(entry.date);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+
+  // project picker
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [projPickerOpen, setProjPickerOpen] = useState(false);
+  const [projQuery, setProjQuery] = useState("");
+  // foreman picker (roster, excluding rodbusters)
+  const [foremen, setForemen] = useState<string[]>([]);
+  const [fmPickerOpen, setFmPickerOpen] = useState(false);
+  const [fmQuery, setFmQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=foremen")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.foremen)) setForemen(d.foremen);
+      })
+      .catch(() => {});
+  }, []);
+  const filteredForemen = foremen.filter((f) => f.toLowerCase().includes(fmQuery.toLowerCase()));
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filteredProjects = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(projQuery.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(projQuery.toLowerCase())
+  );
+
+  const changed =
+    parseFloat(hours) !== entry.hours ||
+    job !== entry.job ||
+    foreman !== entry.foreman ||
+    projectId !== entry.projectId ||
+    dateVal !== entry.date;
+
+  async function save() {
+    setSaving(true);
+    const body: any = { op: "edit", id: entry.id };
+    const changes: string[] = [];
+    const h = parseFloat(hours);
+    if (!isNaN(h) && h !== entry.hours) {
+      body.hours = h;
+      changes.push(`Hours ${entry.hours} → ${h}`);
+    }
+    if (dateVal !== entry.date) {
+      body.date = dateVal;
+      changes.push(`Date ${entry.date} → ${dateVal}`);
+    }
+    if (job !== entry.job) {
+      body.job = job;
+      changes.push(`Job "${entry.job || "—"}" → "${job || "—"}"`);
+    }
+    if (foreman !== entry.foreman) {
+      body.foreman = foreman;
+      changes.push(`Foreman ${entry.foreman || "—"} → ${foreman || "—"}`);
+    }
+    if (projectId !== entry.projectId) {
+      body.projectId = projectId;
+      changes.push(`Project → ${projectName || "(cleared)"}`);
+    }
+    // change-logging fields (always logs the auto description; note optional)
+    body.logWorker = entry.worker;
+    body.logDate = dateVal || entry.date;
+    body.changeDesc = changes.join("; ");
+    if (note.trim()) body.note = note.trim();
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Edit timecard</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {prettyDate(entry.date, lang)}
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Real project</label>
+        <button
+          onClick={() => {
+            setProjPickerOpen(true);
+            setProjQuery("");
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-1 flex items-center justify-between"
+        >
+          <span className={projectName ? "text-concrete" : "text-rebar"}>
+            {projectName || "Pick the real project…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+        {projectName && (
+          <button
+            onClick={() => {
+              setProjectId("");
+              setProjectName("");
+            }}
+            className="text-rebar text-xs underline mb-3"
+          >
+            clear project
+          </button>
+        )}
+        <div className="mb-3" />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Date</label>
+        <input
+          type="date"
+          value={dateVal}
+          onChange={(e) => setDateVal(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Foreman's job name
+        </label>
+        <input
+          value={job}
+          onChange={(e) => setJob(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Foreman</label>
+        <button
+          onClick={() => {
+            setFmPickerOpen(true);
+            setFmQuery("");
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+        >
+          <span className={foreman ? "text-concrete" : "text-rebar"}>
+            {foreman || "Pick a foreman…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+
+        {!confirm ? (
+          <button
+            disabled={!changed}
+            onClick={() => setConfirm(true)}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Save changes
+          </button>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">Save these changes?</div>
+            <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+              Reason (optional)
+            </label>
+            <input
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              placeholder="e.g. foreman miscounted"
+              className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-1"
+            />
+            <div className="text-rebar text-[11px] mb-3">
+              The change is logged either way; this adds context.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirm(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={saving}
+                onClick={save}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Saving…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Project picker (searchable) */}
+      {projPickerOpen && (
+        <div
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            projQuery ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setProjPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button
+                  onClick={() => setProjPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={projQuery}
+                onChange={(ev) => setProjQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredProjects.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setProjectId(p.id);
+                    setProjectName(p.name);
+                    setProjPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filteredProjects.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Foreman picker (roster, excluding rodbusters) */}
+      {fmPickerOpen && (
+        <div
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            fmQuery ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setFmPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick foreman</div>
+                <button
+                  onClick={() => setFmPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={fmQuery}
+                onChange={(ev) => setFmQuery(ev.target.value)}
+                placeholder="Search a foreman…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filteredForemen.map((f) => (
+                <button
+                  key={f}
+                  onClick={() => {
+                    setForeman(f);
+                    setFmPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete"
+                >
+                  {f}
+                </button>
+              ))}
+              {filteredForemen.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReconVoidModal({
+  entry,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  entry: ReconEntry;
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function doVoid() {
+    setSaving(true);
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "void", id: entry.id, voided: true, note, logWorker: entry.worker, logDate: entry.date }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Void this entry</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {entry.job} · {entry.hours}h · {prettyDate(entry.date, lang)}
+        </div>
+        <div className="text-rebar text-sm mb-3">
+          The entry stays on record but is ignored by reports. You can un-void it anytime.
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Why? (optional)
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. duplicate of the 8h entry"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={saving}
+            onClick={doVoid}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+          >
+            {saving ? "Voiding…" : "Void entry"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Split one timecard across two jobs. Enforces that the parts equal the
+// original total (to change the total, edit the entry first, then split).
+function ReconSplitModal({
+  entry,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  entry: ReconEntry;
+  lang: Lang;
+  onClose: () => void;
+  onSaved: (undo: {
+    origId: string;
+    origPriorHours: number;
+    origPriorProjectId: string;
+    newId: string;
+    worker: string;
+    date: string;
+    label: string;
+  }) => void;
+}) {
+  const total = entry.hours;
+  const [origHours, setOrigHours] = useState(String(total));
+  const [newHours, setNewHours] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+
+  // new-job project picker
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [newProjectId, setNewProjectId] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  const oh = parseFloat(origHours);
+  const nh = parseFloat(newHours);
+  const sum = (isNaN(oh) ? 0 : oh) + (isNaN(nh) ? 0 : nh);
+  const balanced = !isNaN(oh) && !isNaN(nh) && Math.abs(sum - total) < 0.001 && oh > 0 && nh > 0;
+  const canSave = balanced && !!newProjectId;
+
+  // auto-fill new hours as (total - orig) when orig changes
+  function onOrigChange(v: string) {
+    setOrigHours(v);
+    const o = parseFloat(v);
+    if (!isNaN(o) && o >= 0 && o <= total) setNewHours(String(+(total - o).toFixed(2)));
+  }
+
+  async function save() {
+    setSaving(true);
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "split",
+        id: entry.id,
+        origHours: oh,
+        origProjectId: entry.projectId || "",
+        origProjectName: entry.projectName || entry.job,
+        newHours: nh,
+        newProjectId,
+        newProjectName,
+        worker: entry.worker,
+        date: entry.date,
+        foreman: entry.foreman,
+        job: entry.job,
+      }),
+    }).then((r) => r.json()).catch(() => null);
+    setSaving(false);
+    onSaved({
+      origId: entry.id,
+      origPriorHours: total,
+      origPriorProjectId: entry.projectId || "",
+      newId: res?.id || "",
+      worker: entry.worker,
+      date: entry.date,
+      label: `${oh}h ${origName} + ${nh}h ${newProjectName}`,
+    });
+  }
+
+  const origName = entry.projectName || entry.job || "—";
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Split timecard</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {prettyDate(entry.date, lang)} · total {total}h
+        </div>
+
+        {/* Original job */}
+        <div className="bg-steel/40 rounded-xl p-3 mb-3">
+          <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-1">Keep on</div>
+          <div className="text-concrete font-semibold text-sm mb-2">{origName}</div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              value={origHours}
+              onChange={(e) => onOrigChange(e.target.value)}
+              className="w-24 bg-steel border border-line rounded-lg h-10 px-3 text-concrete"
+            />
+            <span className="text-rebar text-sm">hours</span>
+          </div>
+        </div>
+
+        {/* New job */}
+        <div className="bg-steel/40 rounded-xl p-3 mb-3">
+          <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-1">Move to</div>
+          <button
+            onClick={() => {
+              setPickerOpen(true);
+              setQuery("");
+            }}
+            className="w-full bg-steel border border-line rounded-lg h-10 px-3 text-left mb-2 flex items-center justify-between"
+          >
+            <span className={newProjectName ? "text-concrete text-sm" : "text-rebar text-sm"}>
+              {newProjectName || "Pick the other project…"}
+            </span>
+            <span className="text-rebar">▾</span>
+          </button>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              value={newHours}
+              onChange={(e) => setNewHours(e.target.value)}
+              className="w-24 bg-steel border border-line rounded-lg h-10 px-3 text-concrete"
+            />
+            <span className="text-rebar text-sm">hours</span>
+          </div>
+        </div>
+
+        {/* Balance indicator */}
+        <div
+          className="text-center text-sm font-bold mb-4"
+          style={{ color: balanced ? "#4a9e63" : "#e5533c" }}
+        >
+          {origHours || 0} + {newHours || 0} = {sum || 0}h{" "}
+          {balanced ? "✓" : `(must equal ${total}h)`}
+        </div>
+
+        {!confirm ? (
+          <button
+            disabled={!canSave}
+            onClick={() => setConfirm(true)}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Split
+          </button>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">
+              Split into {oh}h {origName} + {nh}h {newProjectName}?
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirm(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={saving}
+                onClick={save}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Splitting…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setNewProjectId(p.id);
+                    setNewProjectName(p.name);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One schedule-vs-actual discrepancy card.
+function DiscCard({
+  d,
+  lang,
+  color,
+  sev,
+  busy,
+  onAdd,
+  onNoShow,
+  onDismiss,
+  onLooksRight,
+  onViewCrew,
+  unconfirmedTag,
+  onUnconfirmedTap,
+}: {
+  d: any;
+  lang: Lang;
+  color: string;
+  sev: string;
+  busy: boolean;
+  onAdd: () => void;
+  onNoShow: () => void;
+  onDismiss: () => void;
+  onLooksRight: () => void;
+  onViewCrew?: () => void;
+  unconfirmedTag?: boolean;
+  onUnconfirmedTap?: () => void;
+}) {
+  const isNoTimecard = d.kind === "No timecard";
+  const kindLabel = isNoTimecard ? (sev === "pending" ? "No hours yet" : "No timecard") : d.kind;
+  const spin = busy ? (
+    <span className="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin align-middle" />
+  ) : null;
+  return (
+    <div
+      className="bg-graphite border border-line rounded-2xl p-4 mb-3 relative"
+      style={{ borderLeft: `4px solid ${color}` }}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-concrete font-bold text-[15px] flex items-center gap-2 flex-wrap">
+            {d.worker}
+            {unconfirmedTag && (
+              <button
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  onUnconfirmedTap && onUnconfirmedTap();
+                }}
+                className="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+                style={{
+                  color: "#e5533c",
+                  borderColor: "rgba(229,83,60,.55)",
+                  background: "rgba(229,83,60,.10)",
+                }}
+              >
+                UNCONFIRMED
+              </button>
+            )}
+          </div>
+          <div
+            className="inline-block text-[11px] font-bold px-2 py-0.5 rounded-full mt-1"
+            style={{ color, background: `${color}22` }}
+          >
+            {kindLabel}
+          </div>
+          {isNoTimecard && d.cardSubmitted && (
+            <span
+              className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ml-1.5"
+              style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}
+              title="The foreman's card for this job came in without this person — likely a no-show."
+            >
+              LEFT OFF CARD
+            </span>
+          )}
+        </div>
+        {isNoTimecard && onViewCrew ? (
+          <button
+            onClick={onViewCrew}
+            className="text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap"
+            style={{ color: "#8fbcff", background: "rgba(47,115,216,.16)" }}
+          >
+            View crew
+          </button>
+        ) : (
+          d.hours > 0 && <div className="text-concrete text-lg font-extrabold">{d.hours}h</div>
+        )}
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-line space-y-1.5 text-sm">
+        {d.scheduledJob && (
+          <div className="flex gap-3">
+            <span className="text-rebar text-xs font-bold uppercase w-24 pt-0.5">Scheduled for</span>
+            <span className="text-concrete flex-1">
+              {d.scheduledJob}
+              {d.scheduledForeman && <span className="text-rebar"> · {d.scheduledForeman}</span>}
+            </span>
+          </div>
+        )}
+        <div className="flex gap-3">
+          <span className="text-rebar text-xs font-bold uppercase w-24 pt-0.5">Logged by</span>
+          <span className={d.loggedJob ? "text-concrete flex-1" : "text-rebar italic flex-1"}>
+            {d.loggedJob
+              ? `${d.loggedJob}${d.loggedForeman ? ` · ${d.loggedForeman}` : ""}`
+              : "nothing logged"}
+          </span>
+        </div>
+      </div>
+
+      {isNoTimecard && d.crewTotal > 1 && (
+        <div className="text-rebar text-xs mt-2 italic">
+          {[
+            `${d.crewLogged} logged`,
+            d.crewElsewhere ? `${d.crewElsewhere} elsewhere` : "",
+            `${d.crewTotal - d.crewLogged - (d.crewElsewhere || 0)} still out`,
+          ]
+            .filter(Boolean)
+            .join(" · ")}{" "}
+          <span className="not-italic">· of {d.crewTotal} scheduled</span>
+        </div>
+      )}
+
+      <div className="flex gap-2 mt-3 flex-wrap items-center">
+        {isNoTimecard ? (
+          <>
+            <button
+              onClick={onAdd}
+              disabled={busy}
+              className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold disabled:opacity-60"
+            >
+              Add timecard
+            </button>
+            <button
+              onClick={onNoShow}
+              disabled={busy}
+              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
+            >
+              No-show
+            </button>
+            <button
+              onClick={onDismiss}
+              disabled={busy}
+              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
+            >
+              Ignore
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={onLooksRight}
+              disabled={busy}
+              className="border border-line rounded-lg px-4 py-2 text-sm font-bold disabled:opacity-60"
+              style={{ color: "#9fdcb4" }}
+            >
+              Looks right
+            </button>
+            <button
+              onClick={onDismiss}
+              disabled={busy}
+              className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety disabled:opacity-60"
+            >
+              Ignore
+            </button>
+          </>
+        )}
+        {spin}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Review view — Stage A: "Needs real project" bulk-fix (grouped by the foreman's
+// typed job name). Stage B (schedule-vs-actual checks + no-show) comes next.
+// ============================================================================
+function ReconReviewView({
+  tr,
+  lang,
+  start,
+  end,
+}: {
+  tr: ReturnType<typeof t>;
+  lang: Lang;
+  start: string;
+  end: string;
+}) {
+  type Miss = {
+    id: string;
+    worker: string;
+    date: string;
+    job: string;
+    projectName: string;
+    projectId: string;
+    hours: number;
+    foreman: string;
+    notes: string;
+    voided: boolean;
+    voidNote: string;
+  };
+  const [missing, setMissing] = useState<Miss[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [bulkGroup, setBulkGroup] = useState<string | null>(null); // "job|date" key
+  const [editGroup, setEditGroup] = useState<string | null>(null); // full card edit
+  const [splitGroup, setSplitGroup] = useState<string | null>(null); // bulk split between two jobs
+  const [voidGroup, setVoidGroup] = useState<string | null>(null); // void a whole junk card
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [editEntry, setEditEntry] = useState<Miss | null>(null);
+
+  // schedule-vs-actual discrepancies
+  type Disc = {
+    kind: string;
+    severity: "attention" | "pending" | "glance";
+    worker: string;
+    date: string;
+    scheduledJob: string;
+    scheduledJobId: string;
+    scheduledForeman: string;
+    loggedJob: string;
+    loggedForeman: string;
+    hours: number;
+    crewLogged: number;
+    crewTotal: number;
+  };
+  const [discs, setDiscs] = useState<Disc[]>([]);
+  const [missingCards, setMissingCards] = useState<
+    { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[]
+  >([]);
+  const [crews, setCrews] = useState<Record<string, { worker: string; logged: boolean; elsewhereJob?: string }[]>>({});
+  const [discLoading, setDiscLoading] = useState(false);
+  const [ranCheck, setRanCheck] = useState(false);
+  const [noShowFor, setNoShowFor] = useState<Disc | null>(null);
+  const [addFor, setAddFor] = useState<Disc | null>(null);
+  const [crewOpen, setCrewOpen] = useState<Record<string, boolean>>({});
+  const [viewCrew, setViewCrew] = useState<{ jobId: string; date: string; job: string; foreman: string; worker: string } | null>(null);
+  const [dismissAllFor, setDismissAllFor] = useState<
+    { crew: Disc[]; jobId: string; jobName: string; date: string; loggedCount: number } | null
+  >(null);
+  const [busyKey, setBusyKey] = useState<string>(""); // which action button is working
+  const [showMissing, setShowMissing] = useState(false);
+  const [showCards, setShowCards] = useState(false);
+  const [showHeld, setShowHeld] = useState(false);
+  const [unconfirmed, setUnconfirmed] = useState<{ id: string; name: string }[]>([]);
+  const [noShows, setNoShows] = useState<Set<string>>(new Set());
+  const [confirmWorker, setConfirmWorker] = useState<{ id: string; name: string } | null>(null);
+  const [heldCount, setHeldCount] = useState(0);
+  const [heldHours, setHeldHours] = useState(0);
+  // session undo log — recently resolved discrepancies
+  const [resolvedLog, setResolvedLog] = useState<
+    { disc: Disc; status: string; pageId: string }[]
+  >([]);
+  const [showResolved, setShowResolved] = useState(false);
+  const [dismissNoteFor, setDismissNoteFor] = useState<Disc | null>(null);
+
+  const today = (() => {
+    const d = new Date();
+    const off = d.getTimezoneOffset();
+    return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+  })();
+
+  const CACHE_KEY = "ammex_recon_cache";
+  const CACHE_MS = 5 * 60 * 1000;
+  const cacheTs = useRef(0);
+
+  const loadHeldCount = useCallback(() => {
+    fetch(`/api/recon?action=held_cards&start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setHeldCount(d.totalHeld || 0);
+          setHeldHours(d.totalHours || 0);
+        }
+      })
+      .catch(() => {});
+  }, [start, end]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setMsg("");
+    loadHeldCount();
+    fetch(`/api/recon?action=needs_project&start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) setMissing(d.entries || []);
+        else setMsg(d?.error || "Failed to load.");
+        setLoading(false);
+      })
+      .catch(() => {
+        setMsg("Failed to load.");
+        setLoading(false);
+      });
+  }, [start, end, loadHeldCount]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Hold a whole needs-project card for review → moves it to Under review.
+  // Optimistic: the card leaves the list instantly; rolls back if the write fails.
+  const [holdingKey, setHoldingKey] = useState<string>("");
+  async function holdGroup(g: { key: string; job: string; foreman: string; date: string; items: { id: string }[] }) {
+    setHoldingKey(g.key);
+    const ids = new Set(g.items.map((e) => e.id));
+    const prevMissing = missing;
+    // optimistic: remove these entries + bump held counters
+    setMissing((cur) => cur.filter((e: any) => !ids.has(e.id)));
+    setHeldCount((c) => c + g.items.length);
+    setHeldHours((h) => h + g.items.reduce((s: number, e: any) => s + (e.hours || 0), 0));
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "hold",
+          ids: g.items.map((e) => e.id),
+          held: true,
+          logWorker: `${g.job || "Card"}${g.foreman ? ` · ${g.foreman}` : ""}`,
+          logDate: g.date,
+        }),
+      }).then((r) => r.json());
+      if (!res?.ok) throw new Error("hold failed");
+    } catch {
+      // rollback
+      setMissing(prevMissing);
+      setHeldCount((c) => Math.max(0, c - g.items.length));
+      setHeldHours((h) => Math.max(0, h - g.items.reduce((s: number, e: any) => s + (e.hours || 0), 0)));
+    }
+    setHoldingKey("");
+  }
+
+  const applyResult = useCallback((d: any) => {
+    setDiscs(d.discrepancies || []);
+    setMissingCards(d.missingCards || []);
+    setCrews(d.crews || {});
+    setUnconfirmed(d.unconfirmedWorkers || []);
+    setNoShows(new Set<string>(d.noShows || []));
+  }, []);
+
+  const loadDiscs = useCallback(() => {
+    setDiscLoading(true);
+    setRanCheck(true);
+    loadHeldCount();
+    fetch(`/api/recon?action=reconcile&start=${start}&end=${end}&today=${today}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          applyResult(d);
+          cacheTs.current = Date.now();
+          try {
+            localStorage.setItem(
+              CACHE_KEY,
+              JSON.stringify({ start, end, ts: cacheTs.current, data: d })
+            );
+          } catch {}
+        }
+        setDiscLoading(false);
+      })
+      .catch(() => setDiscLoading(false));
+  }, [start, end, today, applyResult, loadHeldCount]);
+
+  // On mount / range change: use a fresh cache (same range, < 5 min) if present,
+  // so the check survives tab switches and quick app re-opens.
+  useEffect(() => {
+    setRanCheck(false);
+    setDiscs([]);
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const c = JSON.parse(raw);
+        if (c.start === start && c.end === end && Date.now() - c.ts < CACHE_MS && c.data?.ok) {
+          applyResult(c.data);
+          cacheTs.current = c.ts;
+          setRanCheck(true);
+        }
+      }
+    } catch {}
+  }, [start, end, applyResult]);
+
+  // Keep the cache in sync after resolves so items don't reappear on tab switch.
+  useEffect(() => {
+    if (!ranCheck) return;
+    try {
+      localStorage.setItem(
+        CACHE_KEY,
+        JSON.stringify({
+          start,
+          end,
+          ts: cacheTs.current || Date.now(),
+          data: { ok: true, discrepancies: discs, missingCards, crews },
+        })
+      );
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [discs, missingCards, crews]);
+
+  // resolve a discrepancy: log outcome + drop it from the list
+  async function resolveDisc(d: Disc, status: string, note: string, key: string) {
+    setBusyKey(key);
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // refs = scheduled jobId → job-scoped resolution (a no-show on job A
+      // must not clear the same worker's still-missing job B that day).
+      body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note, refs: d.scheduledJobId || "" }),
+    }).then((r) => r.json()).catch(() => null);
+    if (res?.id) {
+      // Only remove from screen when the write actually saved — otherwise the
+      // item would look resolved while Notion has no record of it.
+      setDiscs((cur) =>
+        cur.filter((x) => !(x.worker === d.worker && x.date === d.date && x.kind === d.kind && x.scheduledJobId === d.scheduledJobId))
+      );
+      setResolvedLog((cur) => [{ disc: d, status, pageId: res.id }, ...cur].slice(0, 20));
+    } else {
+      setMsg("That didn't save — check your connection and try again.");
+      setTimeout(() => setMsg(""), 3500);
+    }
+    setBusyKey("");
+  }
+
+  // resolve many at once (bulk ignore — job cancelled)
+  async function resolveMany(items: Disc[], status: string, note: string) {
+    const added: { disc: Disc; status: string; pageId: string }[] = [];
+    const okKeys = new Set<string>();
+    for (const d of items) {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note, refs: d.scheduledJobId || "" }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.id) {
+        added.push({ disc: d, status, pageId: res.id });
+        okKeys.add(`${d.worker}|${d.date}|${d.kind}|${d.scheduledJobId}`);
+      }
+    }
+    // Only clear the ones that actually saved.
+    setDiscs((cur) => cur.filter((x) => !okKeys.has(`${x.worker}|${x.date}|${x.kind}|${x.scheduledJobId}`)));
+    if (added.length) setResolvedLog((cur) => [...added, ...cur].slice(0, 20));
+    if (added.length < items.length) {
+      setMsg(`${items.length - added.length} didn't save — try again.`);
+      setTimeout(() => setMsg(""), 3500);
+    }
+  }
+
+  // undo a resolution: archive the log record + bring the item back
+  async function undoResolve(entry: { disc: Disc; status: string; pageId: string }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "unlog", pageId: entry.pageId }),
+    });
+    setResolvedLog((cur) => cur.filter((x) => x.pageId !== entry.pageId));
+    setDiscs((cur) =>
+      cur.some(
+        (x) => x.worker === entry.disc.worker && x.date === entry.disc.date && x.kind === entry.disc.kind && x.scheduledJobId === entry.disc.scheduledJobId
+      )
+        ? cur
+        : [...cur, entry.disc]
+    );
+  }
+
+  // One card per JOB NAME + DATE. Sorted by date, then job name.
+  const groups = useMemo(() => {
+    const m = new Map<string, Miss[]>();
+    for (const e of missing) {
+      const jobName = (e.job || "(no job name)").trim();
+      const key = `${jobName}|${e.date}`;
+      if (!m.has(key)) m.set(key, []);
+      m.get(key)!.push(e);
+    }
+    return Array.from(m.entries())
+      .map(([key, items]) => {
+        const [job, date] = key.split("|");
+        // foreman who submitted the card (from the timecards themselves)
+        const foreman = items.find((i) => i.foreman)?.foreman || "—";
+        const fLower = foreman.toLowerCase();
+        return {
+          key,
+          job,
+          date,
+          foreman,
+          // foreman's own row first (if present), then the rest alphabetical
+          items: items.slice().sort((a, b) => {
+            const af = a.worker.toLowerCase() === fLower ? 0 : 1;
+            const bf = b.worker.toLowerCase() === fLower ? 0 : 1;
+            return af - bf || a.worker.localeCompare(b.worker);
+          }),
+          workers: new Set(items.map((i) => i.worker)).size,
+        };
+      })
+      .sort((a, b) => a.date.localeCompare(b.date) || a.job.localeCompare(b.job));
+  }, [missing]);
+
+  // group the cards by date, for the outside date section headers
+  const byDate = useMemo(() => {
+    const m = new Map<string, typeof groups>();
+    for (const g of groups) {
+      if (!m.has(g.date)) m.set(g.date, [] as any);
+      m.get(g.date)!.push(g);
+    }
+    return Array.from(m.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [groups]);
+
+  return (
+    <div>
+      {missing.length > 0 && (
+        <>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-safety font-bold text-sm">Needs real project</span>
+            <span className="text-rebar text-xs">
+              {missing.length} {missing.length === 1 ? "entry" : "entries"} · {groups.length}{" "}
+              {groups.length === 1 ? "card" : "cards"}
+            </span>
+          </div>
+          <div className="text-rebar text-xs mb-4">
+            These timecards have no real project set. Each card is one job on one day — assign the
+            real project and it updates every entry in that card. Tap a card to see the entries.
+          </div>
+        </>
+      )}
+
+      {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
+      {!loading && msg && <div className="text-rebar text-sm px-1">{msg}</div>}
+      {!loading && missing.length === 0 && !msg && (
+        <div className="flex items-center gap-2 text-sm mb-2 px-1">
+          <span className="text-green-400 font-bold" style={{ color: "#4a9e63" }}>✓</span>
+          <span className="text-rebar">All projects set in this range.</span>
+        </div>
+      )}
+
+      {!loading &&
+        byDate.map(([date, cards]) => (
+          <div key={date} className="mb-5">
+            {/* Date section header — outside the cards */}
+            <div className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1">
+              {prettyDate(date, lang)}
+            </div>
+
+            {cards.map((g) => {
+              const open = !!expanded[g.key];
+              return (
+                <div key={g.key} className="bg-graphite border border-line rounded-2xl p-4 mb-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <button
+                      onClick={() => setExpanded((s) => ({ ...s, [g.key]: !s[g.key] }))}
+                      className="text-left flex-1"
+                    >
+                      <div className="text-concrete font-bold text-[15px]">
+                        "{g.job}" <span className="text-rebar">{open ? "▾" : "▸"}</span>
+                      </div>
+                      <div className="text-rebar text-xs mt-0.5">{g.foreman}</div>
+                      <div className="text-rebar text-xs mt-0.5">
+                        {g.items.length} {g.items.length === 1 ? "entry" : "entries"} · {g.workers}{" "}
+                        {g.workers === 1 ? "worker" : "workers"}
+                      </div>
+                      <span
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          if (holdingKey !== g.key) holdGroup(g);
+                        }}
+                        className="inline-flex items-center gap-1.5 mt-2 text-xs font-bold px-3 py-1 rounded-full border"
+                        style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                      >
+                        {holdingKey === g.key && (
+                          <span
+                            className="inline-block w-3 h-3 border-2 rounded-full animate-spin"
+                            style={{ borderColor: "#e0a63b", borderTopColor: "transparent" }}
+                          />
+                        )}
+                        Hold for review
+                      </span>
+                    </button>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <button
+                        onClick={() => setBulkGroup(g.key)}
+                        className="bg-safety text-steel rounded-lg px-4 py-2 text-sm font-bold whitespace-nowrap"
+                      >
+                        Set project
+                      </button>
+                      <button
+                        onClick={() => setEditGroup(g.key)}
+                        className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
+                      >
+                        Edit date / details
+                      </button>
+                      <button
+                        onClick={() => setSplitGroup(g.key)}
+                        className="text-rebar text-xs font-semibold active:text-safety underline underline-offset-2"
+                      >
+                        Split between jobs
+                      </button>
+                      <button
+                        onClick={() => setVoidGroup(g.key)}
+                        className="text-xs font-semibold active:opacity-80 underline underline-offset-2"
+                        style={{ color: "#e5533c" }}
+                      >
+                        Void card
+                      </button>
+                    </div>
+                  </div>
+
+                  {open && (
+                    <div className="mt-3 pt-3 border-t border-line">
+                      <div className="space-y-2">
+                        {g.items.map((e) => {
+                          const isForeman =
+                            g.foreman !== "—" &&
+                            e.worker.toLowerCase() === g.foreman.toLowerCase();
+                          return (
+                            <div
+                              key={e.id}
+                              className="flex items-center justify-between gap-3 rounded-xl px-3 py-2"
+                              style={
+                                isForeman
+                                  ? {
+                                      border: "1px solid rgba(47,115,216,.5)",
+                                      background: "rgba(47,115,216,.08)",
+                                    }
+                                  : { background: "rgba(28,33,39,.4)" }
+                              }
+                            >
+                              <div className="text-concrete text-sm font-semibold truncate min-w-0">
+                                {e.worker}
+                                {isForeman && (
+                                  <span
+                                    className="ml-2 text-[10px] font-bold uppercase tracking-wide"
+                                    style={{ color: "#8fbcff" }}
+                                  >
+                                    Foreman
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-3 shrink-0">
+                                <div className="text-concrete font-bold">{e.hours}h</div>
+                                <button
+                                  onClick={() => setEditEntry(e)}
+                                  className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety"
+                                >
+                                  Edit
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+
+      {/* Under review — held items, excluded from counts. Only shows when something's held. */}
+      {heldCount > 0 && (
+        <div className="mt-6">
+          <button
+            onClick={() => setShowHeld(true)}
+            className="w-full flex items-center gap-2 rounded-xl px-4 py-3 text-left"
+            style={{ background: "rgba(224,166,59,.12)", border: "1px solid rgba(224,166,59,.45)" }}
+          >
+            <span style={{ color: "#e0a63b" }} className="font-bold">⟳</span>
+            <span className="text-concrete font-bold text-sm">{heldCount} under review</span>
+            <span className="text-rebar text-xs">· {heldHours} hrs held</span>
+            <span className="text-rebar text-xs ml-auto">tap to resolve →</span>
+          </button>
+        </div>
+      )}
+
+      {/* ---- Schedule vs. actual reconciliation ---- */}
+      <div className="mt-8 mb-3 pt-5 border-t border-line">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-concrete font-bold text-base">Schedule vs. actual</div>
+          {ranCheck && !discLoading && (
+            <button
+              onClick={loadDiscs}
+              aria-label="Re-run check"
+              className="w-9 h-9 rounded-full bg-graphite border border-line text-rebar flex items-center justify-center active:text-safety shrink-0"
+            >
+              ↻
+            </button>
+          )}
+        </div>
+        <div className="text-rebar text-xs mt-1">
+          Compares who was scheduled against who logged hours.
+        </div>
+      </div>
+
+      {!ranCheck && !discLoading && (
+        <button
+          onClick={loadDiscs}
+          className="w-full bg-safety text-steel rounded-xl py-3.5 font-bold mb-3"
+        >
+          Run check
+        </button>
+      )}
+
+      {discLoading && <div className="text-rebar text-sm px-1 py-3">Checking…</div>}
+
+      {ranCheck && !discLoading && (
+        <button
+          onClick={() => setShowCards(true)}
+          className="w-full flex items-center gap-2 rounded-xl px-4 py-3 mb-4 text-left"
+          style={
+            missingCards.length > 0
+              ? { background: "rgba(229,83,60,.12)", border: "1px solid rgba(229,83,60,.4)" }
+              : { background: "var(--graphite,#272d35)", border: "1px solid #39414c" }
+          }
+        >
+          {missingCards.length > 0 ? (
+            <>
+              <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+              <span className="text-concrete font-bold text-sm">
+                {missingCards.length} missing {missingCards.length === 1 ? "card" : "cards"}
+              </span>
+            </>
+          ) : (
+            <span className="text-concrete font-bold text-sm">View timecards</span>
+          )}
+          <span className="text-rebar text-xs ml-auto">tap to view →</span>
+        </button>
+      )}
+
+      {ranCheck && !discLoading && discs.length === 0 && missingCards.length === 0 && (
+        <div className="bg-graphite border border-line rounded-2xl p-6 text-center">
+          <div className="text-concrete font-bold mb-1">All matched ✓</div>
+          <div className="text-rebar text-sm">
+            Everything scheduled lines up with what was logged in this range.
+          </div>
+        </div>
+      )}
+
+      {ranCheck && !discLoading && discs.length > 0 && (
+        <>
+          {(
+            [
+              ["attention", "Needs attention", "#e5533c", "Likely missed hours — look into these."],
+              ["pending", "Pending", "#9aa3af", "Probably just not submitted yet."],
+              ["glance", "Worth a glance", "#e0a63b", "Showed up, but not as planned."],
+            ] as const
+          ).map(([sev, label, color, explain]) => {
+            const items = discs.filter((d) => d.severity === sev);
+            if (items.length === 0) return null;
+
+            return (
+              <div key={sev} className="mb-6">
+                <div className="mb-3 px-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase tracking-wider" style={{ color }}>
+                      {label}
+                    </span>
+                    <span className="text-rebar text-xs">{items.length}</span>
+                  </div>
+                  <div className="text-rebar text-[11px] mt-0.5">{explain}</div>
+                </div>
+
+                {sev === "pending"
+                  ? // PENDING: group by scheduled job + date (crew)
+                    (() => {
+                      const groupsByCrew = new Map<string, typeof items>();
+                      for (const d of items) {
+                        const k = `${d.scheduledJobId}|${d.date}`;
+                        if (!groupsByCrew.has(k)) groupsByCrew.set(k, [] as any);
+                        groupsByCrew.get(k)!.push(d);
+                      }
+                      const crewArr = Array.from(groupsByCrew.entries()).sort((a, b) =>
+                        a[1][0].date.localeCompare(b[1][0].date)
+                      );
+                      return crewArr.map(([k, crew]) => {
+                        const first = crew[0];
+                        const open = !!crewOpen[k];
+                        // full scheduled roster for this job+date
+                        const roster = crews[k] || [];
+                        const outNames = new Set(crew.map((d) => d.worker.toLowerCase()));
+                        // classify each scheduled member
+                        const rows = (roster.length
+                          ? roster.map((m) => m.worker)
+                          : crew.map((d) => d.worker)
+                        ).map((wname) => {
+                          const lw = wname.toLowerCase();
+                          if (outNames.has(lw)) {
+                            return { worker: wname, state: "out" as const, disc: crew.find((d) => d.worker.toLowerCase() === lw)!, elsewhereJob: "" };
+                          }
+                          const rosterHit = roster.find((m) => m.worker.toLowerCase() === lw);
+                          if (rosterHit?.logged) return { worker: wname, state: "here" as const, disc: null, elsewhereJob: "" };
+                          if (rosterHit?.elsewhereJob) {
+                            // GENUINELY logged on another job (backend verified).
+                            const elsewhere = discs.find(
+                              (x) =>
+                                x.worker.toLowerCase() === lw &&
+                                x.date === first.date &&
+                                x.kind === "Different job"
+                            );
+                            return { worker: wname, state: "elsewhere" as const, disc: elsewhere || null, elsewhereJob: rosterHit.elsewhereJob };
+                          }
+                          // Not out, not logged anywhere → resolved. Label the
+                          // real reason instead of falsely saying "elsewhere".
+                          if (noShows.has(`${lw}|${first.date}`)) {
+                            return { worker: wname, state: "noshow" as const, disc: null, elsewhereJob: "" };
+                          }
+                          return { worker: wname, state: "cleared" as const, disc: null, elsewhereJob: "" };
+                        });
+                        const cOut = rows.filter((r) => r.state === "out").length;
+                        const cHere = rows.filter((r) => r.state === "here").length;
+                        const cElse = rows.filter((r) => r.state === "elsewhere").length;
+                        const cNo = rows.filter((r) => r.state === "noshow").length;
+                        const cClr = rows.filter((r) => r.state === "cleared").length;
+                        const summary = [
+                          `${cHere} logged`,
+                          cElse ? `${cElse} elsewhere` : "",
+                          cNo ? `${cNo} no-show` : "",
+                          cClr ? `${cClr} cleared` : "",
+                          `${cOut} still out`,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ");
+                        return (
+                          <div
+                            key={k}
+                            className="bg-graphite border border-line rounded-2xl p-4 mb-3"
+                            style={{ borderLeft: `4px solid ${color}` }}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <button
+                                onClick={() => setCrewOpen((s) => ({ ...s, [k]: !s[k] }))}
+                                className="text-left flex-1"
+                              >
+                                <div className="text-safety text-xs font-bold uppercase tracking-wide mb-1">
+                                  {prettyDate(first.date, lang)}
+                                </div>
+                                <div className="text-concrete font-bold text-[15px]">
+                                  {first.scheduledJob || "(job)"}{" "}
+                                  <span className="text-rebar">{open ? "▾" : "▸"}</span>
+                                </div>
+                                <div className="text-rebar text-xs mt-0.5">
+                                  {first.scheduledForeman || "—"}
+                                </div>
+                                <div className="text-rebar text-xs mt-0.5">{summary}</div>
+                              </button>
+                            </div>
+
+                            {open && (
+                              <div className="mt-3 pt-3 border-t border-line space-y-2">
+                                {rows.map((r) => {
+                                  if (r.state === "here") {
+                                    return (
+                                      <div
+                                        key={r.worker}
+                                        className="bg-steel/40 rounded-xl px-3 py-2 opacity-60 flex items-center justify-between"
+                                      >
+                                        <span className="text-rebar text-sm font-semibold">{r.worker}</span>
+                                        <span className="text-[10px]" style={{ color: "#4a9e63" }}>✓ logged</span>
+                                      </div>
+                                    );
+                                  }
+                                  if (r.state === "noshow" || r.state === "cleared") {
+                                    return (
+                                      <div
+                                        key={r.worker}
+                                        className="rounded-xl px-3 py-2"
+                                        style={{ background: "rgba(28,33,39,.4)", opacity: 0.7 }}
+                                      >
+                                        <div className="text-concrete text-sm font-semibold mb-0.5">{r.worker}</div>
+                                        <div className="text-rebar text-xs">
+                                          {r.state === "noshow" ? "no-show" : "cleared"}
+                                        </div>
+                                      </div>
+                                    );
+                                  }
+                                  if (r.state === "elsewhere") {
+                                    const ed = r.disc as Disc | null;
+                                    const bk = ed ? `${ed.worker}|${ed.date}|${ed.kind}` : `${r.worker}|else`;
+                                    const busy = busyKey === bk;
+                                    return (
+                                      <div
+                                        key={r.worker}
+                                        className="rounded-xl px-3 py-2"
+                                        style={{ background: "rgba(28,33,39,.4)", opacity: 0.85 }}
+                                      >
+                                        <div className="text-concrete text-sm font-semibold mb-0.5 flex items-center gap-2">
+                                          {r.worker}
+                                          {busy && (
+                                            <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />
+                                          )}
+                                        </div>
+                                        <div className="text-rebar text-xs mb-1.5">
+                                          → logged on {ed?.loggedJob || r.elsewhereJob || "another job"}
+                                        </div>
+                                        {ed && (
+                                          <div className="flex gap-2 flex-wrap">
+                                            <button
+                                              onClick={() => resolveDisc(ed, "Confirmed OK", "", bk)}
+                                              disabled={busy}
+                                              className="border border-line rounded-lg px-3 py-1.5 text-xs font-bold disabled:opacity-60"
+                                              style={{ color: "#9fdcb4" }}
+                                            >
+                                              Looks right
+                                            </button>
+                                            <button
+                                              onClick={() => setDismissNoteFor(ed)}
+                                              disabled={busy}
+                                              className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
+                                            >
+                                              Ignore
+                                            </button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  }
+                                  // out
+                                  const d = r.disc as Disc;
+                                  const bk = `${d.worker}|${d.date}|${d.kind}`;
+                                  const busy = busyKey === bk;
+                                  return (
+                                    <div key={r.worker} className="bg-steel/40 rounded-xl px-3 py-2">
+                                      <div className="text-concrete text-sm font-semibold mb-1.5 flex items-center gap-2">
+                                        {d.worker}
+                                        {busy && (
+                                          <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />
+                                        )}
+                                      </div>
+                                      <div className="flex gap-2 flex-wrap">
+                                        <button
+                                          onClick={() => setAddFor(d)}
+                                          disabled={busy}
+                                          className="bg-safety text-steel rounded-lg px-3 py-1.5 text-xs font-bold disabled:opacity-60"
+                                        >
+                                          Add timecard
+                                        </button>
+                                        <button
+                                          onClick={() => setNoShowFor(d)}
+                                          disabled={busy}
+                                          className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
+                                        >
+                                          No-show
+                                        </button>
+                                        <button
+                                          onClick={() => setDismissNoteFor(d)}
+                                          disabled={busy}
+                                          className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety disabled:opacity-60"
+                                        >
+                                          Ignore
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                                <button
+                                  onClick={() =>
+                                    setDismissAllFor({
+                                      crew,
+                                      jobId: first.scheduledJobId,
+                                      jobName: first.scheduledJob,
+                                      date: first.date,
+                                      loggedCount: cHere + cElse,
+                                    })
+                                  }
+                                  className="w-full text-rebar border border-line rounded-lg py-2 text-xs font-bold mt-1 active:text-safety"
+                                >
+                                  Ignore all (job cancelled)
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      });
+                    })()
+                  : // ATTENTION & GLANCE: group by date (oldest-first for
+                    // attention, newest-first for glance), cluster by crew+kind.
+                    (() => {
+                      const byDate = new Map<string, typeof items>();
+                      for (const d of items) {
+                        if (!byDate.has(d.date)) byDate.set(d.date, [] as any);
+                        byDate.get(d.date)!.push(d);
+                      }
+                      const dateArr = Array.from(byDate.entries()).sort((a, b) =>
+                        sev === "attention"
+                          ? a[0].localeCompare(b[0]) // oldest first
+                          : b[0].localeCompare(a[0]) // newest first
+                      );
+                      return dateArr.map(([date, dItems]) => {
+                        // cluster: same crew (job+foreman) together, then by kind
+                        const sorted = dItems
+                          .slice()
+                          .sort(
+                            (a, b) =>
+                              (a.scheduledJobId || "").localeCompare(b.scheduledJobId || "") ||
+                              a.kind.localeCompare(b.kind) ||
+                              a.worker.localeCompare(b.worker)
+                          );
+                        return (
+                          <div key={date} className="mb-4">
+                            <div
+                              className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1 py-1 sticky top-0 z-10"
+                              style={{ background: "#1c2127" }}
+                            >
+                              {prettyDate(date, lang)}
+                            </div>
+                            {sorted.map((d, i) => {
+                              const bk = `${d.worker}|${d.date}|${d.kind}`;
+                              return (
+                                <DiscCard
+                                  key={`${bk}|${i}`}
+                                  d={d}
+                                  lang={lang}
+                                  color={color}
+                                  sev={sev}
+                                  busy={busyKey === bk}
+                                  onAdd={() => setAddFor(d)}
+                                  onNoShow={() => setNoShowFor(d)}
+                                  onDismiss={() => setDismissNoteFor(d)}
+                                  onLooksRight={() => resolveDisc(d, "Confirmed OK", "", bk)}
+                                  onViewCrew={
+                                    d.kind === "No timecard" && d.scheduledJobId
+                                      ? () =>
+                                          setViewCrew({
+                                            jobId: d.scheduledJobId,
+                                            date: d.date,
+                                            job: d.scheduledJob,
+                                            foreman: d.scheduledForeman,
+                                            worker: d.worker,
+                                          })
+                                      : undefined
+                                  }
+                                  unconfirmedTag={unconfirmed.some(
+                                    (u) => u.name.trim().toLowerCase() === (d.worker || "").trim().toLowerCase()
+                                  )}
+                                  onUnconfirmedTap={() => {
+                                    const u = unconfirmed.find(
+                                      (x) => x.name.trim().toLowerCase() === (d.worker || "").trim().toLowerCase()
+                                    );
+                                    if (u) setConfirmWorker(u);
+                                  }}
+                                />
+                              );
+                            })}
+                          </div>
+                        );
+                      });
+                    })()}
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {/* Recently resolved — session undo strip */}
+      {ranCheck && resolvedLog.length > 0 && (
+        <div className="mt-6 pt-4 border-t border-line">
+          <button
+            onClick={() => setShowResolved((v) => !v)}
+            className="w-full flex items-center justify-between text-rebar text-xs font-bold py-1 px-1"
+          >
+            <span>Recently resolved ({resolvedLog.length})</span>
+            <span>{showResolved ? "▾" : "▸"}</span>
+          </button>
+          {showResolved && (
+            <div className="mt-2 space-y-2">
+              {resolvedLog.map((r) => (
+                <div
+                  key={r.pageId}
+                  className="flex items-center justify-between gap-3 bg-graphite border border-line rounded-xl px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-concrete text-sm font-semibold truncate">{r.disc.worker}</div>
+                    <div className="text-rebar text-xs">
+                      {r.status} · {prettyDate(r.disc.date, lang).split(",")[0]} ·{" "}
+                      {r.disc.scheduledJob || r.disc.loggedJob || r.disc.kind}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => undoResolve(r)}
+                    className="text-rebar border border-line rounded-lg px-3 py-1.5 text-xs font-bold active:text-safety shrink-0"
+                  >
+                    Undo
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {bulkGroup && (
+        <ReconBulkProjectModal
+          jobName={groups.find((g) => g.key === bulkGroup)?.job || ""}
+          dateLabel={prettyDate(groups.find((g) => g.key === bulkGroup)?.date || "", lang)}
+          entries={groups.find((g) => g.key === bulkGroup)?.items || []}
+          onClose={() => setBulkGroup(null)}
+          onDone={() => {
+            setBulkGroup(null);
+            load();
+          }}
+        />
+      )}
+
+      {splitGroup && (() => {
+        const g = groups.find((x) => x.key === splitGroup);
+        if (!g) return null;
+        return (
+          <ReconBulkSplitModal
+            jobName={g.job}
+            dateLabel={prettyDate(g.date, lang)}
+            entries={g.items}
+            onClose={() => setSplitGroup(null)}
+            onDone={() => {
+              setSplitGroup(null);
+              load();
+            }}
+          />
+        );
+      })()}
+
+      {voidGroup && (() => {
+        const g = groups.find((x) => x.key === voidGroup);
+        if (!g) return null;
+        return (
+          <ReconVoidCardModal
+            jobName={g.job}
+            dateLabel={prettyDate(g.date, lang)}
+            entries={g.items}
+            onClose={() => setVoidGroup(null)}
+            onDone={() => {
+              setVoidGroup(null);
+              load();
+            }}
+          />
+        );
+      })()}
+
+      {editGroup && (() => {
+        const g = groups.find((x) => x.key === editGroup);
+        if (!g) return null;
+        return (
+          <ReconBulkEditModal
+            card={{ job: g.job, projectId: "", foreman: g.foreman, date: g.date, entries: g.items }}
+            lang={lang}
+            onClose={() => setEditGroup(null)}
+            onSaved={() => {
+              setEditGroup(null);
+              load();
+            }}
+          />
+        );
+      })()}
+
+      {editEntry && (
+        <ReconEditModal
+          entry={editEntry as any}
+          lang={lang}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => {
+            setEditEntry(null);
+            load();
+          }}
+        />
+      )}
+
+      {noShowFor && (
+        <ReconNoShowModal
+          disc={noShowFor}
+          lang={lang}
+          onClose={() => setNoShowFor(null)}
+          onDone={(note) => {
+            resolveDisc(noShowFor, "No-show", note, `${noShowFor.worker}|${noShowFor.date}|${noShowFor.kind}`);
+            setNoShowFor(null);
+          }}
+        />
+      )}
+
+      {addFor && (
+        <ReconAddModal
+          disc={addFor}
+          lang={lang}
+          onClose={() => setAddFor(null)}
+          onDone={() => {
+            setAddFor(null);
+            loadDiscs();
+          }}
+        />
+      )}
+
+      {viewCrew && (
+        <ReconCrewModal
+          info={viewCrew}
+          crew={crews[`${viewCrew.jobId}|${viewCrew.date}`] || []}
+          lang={lang}
+          onClose={() => setViewCrew(null)}
+        />
+      )}
+
+      {dismissAllFor && (
+        <ReconDismissAllModal
+          count={dismissAllFor.crew.length}
+          loggedCount={dismissAllFor.loggedCount}
+          jobName={dismissAllFor.jobName}
+          onClose={() => setDismissAllFor(null)}
+          onConfirm={async (note, keepLogged) => {
+            const d = dismissAllFor;
+            setDismissAllFor(null);
+            // Stand down the crew that didn't log (unchanged behavior).
+            await resolveMany(d.crew, "Dismissed", note || "job cancelled — crew stood down");
+            // Write ONE job-level cancel record so the Past schedule shows it.
+            // partial = some crew had logged and were kept.
+            await fetch("/api/recon", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                op: "cancel_job",
+                jobId: d.jobId,
+                date: d.date,
+                jobName: d.jobName,
+                note: note || "",
+                partial: keepLogged && d.loggedCount > 0,
+              }),
+            }).catch(() => {});
+          }}
+        />
+      )}
+
+      {showCards && (
+        <ReconCardBrowser
+          start={start}
+          end={end}
+          today={today}
+          lang={lang}
+          onClose={() => setShowCards(false)}
+          onChanged={() => loadDiscs()}
+        />
+      )}
+
+      {showHeld && (
+        <ReconCardBrowser
+          start={start}
+          end={end}
+          today={today}
+          lang={lang}
+          heldOnly
+          onClose={() => setShowHeld(false)}
+          onChanged={() => loadDiscs()}
+        />
+      )}
+
+      {confirmWorker && (
+        <ConfirmWorkerModal
+          worker={confirmWorker}
+          onClose={() => setConfirmWorker(null)}
+          onDone={() => {
+            setUnconfirmed((cur) => cur.filter((u) => u.id !== confirmWorker.id));
+            setConfirmWorker(null);
+          }}
+        />
+      )}
+
+      {dismissNoteFor && (
+        <ReconDismissNoteModal
+          disc={dismissNoteFor}
+          lang={lang}
+          onClose={() => setDismissNoteFor(null)}
+          onConfirm={(note) => {
+            const d = dismissNoteFor;
+            resolveDisc(d, "Dismissed", note, `${d.worker}|${d.date}|${d.kind}`);
+            setDismissNoteFor(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ReconBulkProjectModal({
+  jobName,
+  dateLabel,
+  entries,
+  onClose,
+  onDone,
+}: {
+  jobName: string;
+  dateLabel: string;
+  entries: { id: string }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [query, setQuery] = useState("");
+  const [picked, setPicked] = useState<{ id: string; name: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [customMode, setCustomMode] = useState(false);
+  const [customName, setCustomName] = useState("");
+
+  // Apply a custom name (label with no real project) to every entry in the card.
+  async function applyCustomName() {
+    const label = customName.trim();
+    if (!label) { setProgress("Enter a name."); return; }
+    setSaving(true);
+    setProgress(`Updating ${entries.length}…`);
+    let ok = 0;
+    for (const e of entries) {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "set_custom_name", id: e.id, name: label }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.ok) ok++;
+    }
+    setSaving(false);
+    if (ok === entries.length) onDone();
+    else setProgress(`Only ${ok}/${entries.length} saved. Try again.`);
+  }
+
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  async function apply() {
+    if (!picked) return;
+    setSaving(true);
+    setProgress(`Updating ${entries.length}…`);
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "bulk_project",
+        ids: entries.map((e) => e.id),
+        projectId: picked.id,
+      }),
+    }).then((r) => r.json()).catch(() => null);
+    setSaving(false);
+    if (res?.ok) onDone();
+    else setProgress("Something went wrong. Try again.");
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[80vh] rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 pb-2 border-b border-line">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-concrete font-bold">Set project</div>
+            <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+              ✕
+            </button>
+          </div>
+          <div className="text-rebar text-xs mb-2">
+            "{jobName}" · {dateLabel} · {entries.length} {entries.length === 1 ? "entry" : "entries"}
+          </div>
+          {!picked && !customMode ? (
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name or job ID…"
+              className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+            />
+          ) : null}
+        </div>
+
+        {customMode ? (
+          <div className="p-5">
+            <div className="text-concrete font-bold mb-1">Custom name</div>
+            <div className="text-rebar text-xs mb-3">
+              A label with no real project (e.g. change order). Shows under Uncategorized on
+              reports so accounting can place it.
+            </div>
+            <input
+              autoFocus
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              placeholder="e.g. CO — night differential"
+              className="w-full bg-steel rounded-xl px-3 h-11 text-concrete mb-3"
+            />
+            {progress && <div className="text-rebar text-sm mb-3">{progress}</div>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setCustomMode(false); setProgress(""); }}
+                disabled={saving}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Back
+              </button>
+              <button
+                onClick={applyCustomName}
+                disabled={saving}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Saving…" : "Save name"}
+              </button>
+            </div>
+          </div>
+        ) : !picked ? (
+          <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+            {/* Alternative to a real project */}
+            <button
+              onClick={() => { setCustomMode(true); setCustomName(""); setProgress(""); }}
+              className="w-full text-left px-3 py-3 rounded-xl active:bg-steel flex items-center justify-between border border-line mb-1"
+              style={{ color: "#8fbcff" }}
+            >
+              <span className="font-bold">✎ Custom name…</span>
+              <span className="text-rebar text-xs">no project</span>
+            </button>
+            <div className="text-rebar text-[11px] px-1 pt-1 pb-1">or pick a project:</div>
+            {filtered.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPicked({ id: p.id, name: p.name })}
+                className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+              >
+                <span>{p.name}</span>
+                {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+            )}
+          </div>
+        ) : (
+          <div className="p-5">
+            <div className="text-concrete text-center mb-1">Set</div>
+            <div className="text-safety font-bold text-center text-lg mb-1">{picked.name}</div>
+            <div className="text-rebar text-sm text-center mb-5">
+              on all {entries.length} "{jobName}" {entries.length === 1 ? "entry" : "entries"}?
+            </div>
+            {progress && <div className="text-rebar text-sm text-center mb-3">{progress}</div>}
+            <div className="flex gap-2">
+              <button
+                onClick={() => setPicked(null)}
+                disabled={saving}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Back
+              </button>
+              <button
+                onClick={apply}
+                disabled={saving}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Updating…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// No-show: record that a scheduled worker didn't report (resolves the flag).
+function ReconNoShowModal({
+  disc,
+  lang,
+  onClose,
+  onDone,
+}: {
+  disc: { worker: string; date: string; scheduledJob: string; scheduledForeman: string };
+  lang: Lang;
+  onClose: () => void;
+  onDone: (note: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Mark no-show</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {disc.worker} · {prettyDate(disc.date, lang)} · {disc.scheduledJob}
+        </div>
+        <div className="text-rebar text-sm mb-3">
+          Records that this scheduled worker didn't report. It resolves the flag and stays on record.
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Note (optional)
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. called out sick"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onDone(note.trim())}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+          >
+            Mark no-show
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Add a missing timecard (deliberate — not auto-filled), pre-seeded from the schedule.
+function ReconAddModal({
+  disc,
+  lang,
+  onClose,
+  onDone,
+}: {
+  disc: {
+    worker: string;
+    date: string;
+    scheduledJob: string;
+    scheduledJobId: string;
+    scheduledForeman: string;
+  };
+  lang: Lang;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [hours, setHours] = useState("");
+  const [saving, setSaving] = useState(false);
+  // project — pre-filled from the schedule, changeable
+  const [projectId, setProjectId] = useState(disc.scheduledJobId || "");
+  const [projectName, setProjectName] = useState(disc.scheduledJob || "");
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  async function add() {
+    const h = parseFloat(hours);
+    if (isNaN(h)) return;
+    setSaving(true);
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "add",
+        worker: disc.worker,
+        date: disc.date,
+        job: projectName || disc.scheduledJob,
+        hours: h,
+        foreman: disc.scheduledForeman,
+        projectId: projectId || undefined,
+      }),
+    });
+    setSaving(false);
+    onDone();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Add timecard</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {disc.worker} · {prettyDate(disc.date, lang)}
+          {disc.scheduledForeman ? ` · ${disc.scheduledForeman}` : ""}
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Project {projectId === disc.scheduledJobId && disc.scheduledJobId ? "(from schedule)" : ""}
+        </label>
+        <button
+          onClick={() => {
+            setPickerOpen(true);
+            setQuery("");
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+        >
+          <span className={projectName ? "text-concrete" : "text-rebar"}>
+            {projectName || "Pick a project…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          autoFocus
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          placeholder="e.g. 8"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={add}
+            disabled={saving || !hours}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            {saving ? "Adding…" : "Add timecard"}
+          </button>
+        </div>
+      </div>
+
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setProjectId(p.id);
+                    setProjectName(p.name);
+                    setPickerOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// View the scheduled crew for a job+date. Missing (didn't log) = soft red; the
+// rest (logged, locked in) are dimmed/disabled.
+function ReconCrewModal({
+  info,
+  crew,
+  lang,
+  onClose,
+}: {
+  info: { jobId: string; date: string; job: string; foreman: string; worker: string };
+  crew: { worker: string; logged: boolean; elsewhereJob?: string }[];
+  lang: Lang;
+  onClose: () => void;
+}) {
+  const clickedLower = (info.worker || "").toLowerCase();
+  const clicked = crew.find((c) => c.worker.toLowerCase() === clickedLower);
+  const others = crew.filter((c) => c.worker.toLowerCase() !== clickedLower);
+  const otherMissing = others.filter((c) => !c.logged && !c.elsewhereJob);
+  const elsewhere = others.filter((c) => !c.logged && c.elsewhereJob);
+  const logged = others.filter((c) => c.logged);
+  return (
+    <div className="fixed inset-0 z-[75] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[80vh] rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 border-b border-line">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-concrete font-bold">Scheduled crew</div>
+            <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+              ✕
+            </button>
+          </div>
+          <div className="text-rebar text-xs">
+            {info.job || "(job)"} · {prettyDate(info.date, lang)}
+            {info.foreman ? ` · ${info.foreman}` : ""}
+          </div>
+        </div>
+        <div className="p-3 overflow-y-auto overscroll-contain space-y-2">
+          {/* the card you opened */}
+          {clicked && (
+            <>
+              <div className="text-[11px] font-bold uppercase tracking-wide px-1" style={{ color: "#8fbcff" }}>
+                This card
+              </div>
+              <div
+                className="rounded-xl px-3 py-2.5 text-sm font-semibold text-concrete flex items-center justify-between"
+                style={
+                  clicked.logged
+                    ? { border: "1px solid rgba(47,115,216,.5)", background: "rgba(47,115,216,.08)" }
+                    : clicked.elsewhereJob
+                    ? { border: "1px solid rgba(47,115,216,.35)", background: "rgba(47,115,216,.05)" }
+                    : { border: "1px solid rgba(229,83,60,.6)", background: "rgba(229,83,60,.1)" }
+                }
+              >
+                <span className="min-w-0">
+                  {clicked.worker}
+                  {clicked.elsewhereJob && !clicked.logged && (
+                    <span className="block text-rebar text-[11px] font-normal">
+                      → logged on {clicked.elsewhereJob}
+                    </span>
+                  )}
+                </span>
+                <span
+                  className="text-[10px] shrink-0"
+                  style={{
+                    color: clicked.logged ? "#4a9e63" : clicked.elsewhereJob ? "#8fbcff" : "#e5533c",
+                  }}
+                >
+                  {clicked.logged ? "✓ logged" : clicked.elsewhereJob ? "elsewhere" : "missing"}
+                </span>
+              </div>
+            </>
+          )}
+
+          {otherMissing.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2" style={{ color: "#e5533c" }}>
+              Other missing ({otherMissing.length})
+            </div>
+          )}
+          {otherMissing.map((c) => (
+            <div
+              key={c.worker}
+              className="rounded-xl px-3 py-2.5 text-sm font-semibold text-concrete"
+              style={{ border: "1px solid rgba(229,83,60,.5)", background: "rgba(229,83,60,.08)" }}
+            >
+              {c.worker}
+            </div>
+          ))}
+
+          {elsewhere.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2" style={{ color: "#8fbcff" }}>
+              Logged elsewhere ({elsewhere.length})
+            </div>
+          )}
+          {elsewhere.map((c) => (
+            <div
+              key={c.worker}
+              className="rounded-xl px-3 py-2.5 text-sm bg-steel/40 opacity-80 flex items-center justify-between"
+            >
+              <span className="min-w-0">
+                <span className="text-concrete font-semibold">{c.worker}</span>
+                <span className="block text-rebar text-[11px]">→ logged on {c.elsewhereJob}</span>
+              </span>
+              <span className="text-[10px] shrink-0" style={{ color: "#8fbcff" }}>elsewhere</span>
+            </div>
+          ))}
+
+          {logged.length > 0 && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 pt-2 text-rebar">
+              Logged here ({logged.length})
+            </div>
+          )}
+          {logged.map((c) => (
+            <div
+              key={c.worker}
+              className="rounded-xl px-3 py-2.5 text-sm font-semibold bg-steel/40 text-rebar opacity-60 flex items-center justify-between"
+            >
+              {c.worker}
+              <span className="text-[10px]" style={{ color: "#4a9e63" }}>✓ logged</span>
+            </div>
+          ))}
+          {crew.length === 0 && (
+            <div className="text-rebar text-sm px-2 py-3">No scheduled crew found.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Bulk-dismiss safety: requires ticking a checkbox before Confirm enables.
+// When some scheduled crew already logged hours, it warns and lets the owner
+// keep those logged hours (partial cancel) vs. cancel the whole job. An
+// optional note carries through to the Past-schedule cancelled badge.
+function ReconDismissAllModal({
+  count,
+  loggedCount,
+  jobName,
+  onClose,
+  onConfirm,
+}: {
+  count: number;
+  loggedCount: number;
+  jobName: string;
+  onClose: () => void;
+  onConfirm: (note: string, keepLogged: boolean) => void;
+}) {
+  const [checked, setChecked] = useState(false);
+  const [note, setNote] = useState("");
+  // When people logged, default to the SAFE choice: keep their hours.
+  const [keepLogged, setKeepLogged] = useState(true);
+  const hasLogged = loggedCount > 0;
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-2">Cancel this job?</div>
+        <div className="text-rebar text-sm mb-1">{jobName}</div>
+        <div className="text-rebar text-sm mb-4">
+          This stands down the {count} scheduled {count === 1 ? "worker" : "workers"} who
+          haven&apos;t logged — use it when the job was cancelled and the crew was sent home.
+        </div>
+
+        {hasLogged && (
+          <div
+            className="rounded-xl p-3 mb-4"
+            style={{ background: "rgba(224,166,59,.1)", border: "1px solid rgba(224,166,59,.4)" }}
+          >
+            <div className="text-sm font-bold mb-2" style={{ color: "#e0a63b" }}>
+              ⚠ {loggedCount} {loggedCount === 1 ? "person" : "people"} already logged hours here
+            </div>
+            <label className="flex items-start gap-2 mb-2 cursor-pointer">
+              <input
+                type="radio"
+                checked={keepLogged}
+                onChange={() => setKeepLogged(true)}
+                className="mt-0.5 w-4 h-4 shrink-0"
+              />
+              <span className="text-concrete text-sm">
+                Keep their hours — cancel only the rest (partial). <b>Safe.</b>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                checked={!keepLogged}
+                onChange={() => setKeepLogged(false)}
+                className="mt-0.5 w-4 h-4 shrink-0"
+              />
+              <span className="text-concrete text-sm">
+                Cancel all — I&apos;ll handle the logged hours separately.
+              </span>
+            </label>
+          </div>
+        )}
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason <span className="text-rebar font-normal normal-case">(optional — shows on the schedule)</span>
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. rained out, GC pushed it"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4 focus:border-rebar outline-none"
+        />
+
+        <label className="flex items-start gap-2 mb-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={(e) => setChecked(e.target.checked)}
+            className="mt-0.5 w-5 h-5 shrink-0"
+          />
+          <span className="text-concrete text-sm">
+            I understand this cancels the job
+            {hasLogged && keepLogged ? " for everyone who didn't log" : ""}.
+          </span>
+        </label>
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onConfirm(note.trim(), keepLogged)}
+            disabled={!checked}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            {hasLogged && keepLogged ? "Cancel the rest" : "Cancel job"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Quick-reference: foremen who haven't submitted a card (whole crew blank).
+function ReconMissingCardsModal({
+  cards,
+  lang,
+  onClose,
+}: {
+  cards: { foreman: string; jobName: string; date: string; jobId: string; crewCount: number }[];
+  lang: Lang;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[75] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[80vh] rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 border-b border-line">
+          <div className="flex items-center justify-between mb-1">
+            <div className="text-concrete font-bold">Missing cards</div>
+            <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+              ✕
+            </button>
+          </div>
+          <div className="text-rebar text-xs">Foremen who haven't submitted a card yet — chase these.</div>
+        </div>
+        <div className="p-3 overflow-y-auto overscroll-contain space-y-2">
+          {cards.map((c, i) => {
+            const short = prettyDate(c.date, lang).split(",")[0];
+            return (
+              <div
+                key={`${c.jobId}|${c.date}|${i}`}
+                className="rounded-xl px-3 py-3"
+                style={{ border: "1px solid rgba(229,83,60,.4)", background: "rgba(229,83,60,.06)" }}
+              >
+                <div className="text-concrete font-bold text-sm">{c.foreman || "(no foreman)"}</div>
+                <div className="text-rebar text-xs mt-0.5">
+                  {c.jobName} · {short} · {c.crewCount} crew
+                </div>
+              </div>
+            );
+          })}
+          {cards.length === 0 && (
+            <div className="text-rebar text-sm px-2 py-3">No missing cards.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Individual dismiss — light confirmation with an optional reason.
+function ReconDismissNoteModal({
+  disc,
+  lang,
+  onClose,
+  onConfirm,
+}: {
+  disc: { worker: string; date: string; kind: string; scheduledJob?: string; loggedJob?: string };
+  lang: Lang;
+  onClose: () => void;
+  onConfirm: (note: string) => void;
+}) {
+  const [note, setNote] = useState("");
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Ignore</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">
+            ✕
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {disc.worker} · {prettyDate(disc.date, lang)} ·{" "}
+          {disc.scheduledJob || disc.loggedJob || disc.kind}
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason (optional)
+        </label>
+        <input
+          autoFocus
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. listed by mistake, never called in"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-1"
+        />
+        <div className="text-rebar text-[11px] mb-4">
+          It's logged either way; this just records why.
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onConfirm(note.trim())}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+          >
+            Ignore
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Card browser — all crew cards for the range. Missing (whole crew blank) shown
+// red at top; submitted cards below, tappable to see/edit the crew inside.
+function ReconCardBrowser({
+  start,
+  end,
+  today,
+  lang,
+  heldOnly,
+  onClose,
+  onChanged,
+}: {
+  start: string;
+  end: string;
+  today: string;
+  lang: Lang;
+  heldOnly?: boolean;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  type Entry = {
+    id: string;
+    worker: string;
+    hours: number;
+    job: string;
+    projectName: string;
+    projectId: string;
+    foreman: string;
+    date: string;
+    voided?: boolean;
+    voidNote?: string;
+    underReview?: boolean;
+  };
+  type Card = { job: string; projectId: string; foreman: string; date: string; entries: Entry[] };
+  const [submitted, setSubmitted] = useState<Card[]>([]);
+  const [missing, setMissing] = useState<
+    {
+      foreman: string; jobName: string; date: string; jobId: string; crewCount: number;
+      coverage?: {
+        submitted: number; total: number; submittedBy: string;
+        people: { worker: string; logged: boolean; elsewhereJob: string }[];
+        walkOns: { worker: string; hours: number }[];
+      };
+    }[]
+  >([]);
+  const [covOpen, setCovOpen] = useState<Record<string, boolean>>({}); // expanded coverage dropdowns
+  // Add-to-card: when set, opens the add modal prefilled with this card's
+  // job/date/foreman. `worker` is set for a quick-add of a known missing
+  // person, or "" to pick anyone (walk-on the foreman forgot).
+  const [addToCard, setAddToCard] = useState<
+    { jobId: string; jobName: string; date: string; foreman: string; worker: string } | null
+  >(null);
+  const [rosterNames, setRosterNames] = useState<string[]>([]);
+  useEffect(() => {
+    fetch("/api/recon?action=roster")
+      .then((r) => r.json())
+      .then((d) => { if (Array.isArray(d?.workers)) setRosterNames(d.workers); })
+      .catch(() => {});
+  }, []);
+  const [loading, setLoading] = useState(true);
+  const [openKey, setOpenKey] = useState<string>("");
+  const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({});
+  const [editEntry, setEditEntry] = useState<Entry | null>(null);
+  const [closeMissing, setCloseMissing] = useState<{ jobId: string; date: string; jobName: string; foreman: string; crewCount: number } | null>(null);
+  const [bulkCard, setBulkCard] = useState<Card | null>(null);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    const action = heldOnly ? "held_cards" : "cards";
+    fetch(`/api/recon?action=${action}&start=${start}&end=${end}&today=${today}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          if (heldOnly) {
+            setSubmitted(d.cards || []);
+            setMissing([]);
+          } else {
+            setSubmitted(d.submitted || []);
+            setMissing(d.missing || []);
+          }
+        }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [start, end, today, heldOnly]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  function afterWrite() {
+    load();
+    onChanged();
+  }
+
+  const [busyId, setBusyId] = useState<string>("");
+
+  async function holdEntry(e: { id: string; worker: string; date: string }, held: boolean) {
+    setBusyId(e.id);
+    // optimistic: flip the flag locally (in heldOnly mode, remove the entry)
+    const prev = submitted;
+    setSubmitted((cur) =>
+      cur
+        .map((c) => ({
+          ...c,
+          entries:
+            held || (heldOnly && !held)
+              ? c.entries.filter((x: any) => x.id !== e.id) // held from normal view, or released from held view → leaves this list
+              : c.entries.map((x: any) => (x.id === e.id ? { ...x, underReview: held } : x)),
+        }))
+        .filter((c) => c.entries.length > 0)
+    );
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "hold", ids: [e.id], held, logWorker: e.worker, logDate: e.date }),
+      }).then((r) => r.json());
+      if (!res?.ok) throw new Error("hold failed");
+      onChanged();
+    } catch {
+      setSubmitted(prev); // rollback
+    }
+    setBusyId("");
+  }
+
+  async function holdCard(c: { job: string; foreman: string; date: string; entries: { id: string }[] }, held: boolean) {
+    const ids = new Set(c.entries.map((e) => e.id));
+    setBusyId(`card:${c.job}|${c.date}`);
+    const prev = submitted;
+    setSubmitted((cur) =>
+      cur
+        .map((cc) => ({
+          ...cc,
+          entries:
+            held || (heldOnly && !held)
+              ? cc.entries.filter((x: any) => !ids.has(x.id))
+              : cc.entries.map((x: any) => (ids.has(x.id) ? { ...x, underReview: held } : x)),
+        }))
+        .filter((cc) => cc.entries.length > 0)
+    );
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "hold",
+          ids: c.entries.map((e) => e.id),
+          held,
+          logWorker: `${c.job}${c.foreman ? ` · ${c.foreman}` : ""}`,
+          logDate: c.date,
+        }),
+      }).then((r) => r.json());
+      if (!res?.ok) throw new Error("hold failed");
+      onChanged();
+    } catch {
+      setSubmitted(prev); // rollback
+    }
+    setBusyId("");
+  }
+
+  async function voidEntry(e: { id: string; worker: string; date: string }) {
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "void", id: e.id, voided: true, note: "voided from review", logWorker: e.worker, logDate: e.date }),
+    });
+    afterWrite();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/60 flex items-center justify-center p-4">
+      <div className="bg-graphite w-full max-w-md flex flex-col max-h-[85vh] rounded-2xl border border-line overflow-hidden">
+        <div className="p-4 border-b border-line flex items-center justify-between">
+          <div className="text-concrete font-bold">{heldOnly ? "Under review" : "Timecards"}</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite border border-line px-3 py-2 rounded-full"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="p-3 overflow-y-auto overscroll-contain">
+          {loading && <div className="text-rebar text-sm px-2 py-3">Loading…</div>}
+
+          {/* Missing cards (red) — grouped by date, OLDEST first so the most
+              overdue is at the top and hardest to miss. */}
+          {!loading && missing.length > 0 && (
+            <>
+              <div className="text-[11px] font-bold uppercase tracking-wide px-1 mb-2" style={{ color: "#e5533c" }}>
+                Missing ({missing.length})
+              </div>
+              {(() => {
+                const byDate = new Map<string, typeof missing>();
+                for (const m of missing) {
+                  if (!byDate.has(m.date)) byDate.set(m.date, [] as any);
+                  byDate.get(m.date)!.push(m);
+                }
+                const dates = Array.from(byDate.keys()).sort((a, b) => a.localeCompare(b)); // oldest first
+                return dates.map((date) => (
+                  <div key={date} className="mb-3">
+                    <div
+                      className="text-[11px] font-bold uppercase tracking-wider px-1 mb-1.5"
+                      style={{ color: "#e5533c" }}
+                    >
+                      {prettyDate(date, lang)}
+                    </div>
+                    {byDate.get(date)!.map((m, i) => {
+                      const key = `${m.jobId}|${m.date}`;
+                      const cov = m.coverage;
+                      // Only offer the dropdown when it has something to say:
+                      // someone submitted for this job, or walk-ons worked it.
+                      const expandable = !!cov && (cov.submitted > 0 || cov.walkOns.length > 0);
+                      const open = expandable && !!covOpen[key];
+                      return (
+                        <div
+                          key={`${key}|${i}`}
+                          className="rounded-xl px-3 py-3 mb-2"
+                          style={{ border: "1px solid rgba(229,83,60,.45)", background: "rgba(229,83,60,.07)" }}
+                        >
+                          <div
+                            className="flex items-start gap-2"
+                            onClick={() => {
+                              if (expandable) setCovOpen((c) => ({ ...c, [key]: !c[key] }));
+                            }}
+                          >
+                            <span style={{ color: "#e5533c" }} className="font-bold">⚠</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-concrete font-bold text-sm">{m.jobName}</div>
+                              <div className="text-rebar text-xs mt-0.5">
+                                {m.foreman
+                                  ? `${m.foreman} hasn't submitted`
+                                  : "no foreman on schedule"}
+                                {` · ${m.crewCount} crew`}
+                              </div>
+                              {cov && cov.submitted > 0 && (
+                                <div className="text-xs mt-1 font-semibold" style={{ color: "#e0a63b" }}>
+                                  {cov.submitted}/{cov.total} submitted
+                                  {cov.submittedBy ? ` · ${cov.submittedBy}` : ""}
+                                </div>
+                              )}
+                              {expandable && (
+                                <div className="text-rebar text-[11px] mt-0.5">
+                                  {open ? "▾ hide crew" : "▸ tap to see who's in"}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCloseMissing(m);
+                              }}
+                              aria-label="Close card"
+                              className="shrink-0 text-rebar text-xs font-bold bg-graphite border border-line rounded-full px-2.5 py-1 active:text-safety"
+                            >
+                              Close
+                            </button>
+                          </div>
+
+                          {open && cov && (
+                            <div className="mt-2 pt-2 space-y-1" style={{ borderTop: "1px solid rgba(229,83,60,.25)" }}>
+                              {cov.people.map((p, pi) => (
+                                <div key={pi} className="flex items-center gap-2 text-sm">
+                                  {p.logged ? (
+                                    <span className="text-[11px] font-bold w-3 shrink-0" style={{ color: "#4a9e63" }}>✓</span>
+                                  ) : (
+                                    <span className="w-3 shrink-0" />
+                                  )}
+                                  <span
+                                    className="min-w-0 truncate"
+                                    style={p.logged ? { color: "#f4f3f0" } : { color: "#f4f3f0", opacity: 0.45 }}
+                                  >
+                                    {p.worker}
+                                  </span>
+                                  {!p.logged && p.elsewhereJob && (
+                                    <span className="text-rebar text-[11px] shrink-0">at {p.elsewhereJob}</span>
+                                  )}
+                                  {!p.logged && !p.elsewhereJob && (
+                                    <span className="text-[11px] shrink-0 ml-1" style={{ color: "#e5533c" }}>missing</span>
+                                  )}
+                                </div>
+                              ))}
+                              {cov.walkOns.map((w, wi) => (
+                                <div key={`w${wi}`} className="flex items-center gap-2 text-sm">
+                                  <span className="w-3 shrink-0" />
+                                  <span className="min-w-0 truncate" style={{ color: "#e0a63b" }}>{w.worker}</span>
+                                  <span className="text-[11px] font-bold shrink-0" style={{ color: "#e0a63b" }}>
+                                    {w.hours}h · not scheduled
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ));
+              })()}
+            </>
+          )}
+
+          {/* Submitted cards — grouped by date, newest first, collapsible */}
+          {!loading && (
+            <div className="text-[11px] font-bold uppercase tracking-wide px-1 mb-2 mt-2 text-rebar">
+              Submitted ({submitted.length})
+            </div>
+          )}
+          {!loading &&
+            (() => {
+              // group submitted cards by date, newest first
+              const byDate = new Map<string, typeof submitted>();
+              for (const c of submitted) {
+                if (!byDate.has(c.date)) byDate.set(c.date, [] as any);
+                byDate.get(c.date)!.push(c);
+              }
+              const dates = Array.from(byDate.keys()).sort((a, b) => b.localeCompare(a)); // newest first
+              const latest = dates[0];
+              return dates.map((date) => {
+                const cards = byDate.get(date)!;
+                // default: latest day expanded, older days collapsed
+                const collapsed = date in collapsedDates ? collapsedDates[date] : date !== latest;
+                return (
+                  <div key={date} className="mb-3">
+                    <button
+                      onClick={() => setCollapsedDates((s) => ({ ...s, [date]: !collapsed }))}
+                      className="w-full flex items-center justify-between text-left mb-2 px-1"
+                    >
+                      <span className="text-safety text-xs font-bold uppercase tracking-wider">
+                        {prettyDate(date, lang)}
+                      </span>
+                      <span className="text-rebar text-xs">
+                        {cards.length} {collapsed ? "▸" : "▾"}
+                      </span>
+                    </button>
+                    {!collapsed &&
+                      cards.map((c) => {
+                        const key = `${c.projectId || c.job}|${c.foreman}|${c.date}`;
+                        const open = openKey === key;
+                        return (
+                          <div key={key} className="bg-graphite border border-line rounded-xl mb-2">
+                            <button
+                              onClick={() => setOpenKey(open ? "" : key)}
+                              className="w-full text-left px-3 py-3 flex items-start justify-between gap-2"
+                            >
+                              <div>
+                                <div className="text-concrete font-bold text-sm">
+                                  {c.job} <span className="text-rebar">{open ? "▾" : "▸"}</span>
+                                </div>
+                                <div className="text-rebar text-xs mt-0.5">
+                                  {c.foreman || "—"} · {c.entries.length}{" "}
+                                  {c.entries.length === 1 ? "entry" : "entries"}
+                                </div>
+                              </div>
+                            </button>
+                            {open && (
+                              <div className="px-3 pb-3">
+                                <div className="flex gap-2 mb-2">
+                                  <button
+                                    onClick={() => setBulkCard(c)}
+                                    className="flex-1 text-rebar border border-line rounded-lg py-2 text-xs font-bold active:text-safety"
+                                  >
+                                    Bulk edit date / project
+                                  </button>
+                                  <button
+                                    onClick={() => holdCard(c, !heldOnly)}
+                                    className="flex-1 rounded-lg py-2 text-xs font-bold border"
+                                    style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                                  >
+                                    {heldOnly ? "Release all" : "Hold card for review"}
+                                  </button>
+                                </div>
+                                <div className="space-y-1.5">
+                                  {c.entries.map((e) => {
+                                    const isFm =
+                                      (c.foreman || "").trim() !== "" &&
+                                      e.worker.trim().toLowerCase() === (c.foreman || "").trim().toLowerCase();
+                                    const busy = busyId === e.id;
+                                    return (
+                                      <div
+                                        key={e.id}
+                                        className="flex items-center justify-between gap-2 bg-steel/40 rounded-lg px-3 py-2"
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="text-concrete text-sm font-semibold truncate flex items-center gap-1.5 flex-wrap">
+                                            {e.worker}
+                                            {isFm && heldOnly && (
+                                              <span
+                                                className="inline-flex items-center justify-center w-4 h-4 rounded-full text-[9px] font-bold shrink-0"
+                                                style={{ color: "#8fbcff", border: "1.5px solid rgba(143,188,255,.7)" }}
+                                                title="Foreman"
+                                              >
+                                                F
+                                              </span>
+                                            )}
+                                            {isFm && !heldOnly && (
+                                              <span
+                                                className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                                                style={{ color: "#8fbcff", background: "rgba(47,115,216,.18)" }}
+                                              >
+                                                FOREMAN
+                                              </span>
+                                            )}
+                                            {e.underReview && !heldOnly && (
+                                              <span className="text-[10px]" style={{ color: "#e0a63b" }}>
+                                                ⟳ on hold
+                                              </span>
+                                            )}
+                                            {busy && (
+                                              <span
+                                                className="inline-block w-3 h-3 border-2 rounded-full animate-spin"
+                                                style={{ borderColor: "#e0a63b", borderTopColor: "transparent" }}
+                                              />
+                                            )}
+                                          </div>
+                                          {heldOnly ? (
+                                            <div className="font-bold text-[15px]" style={{ color: "#f0cf8f" }}>
+                                              {e.hours}h
+                                            </div>
+                                          ) : (
+                                            <div className="text-rebar text-[11px]">{e.hours}h</div>
+                                          )}
+                                        </div>
+                                        <div className="flex gap-1.5 shrink-0">
+                                          <button
+                                            onClick={() => holdEntry(e, !e.underReview)}
+                                            disabled={busy}
+                                            className="border rounded-lg px-2.5 py-1.5 text-xs font-bold disabled:opacity-50"
+                                            style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                                          >
+                                            {e.underReview ? "Release" : "Hold"}
+                                          </button>
+                                          <button
+                                            onClick={() => setEditEntry(e)}
+                                            disabled={busy}
+                                            className="text-rebar border border-line rounded-lg px-2.5 py-1.5 text-xs font-bold active:text-safety disabled:opacity-50"
+                                          >
+                                            Edit
+                                          </button>
+                                          {heldOnly && (
+                                            <button
+                                              onClick={() => voidEntry(e)}
+                                              disabled={busy}
+                                              className="border rounded-lg px-2.5 py-1.5 text-xs font-bold disabled:opacity-50"
+                                              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                                            >
+                                              Void
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                <button
+                                  onClick={() =>
+                                    setAddToCard({
+                                      jobId: c.projectId || "",
+                                      jobName: c.job,
+                                      date: c.date,
+                                      foreman: c.foreman || "",
+                                      worker: "",
+                                    })
+                                  }
+                                  className="mt-2 text-xs font-bold text-rebar active:text-safety"
+                                >
+                                  + Add worker to this card
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </div>
+                );
+              });
+            })()}
+
+          {!loading && submitted.length === 0 && missing.length === 0 && (
+            <div className="text-rebar text-sm px-2 py-3">No cards in this range.</div>
+          )}
+        </div>
+      </div>
+
+      {editEntry && (
+        <ReconEditModal
+          entry={editEntry as any}
+          lang={lang}
+          onClose={() => setEditEntry(null)}
+          onSaved={() => {
+            setEditEntry(null);
+            afterWrite();
+          }}
+        />
+      )}
+
+      {addToCard && (
+        <CoverageAddModal
+          card={addToCard}
+          roster={rosterNames}
+          lang={lang}
+          onClose={() => setAddToCard(null)}
+          onDone={() => {
+            setAddToCard(null);
+            afterWrite(); // refresh coverage so the added person flips to ✓
+          }}
+        />
+      )}
+
+      {closeMissing && (
+        <CloseMissingModal
+          card={closeMissing}
+          lang={lang}
+          onClose={() => setCloseMissing(null)}
+          onDone={() => {
+            setCloseMissing(null);
+            afterWrite();
+          }}
+        />
+      )}
+
+      {bulkCard && (
+        <ReconBulkEditModal
+          card={bulkCard}
+          lang={lang}
+          onClose={() => setBulkCard(null)}
+          onSaved={() => {
+            setBulkCard(null);
+            afterWrite();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Bulk-edit a card's date and/or project (with confirm).
+function ReconBulkEditModal({
+  card,
+  lang,
+  onClose,
+  onSaved,
+}: {
+  card: { job: string; projectId: string; foreman: string; date: string; entries: { id: string }[] };
+  lang: Lang;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [dateVal, setDateVal] = useState(card.date);
+  const [projectId, setProjectId] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirm, setConfirm] = useState(false);
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) => p.name.toLowerCase().includes(query.toLowerCase()) || (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+  const dateChanged = dateVal !== card.date;
+  const projChanged = !!projectId;
+  const canSave = dateChanged || projChanged;
+
+  async function save() {
+    setSaving(true);
+    const body: any = { op: "bulk_edit", ids: card.entries.map((e) => e.id) };
+    if (dateChanged) body.date = dateVal;
+    if (projChanged) body.projectId = projectId;
+    // log context (one summary record on the backend)
+    body.logLabel = `${card.job || "Card"}${card.foreman ? ` · ${card.foreman}` : ""}`;
+    body.priorDate = card.date;
+    body.logDate = dateVal || card.date;
+    if (projChanged) body.projectName = projectName;
+    await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[76] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Bulk edit card</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {card.job} · {prettyDate(card.date, lang).split(",")[0]} · {card.entries.length} entries
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Date</label>
+        <input
+          type="date"
+          value={dateVal}
+          onChange={(e) => setDateVal(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Project (optional)
+        </label>
+        <button
+          onClick={() => { setPickerOpen(true); setQuery(""); }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+        >
+          <span className={projectName ? "text-concrete" : "text-rebar"}>
+            {projectName || "Leave as-is / pick to change…"}
+          </span>
+          <span className="text-rebar">▾</span>
+        </button>
+
+        {!confirm ? (
+          <button
+            disabled={!canSave}
+            onClick={() => setConfirm(true)}
+            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Apply to {card.entries.length} entries
+          </button>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">
+              Apply {dateChanged ? `date ${dateVal}` : ""}{dateChanged && projChanged ? " + " : ""}
+              {projChanged ? `project ${projectName}` : ""} to all {card.entries.length}?
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirm(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={saving}
+                onClick={save}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {saving ? "Applying…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[80] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick project</div>
+                <button onClick={() => setPickerOpen(false)} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => { setProjectId(p.id); setProjectName(p.name); setPickerOpen(false); }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Site Visits — owner's one-tap "I was here" logger with an editable history.
+// ============================================================================
+function fmtTime(iso: string): string {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+function fmtDayHeader(iso: string, lang: Lang): string {
+  if (!iso) return "";
+  return prettyDate(iso.slice(0, 10), lang);
+}
+// Build a local ISO string (with timezone offset) for "now" or an edited time.
+function localISO(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const oh = pad(Math.floor(Math.abs(off) / 60));
+  const om = pad(Math.abs(off) % 60);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes()
+  )}:00${sign}${oh}:${om}`;
+}
+// datetime-local value (no tz) ⇄ ISO
+function toLocalInput(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
+    d.getMinutes()
+  )}`;
+}
+function fromLocalInput(v: string): string {
+  if (!v) return "";
+  return localISO(new Date(v));
+}
+
+function SiteVisitsPanel({
+  tr,
+  lang,
+  onClose,
+}: {
+  tr: any;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  type Visit = {
+    id: string;
+    jobId: string;
+    jobName: string;
+    arrival: string;
+    departure: string;
+    notes: string;
+  };
+  const [visits, setVisits] = useState<Visit[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId?: string }[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [logging, setLogging] = useState(false);
+  const [editVisit, setEditVisit] = useState<Visit | null>(null);
+
+  // range: default to This week
+  const today = localISO(new Date()).slice(0, 10);
+  const [rangeMode, setRangeMode] = useState<"this" | "last" | "custom">("this");
+  const [customStart, setCustomStart] = useState(today);
+  const [customEnd, setCustomEnd] = useState(today);
+  const { start, end } = useMemo(() => {
+    if (rangeMode === "this") {
+      const mon = mondayOf(today);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    if (rangeMode === "last") {
+      const mon = isoAddDays(mondayOf(today), -7);
+      return { start: mon, end: isoAddDays(mon, 6) };
+    }
+    return { start: customStart, end: customEnd };
+  }, [rangeMode, customStart, customEnd, today]);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    fetch(`/api/visits?start=${start}&end=${end}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) setVisits(d.visits || []);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, [start, end]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // projects load once (parallel to first visit load, cached server-side)
+  useEffect(() => {
+    fetch("/api/visits?action=projects")
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.projects)) setProjects(d.projects);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function logVisit(p: { id: string; name: string }) {
+    setPickerOpen(false);
+    setLogging(true);
+    const arrival = localISO(new Date());
+    // optimistic
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: Visit = {
+      id: tempId, jobId: p.id, jobName: p.name, arrival, departure: "", notes: "",
+    };
+    setVisits((cur) => [optimistic, ...cur]);
+    try {
+      const res = await fetch("/api/visits", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "log", jobId: p.id, jobName: p.name, arrival }),
+      }).then((r) => r.json());
+      if (res?.id) {
+        setVisits((cur) => cur.map((v) => (v.id === tempId ? { ...v, id: res.id } : v)));
+      } else throw new Error("log failed");
+    } catch {
+      setVisits((cur) => cur.filter((v) => v.id !== tempId)); // rollback
+    }
+    setLogging(false);
+  }
+
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  // group visits by day (already sorted newest-first from the API)
+  const byDay: [string, Visit[]][] = [];
+  const dayMap = new Map<string, Visit[]>();
+  for (const v of visits) {
+    const day = v.arrival.slice(0, 10);
+    if (!dayMap.has(day)) {
+      dayMap.set(day, []);
+      byDay.push([day, dayMap.get(day)!]);
+    }
+    dayMap.get(day)!.push(v);
+  }
+
+  return (
+    <div className="fixed inset-0 bg-steel z-[60] flex flex-col">
+      <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-line">
+        <span className="font-extrabold text-lg text-concrete">Site visits</span>
+        <button
+          onClick={onClose}
+          className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+        >
+          {tr.close}
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto overscroll-contain px-5 py-5">
+        {/* Primary action */}
+        <button
+          onClick={() => {
+            setPickerOpen(true);
+            setQuery("");
+          }}
+          disabled={logging}
+          className="w-full bg-safety text-steel rounded-2xl py-4 font-extrabold text-lg mb-6 flex items-center justify-center gap-2 disabled:opacity-60"
+        >
+          {logging ? (
+            <span className="inline-block w-5 h-5 border-2 border-steel border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <>+ Log a visit</>
+          )}
+        </button>
+
+        {/* Range selector */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+          {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setRangeMode(k)}
+              className={`flex-1 rounded-full py-2 text-xs font-bold ${
+                rangeMode === k ? "bg-steel text-concrete border border-line" : "text-rebar"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {rangeMode === "custom" && (
+          <div className="flex items-center gap-2 mb-4 px-1">
+            <input
+              type="date"
+              value={customStart}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="flex-1 min-w-0 bg-graphite border border-line rounded-lg h-10 px-2 text-concrete text-sm"
+            />
+            <span className="text-rebar text-xs">to</span>
+            <input
+              type="date"
+              value={customEnd}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="flex-1 min-w-0 bg-graphite border border-line rounded-lg h-10 px-2 text-concrete text-sm"
+            />
+          </div>
+        )}
+        {rangeMode !== "custom" && <div className="mb-3" />}
+
+        {loading && <div className="text-rebar text-sm px-1">Loading…</div>}
+        {!loading && visits.length === 0 && (
+          <div className="text-rebar text-sm px-1">No visits in this range. Tap “Log a visit” when you get to a job.</div>
+        )}
+
+        {byDay.map(([day, dayVisits]) => (
+          <div key={day} className="mb-5">
+            <div className="text-safety text-xs font-bold uppercase tracking-wider mb-2 px-1">
+              {fmtDayHeader(day, lang)}
+            </div>
+            {dayVisits.map((v) => (
+              <button
+                key={v.id}
+                onClick={() => setEditVisit(v)}
+                className="w-full text-left bg-graphite border border-line rounded-2xl p-4 mb-2"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-concrete font-bold text-[15px] truncate">{v.jobName}</div>
+                    <div className="text-rebar text-sm mt-1">
+                      <span className="text-concrete font-semibold">{fmtTime(v.arrival)}</span>
+                      {v.departure ? (
+                        <>
+                          {" "}→ <span className="text-concrete font-semibold">{fmtTime(v.departure)}</span>
+                        </>
+                      ) : (
+                        <span className="text-rebar"> · arrived</span>
+                      )}
+                    </div>
+                    {v.notes && <div className="text-rebar text-xs mt-1 italic">{v.notes}</div>}
+                  </div>
+                  <span className="text-rebar text-xs shrink-0 mt-1">edit ›</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      {/* Job picker */}
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[75] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Which job?</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-sm font-bold bg-steel px-3 py-1.5 rounded-full"
+                >
+                  {tr.close}
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search by name or job ID…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => logVisit(p)}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete flex items-center justify-between"
+                >
+                  <span>{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editVisit && (
+        <VisitEditModal
+          visit={editVisit}
+          onClose={() => setEditVisit(null)}
+          onSaved={() => {
+            setEditVisit(null);
+            load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function VisitEditModal({
+  visit,
+  onClose,
+  onSaved,
+}: {
+  visit: { id: string; jobName: string; arrival: string; departure: string; notes: string };
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [arrival, setArrival] = useState(toLocalInput(visit.arrival));
+  const [departure, setDeparture] = useState(toLocalInput(visit.departure));
+  const [notes, setNotes] = useState(visit.notes || "");
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    await fetch("/api/visits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "update",
+        id: visit.id,
+        arrival: fromLocalInput(arrival),
+        departure: departure ? fromLocalInput(departure) : "",
+        clearDeparture: !departure,
+        notes,
+      }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  async function del() {
+    setSaving(true);
+    await fetch("/api/visits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "delete", id: visit.id }),
+    });
+    setSaving(false);
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">{visit.jobName}</div>
+          <button onClick={onClose} className="text-rebar text-sm font-bold bg-steel px-3 py-1.5 rounded-full">
+            Close
+          </button>
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1 mt-3">Arrived</label>
+        <input
+          type="datetime-local"
+          value={arrival}
+          onChange={(e) => setArrival(e.target.value)}
+          className="block w-full max-w-full box-border bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3 text-left appearance-none"
+          style={{ minWidth: 0 }}
+        />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Left <span className="text-rebar font-normal normal-case">(optional)</span>
+        </label>
+        <div className="flex gap-2 mb-3">
+          <input
+            type="datetime-local"
+            value={departure}
+            onChange={(e) => setDeparture(e.target.value)}
+            className="flex-1 min-w-0 box-border bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-left appearance-none"
+          />
+          <button
+            onClick={() => setDeparture(toLocalInput(localISO(new Date())))}
+            className="bg-steel border border-line text-concrete rounded-xl px-3 text-sm font-bold shrink-0"
+          >
+            Now
+          </button>
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Notes</label>
+        <input
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="optional"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+
+        {!confirmDelete ? (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirmDelete(true)}
+              className="text-rebar border border-line rounded-xl px-3 py-3 text-sm font-bold"
+              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.4)" }}
+            >
+              Delete
+            </button>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        ) : (
+          <div>
+            <div className="text-concrete text-sm text-center mb-3">Delete this visit permanently?</div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setConfirmDelete(false)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={del}
+                disabled={saving}
+                className="flex-1 rounded-xl py-3 font-bold text-white disabled:opacity-60"
+                style={{ background: "#e5533c" }}
+              >
+                {saving ? "Deleting…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Confirm/reject a foreman-added roster row (Status = "Unconfirmed").
+// Confirm: Active checked + Status cleared. Reject: archives the roster row
+// (their submitted timecards stay; void separately if needed).
+function ConfirmWorkerModal({
+  worker,
+  onClose,
+  onDone,
+}: {
+  worker: { id: string; name: string };
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+
+  async function act(op: "confirm_worker" | "reject_worker") {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op, rosterId: worker.id, worker: worker.name }),
+      }).then((r) => r.json());
+      if (res?.ok) onDone();
+      else setBusy(false);
+    } catch {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        {!rejecting ? (
+          <>
+            <div className="text-concrete font-bold text-lg mb-1">{worker.name}</div>
+            <div className="text-rebar text-sm mb-4">
+              This person was added by a foreman and isn&apos;t confirmed on the roster yet.
+              Confirm to make them an active worker, or reject if they shouldn&apos;t be on the roster.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setRejecting(true)}
+                disabled={busy}
+                className="border rounded-xl px-3 py-3 text-sm font-bold disabled:opacity-50"
+                style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.4)" }}
+              >
+                Reject
+              </button>
+              <button
+                onClick={() => act("confirm_worker")}
+                disabled={busy}
+                className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+              >
+                {busy ? "Confirming…" : "Confirm worker"}
+              </button>
+            </div>
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="w-full mt-2 text-rebar text-sm font-bold py-2"
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="text-concrete font-bold text-lg mb-1">Reject {worker.name}?</div>
+            <div className="text-rebar text-sm mb-4">
+              This removes them from the roster. Any hours already submitted under their
+              name stay on the timecards — void those separately if they shouldn&apos;t count.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setRejecting(false)}
+                disabled={busy}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => act("reject_worker")}
+                disabled={busy}
+                className="flex-1 rounded-xl py-3 font-bold text-white disabled:opacity-60"
+                style={{ background: "#e5533c" }}
+              >
+                {busy ? "Rejecting…" : "Yes, reject"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Close a missing card (one-tap + optional note). Logs a "Missing card" record
+// keyed by jobId|date so the card stays closed for that job+day.
+function CloseMissingModal({
+  card,
+  lang,
+  onClose,
+  onDone,
+}: {
+  card: { jobId: string; date: string; jobName: string; foreman: string; crewCount: number };
+  lang: Lang;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Plain close: clears the card from Missing, no schedule effect (used when
+  // the work is covered or you just want it gone).
+  async function close() {
+    setBusy(true);
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "close_missing",
+          jobId: card.jobId,
+          date: card.date,
+          jobName: card.jobName,
+          foreman: card.foreman,
+          note: note.trim(),
+        }),
+      }).then((r) => r.json());
+      if (res?.ok) onDone();
+      else setBusy(false);
+    } catch {
+      setBusy(false);
+    }
+  }
+
+  // Cancel: closes the card AND writes a job-level cancel record so the Past
+  // schedule shows the grey X + note — same record the Pending "Ignore all"
+  // writes, so the two paths stay consistent.
+  async function cancelJob() {
+    setBusy(true);
+    try {
+      const closed = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "close_missing",
+          jobId: card.jobId,
+          date: card.date,
+          jobName: card.jobName,
+          foreman: card.foreman,
+          note: note.trim() || "Job cancelled",
+        }),
+      }).then((r) => r.json());
+      if (!closed?.ok) { setBusy(false); return; }
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "cancel_job",
+          jobId: card.jobId,
+          date: card.date,
+          jobName: card.jobName,
+          note: note.trim(),
+          partial: false,
+        }),
+      }).catch(() => {});
+      onDone();
+    } catch {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-1">Close this card?</div>
+        <div className="text-rebar text-sm mb-1">
+          {card.jobName}
+          {` · ${prettyDate(card.date, lang)}`}
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          <b>Close card</b> clears it from Missing (use when the work is covered).
+          {" "}
+          <b>Mark job cancelled</b> also stamps the schedule with a cancelled badge and your reason.
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason{" "}
+          <span className="text-rebar font-normal normal-case">
+            (optional — shows on the schedule if cancelled)
+          </span>
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. covered by another foreman, or rained out"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4 focus:border-rebar outline-none"
+        />
+
+        <div className="space-y-2">
+          <button
+            onClick={cancelJob}
+            disabled={busy}
+            className="w-full rounded-xl py-3 font-bold disabled:opacity-60"
+            style={{ color: "#e5533c", background: "rgba(229,83,60,.12)", border: "1px solid rgba(229,83,60,.5)" }}
+          >
+            {busy ? "Working…" : "Mark job cancelled"}
+          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={close}
+              disabled={busy}
+              className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+            >
+              {busy ? "Closing…" : "Close card"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Add a timecard to an already-submitted card (e.g. a foreman forgot someone
+// on a card he did submit). Job, date, and foreman are prefilled from the card;
+// the owner picks the worker from the roster and enters hours. Tagged
+// owner-added. The new entry joins the card on refresh.
+function CoverageAddModal({
+  card,
+  roster,
+  lang,
+  onClose,
+  onDone,
+}: {
+  card: { jobId: string; jobName: string; date: string; foreman: string; worker: string };
+  roster: string[];
+  lang: Lang;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const fixedWorker = !!card.worker;
+  const [worker, setWorker] = useState(card.worker);
+  const [hours, setHours] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const filtered = roster.filter((n) => n.toLowerCase().includes(query.toLowerCase()));
+
+  async function add() {
+    const h = parseFloat(hours);
+    if (isNaN(h) || !worker) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "add",
+          worker,
+          date: card.date,
+          job: card.jobName,
+          hours: h,
+          foreman: card.foreman,
+          projectId: card.jobId || undefined,
+          ownerAdded: true,
+        }),
+      }).then((r) => r.json());
+      if (res?.ok) onDone();
+      else setSaving(false);
+    } catch {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold text-lg">Add to card</div>
+          <button onClick={onClose} className="text-rebar text-xl px-2 active:text-safety">✕</button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {card.jobName} · {prettyDate(card.date, lang)}
+          {card.foreman ? ` · ${card.foreman}` : ""}
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Worker</label>
+        {fixedWorker ? (
+          <div className="w-full bg-steel border border-line rounded-xl h-11 px-3 mb-4 flex items-center text-concrete font-semibold">
+            {worker}
+          </div>
+        ) : (
+          <button
+            onClick={() => { setPickerOpen(true); setQuery(""); }}
+            className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-left mb-4 flex items-center justify-between"
+          >
+            <span className={worker ? "text-concrete" : "text-rebar"}>{worker || "Pick a worker…"}</span>
+            <span className="text-rebar">▾</span>
+          </button>
+        )}
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          autoFocus={fixedWorker}
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          placeholder="e.g. 8"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4 focus:border-rebar outline-none"
+        />
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={add}
+            disabled={saving || !hours || !worker}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            {saving ? "Adding…" : "Add timecard"}
+          </button>
+        </div>
+      </div>
+
+      {pickerOpen && (
+        <div
+          className={`fixed inset-0 z-[85] bg-black/50 flex justify-center p-4 transition-all duration-200 ${
+            query ? "items-start pt-6" : "items-center"
+          }`}
+          onClick={() => setPickerOpen(false)}
+        >
+          <div
+            className="bg-graphite w-full max-w-md flex flex-col max-h-[75vh] rounded-2xl border border-line overflow-hidden"
+            onClick={(ev) => ev.stopPropagation()}
+          >
+            <div className="p-4 pb-2 border-b border-line">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-concrete font-bold">Pick worker</div>
+                <button
+                  onClick={() => setPickerOpen(false)}
+                  className="text-rebar text-xl leading-none px-2 active:text-safety"
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(ev) => setQuery(ev.target.value)}
+                placeholder="Search a worker…"
+                className="w-full bg-steel rounded-xl px-3 h-11 text-concrete"
+              />
+            </div>
+            <div className="space-y-1 p-3 overflow-y-auto overscroll-contain">
+              {filtered.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => { setWorker(n); setPickerOpen(false); setQuery(""); }}
+                  className="w-full text-left px-3 py-3 rounded-xl active:bg-steel text-concrete"
+                >
+                  {n}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-3 py-3">No matches.</div>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Foreman self-service: My submissions (READ-ONLY) ----------
+// PIN-gated view of the selected foreman's OWN submitted cards. Every fetch is
+// validated server-side (name + PIN) and scoped to that foreman — nothing here
+// can read another foreman's data or any owner section. Read-only by design:
+// corrections go to the owner in Reconcile. Includes self-serve PIN change.
+function MySubmissionsPanel({
+  foreman,
+  pin,
+  lang,
+  onClose,
+}: {
+  foreman: string;
+  pin: string;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  type Day = { date: string; jobs: { job: string; total: number; crew: { worker: string; hours: number }[] }[] };
+  const [days, setDays] = useState<Day[]>([]);
+  const [grand, setGrand] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [range, setRange] = useState<"this" | "last" | "custom">("this");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [showPinChange, setShowPinChange] = useState(false);
+
+  // Week math: Mon–Sun of the current week (Phoenix-local, no UTC parsing).
+  function weekBounds(offsetWeeks: number): { start: string; end: string } {
+    const now = new Date();
+    const local = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = local.getDay(); // 0=Sun
+    const monOffset = dow === 0 ? -6 : 1 - dow;
+    const mon = new Date(local);
+    mon.setDate(local.getDate() + monOffset + offsetWeeks * 7);
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    const iso = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return { start: iso(mon), end: iso(sun) };
+  }
+
+  const bounds =
+    range === "this" ? weekBounds(0)
+    : range === "last" ? weekBounds(-1)
+    : { start: customStart, end: customEnd };
+
+  useEffect(() => {
+    if (!bounds.start || !bounds.end) { setDays([]); setGrand(0); return; }
+    setLoading(true);
+    setErr("");
+    fetch(
+      `/api/foreman?action=submissions&name=${encodeURIComponent(foreman)}&pin=${pin}&start=${bounds.start}&end=${bounds.end}`
+    )
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) { setDays(d.days || []); setGrand(d.grandTotal || 0); }
+        else setErr(d?.error || "Couldn't load.");
+        setLoading(false);
+      })
+      .catch(() => { setErr("Couldn't load."); setLoading(false); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, customStart, customEnd]);
+
+  const es = lang === "es";
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-1">
+          <button
+            onClick={() => setShowPinChange(true)}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            PIN
+          </button>
+          <div className="font-bold text-concrete text-lg">{es ? "Mis tarjetas" : "My submissions"}</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            {es ? "Cerrar" : "Close"}
+          </button>
+        </div>
+        <div className="text-rebar text-xs text-center mb-4">{foreman} · {es ? "solo lectura" : "read-only"}</div>
+
+        {/* Range pills */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+          {([
+            ["this", es ? "Esta semana" : "This week"],
+            ["last", es ? "Semana pasada" : "Last week"],
+            ["custom", es ? "Fechas" : "Custom"],
+          ] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setRange(k)}
+              className={`flex-1 rounded-full py-2 text-xs font-bold ${range === k ? "bg-safety text-steel" : "text-rebar"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {range === "custom" && (
+          <div className="flex gap-2 mb-3">
+            <input
+              type="date"
+              value={customStart}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+            <input
+              type="date"
+              value={customEnd}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+          </div>
+        )}
+
+        {loading && <div className="text-rebar text-sm px-1 py-2">{es ? "Cargando…" : "Loading…"}</div>}
+        {!loading && err && <div className="text-sm px-1 py-2" style={{ color: "#e5533c" }}>{err}</div>}
+        {!loading && !err && days.length === 0 && (
+          <div className="text-rebar text-sm px-1 py-2">
+            {es ? "No hay tarjetas en este rango." : "No submissions in this range."}
+          </div>
+        )}
+
+        {!loading && !err && days.length > 0 && (
+          <div className="text-rebar text-xs px-1 mb-3">
+            {es ? "Total del rango" : "Range total"}: <b className="text-concrete">{grand}h</b>
+          </div>
+        )}
+
+        {!loading && !err &&
+          days.map((d) => (
+            <div key={d.date} className="mb-4">
+              <div className="text-safety text-xs font-bold uppercase tracking-wider px-1 mb-1.5">
+                {prettyDate(d.date, lang)}
+              </div>
+              {d.jobs.map((j, ji) => (
+                <div key={ji} className="bg-graphite border border-line rounded-2xl p-4 mb-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-concrete font-bold text-[15px] truncate">{j.job}</div>
+                    <div className="text-concrete text-sm font-extrabold shrink-0 ml-2">{j.total}h</div>
+                  </div>
+                  <div className="space-y-1">
+                    {j.crew.map((c, ci) => (
+                      <div key={ci} className="flex items-center justify-between text-sm">
+                        <span className="text-concrete min-w-0 truncate">{c.worker}</span>
+                        <span className="text-rebar shrink-0 ml-2">{c.hours}h</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+
+        <div className="text-rebar text-[11px] px-1 mt-2 leading-relaxed">
+          {es
+            ? "Si algo está mal, avísale a Fernando para corregirlo."
+            : "If something looks wrong, tell Fernando so he can fix it."}
+        </div>
+      </div>
+
+      {showPinChange && (
+        <ForemanPinChangeModal
+          foreman={foreman}
+          currentPin={pin}
+          lang={lang}
+          onClose={() => setShowPinChange(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Foreman changes their own PIN (old PIN validated server-side).
+function ForemanPinChangeModal({
+  foreman,
+  currentPin,
+  lang,
+  onClose,
+}: {
+  foreman: string;
+  currentPin: string;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  const [newPin, setNewPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const es = lang === "es";
+
+  async function save() {
+    if (!/^\d{4}$/.test(newPin)) { setMsg(es ? "El PIN debe ser 4 números." : "PIN must be 4 digits."); return; }
+    setBusy(true);
+    setMsg("");
+    const res = await fetch("/api/foreman", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "change_pin", name: foreman, oldPin: currentPin, newPin }),
+    })
+      .then((r) => r.json())
+      .catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) {
+      setMsg(es ? "PIN cambiado. Úsalo la próxima vez." : "PIN changed. Use it next time.");
+      setTimeout(onClose, 1600);
+    } else {
+      setMsg(res?.error || (es ? "No se pudo cambiar." : "Couldn't change it."));
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-1">{es ? "Cambiar PIN" : "Change PIN"}</div>
+        <div className="text-rebar text-xs mb-4">{foreman}</div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          {es ? "Nuevo PIN (4 números)" : "New PIN (4 digits)"}
+        </label>
+        <input
+          type="tel"
+          inputMode="numeric"
+          autoFocus
+          value={newPin}
+          onChange={(e) => setNewPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+          placeholder="••••"
+          className="w-full bg-steel border border-line rounded-xl h-12 px-4 text-concrete text-center tracking-[0.5em] text-xl mb-3"
+        />
+        {msg && <div className="text-xs mb-3" style={{ color: msg.includes("hang") || msg.toLowerCase().includes("chang") ? "#4a9e63" : "#e0a63b" }}>{msg}</div>}
+        <div className="flex gap-2">
+          <button onClick={onClose} disabled={busy} className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50">
+            {es ? "Cancelar" : "Cancel"}
+          </button>
+          <button onClick={save} disabled={busy || newPin.length !== 4} className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-50">
+            {busy ? "…" : es ? "Guardar" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Crew Roster management (owner-only) ----------
+// Writes to the same Crew Roster DB the owner platform reads. Add / edit /
+// deactivate only — no schema changes. Deactivating removes a worker from the
+// timesheet crew picker (Active=false); it's a reversible checkbox, never a
+// delete, so history stays intact.
+type RosterPerson = { id: string; name: string; role: string; active: boolean; status: string };
+
+function RosterPanel({ onClose }: { onClose: () => void }) {
+  const [people, setPeople] = useState<RosterPerson[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState("");
+  const [busyId, setBusyId] = useState("");
+  const [editing, setEditing] = useState<RosterPerson | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [showInactive, setShowInactive] = useState(false);
+  const [q, setQ] = useState("");
+  const [confirmPerson, setConfirmPerson] = useState<RosterPerson | null>(null);
+
+  useLockBodyScroll();
+
+  function load() {
+    setLoading(true);
+    fetch("/api/roster-manage")
+      .then((r) => r.json())
+      .then((d) => {
+        setPeople(d.people || []);
+        setLoading(false);
+      })
+      .catch(() => {
+        setMsg("Couldn't load the roster.");
+        setLoading(false);
+      });
+  }
+  useEffect(() => { load(); }, []);
+
+  async function setActive(p: RosterPerson, active: boolean) {
+    setBusyId(p.id);
+    // optimistic
+    setPeople((cur) => cur.map((x) => (x.id === p.id ? { ...x, active } : x)));
+    const res = await fetch("/api/roster-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "set_active", id: p.id, active }),
+    }).then((r) => r.json()).catch(() => null);
+    if (!res?.ok) {
+      setPeople((cur) => cur.map((x) => (x.id === p.id ? { ...x, active: !active } : x))); // rollback
+      setMsg("That didn't save — try again.");
+      setTimeout(() => setMsg(""), 3000);
+    }
+    setBusyId("");
+  }
+
+  const query = q.trim().toLowerCase();
+  const match = (p: RosterPerson) =>
+    !query ||
+    p.name.toLowerCase().includes(query) ||
+    (p.role || "").toLowerCase().includes(query);
+  const active = people.filter((p) => p.active && match(p));
+  const inactive = people.filter((p) => !p.active && match(p));
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-4">
+          <div className="font-bold text-concrete text-lg">Crew roster</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            Close
+          </button>
+        </div>
+
+        <button
+          onClick={() => setAdding(true)}
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-3"
+        >
+          + Add worker
+        </button>
+
+        <div className="relative mb-4">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search name or role…"
+            className="w-full bg-graphite border border-line rounded-full h-11 pl-4 pr-9 text-concrete text-sm"
+          />
+          {q && (
+            <button
+              onClick={() => setQ("")}
+              aria-label="Clear"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-rebar text-lg"
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        {msg && <div className="text-rebar text-sm text-center mb-3">{msg}</div>}
+        {loading && <div className="text-rebar text-sm text-center py-8">Loading…</div>}
+
+        {!loading && (
+          <>
+            <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2 px-1">
+              Active ({active.length})
+            </div>
+            {active.map((p) => (
+              <RosterRow key={p.id} p={p} busy={busyId === p.id}
+                onEdit={() => setEditing(p)} onToggle={() => setActive(p, false)}
+                onConfirm={() => setConfirmPerson(p)} />
+            ))}
+            {active.length === 0 && (
+              <div className="text-rebar text-sm px-1 py-2">No active workers.</div>
+            )}
+
+            {inactive.length > 0 && (
+              <div className="mt-5">
+                <button
+                  onClick={() => setShowInactive((s) => !s)}
+                  className="text-rebar text-xs font-bold uppercase tracking-wide px-1 mb-2 flex items-center gap-1"
+                >
+                  {showInactive ? "▾" : "▸"} Inactive ({inactive.length})
+                </button>
+                {(showInactive || !!query) &&
+                  inactive.map((p) => (
+                    <RosterRow key={p.id} p={p} busy={busyId === p.id} inactive
+                      onEdit={() => setEditing(p)} onToggle={() => setActive(p, true)}
+                      onConfirm={() => setConfirmPerson(p)} />
+                  ))}
+              </div>
+            )}
+
+            <div className="text-rebar text-[11px] mt-6 px-1 leading-relaxed">
+              Deactivating removes a worker from the timesheet crew picker. It's reversible
+              and keeps their history. Tip: deactivate at the end of the day, not while crews
+              are still submitting.
+            </div>
+          </>
+        )}
+      </div>
+
+      {(adding || editing) && (
+        <RosterEditModal
+          person={editing}
+          onClose={() => { setAdding(false); setEditing(null); }}
+          onSaved={() => { setAdding(false); setEditing(null); load(); }}
+        />
+      )}
+
+      {confirmPerson && (
+        <ConfirmWorkerModal
+          worker={{ id: confirmPerson.id, name: confirmPerson.name }}
+          onClose={() => setConfirmPerson(null)}
+          onDone={() => { setConfirmPerson(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function RosterRow({
+  p, busy, inactive, onEdit, onToggle, onConfirm,
+}: {
+  p: RosterPerson; busy: boolean; inactive?: boolean;
+  onEdit: () => void; onToggle: () => void; onConfirm?: () => void;
+}) {
+  const unconfirmed = (p.status || "").trim().toLowerCase() === "unconfirmed";
+  return (
+    <div
+      className="bg-graphite border border-line rounded-2xl px-4 py-3 mb-2 flex items-center gap-3"
+      style={inactive ? { opacity: 0.6 } : undefined}
+    >
+      <div className="flex-1 min-w-0">
+        <div className="text-concrete font-bold text-[15px] flex items-center gap-2 flex-wrap">
+          {p.name}
+          {unconfirmed && (
+            <button
+              onClick={onConfirm}
+              className="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.55)", background: "rgba(229,83,60,.10)" }}
+            >
+              UNCONFIRMED
+            </button>
+          )}
+          {busy && <span className="inline-block w-3 h-3 border-2 border-rebar border-t-transparent rounded-full animate-spin" />}
+        </div>
+        <div className="text-rebar text-xs mt-0.5">
+          {p.role || "—"}
+          {p.status ? ` · ${p.status}` : ""}
+        </div>
+      </div>
+      <button
+        onClick={onEdit}
+        className="text-rebar text-xs font-bold bg-steel border border-line rounded-full px-3 py-1.5"
+      >
+        Edit
+      </button>
+      <button
+        onClick={onToggle}
+        className="text-xs font-bold rounded-full px-3 py-1.5 border"
+        style={
+          inactive
+            ? { color: "#4a9e63", borderColor: "rgba(74,158,99,.5)" }
+            : { color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }
+        }
+      >
+        {inactive ? "Reactivate" : "Deactivate"}
+      </button>
+    </div>
+  );
+}
+
+function RosterEditModal({
+  person, onClose, onSaved,
+}: {
+  person: RosterPerson | null; onClose: () => void; onSaved: () => void;
+}) {
+  const isEdit = !!person;
+  const [name, setName] = useState(person?.name || "");
+  const [role, setRole] = useState(person?.role || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  // Access PIN (foreman self-service). Owner-set; validated server-side.
+  const [pinInput, setPinInput] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinMsg, setPinMsg] = useState("");
+
+  async function savePin() {
+    setPinBusy(true);
+    setPinMsg("");
+    const res = await fetch("/api/foreman", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "set_pin", ownerPin: "5314", name: person!.name, pin: pinInput }),
+    })
+      .then((r) => r.json())
+      .catch(() => ({ ok: false }));
+    setPinBusy(false);
+    if (res?.ok) { setPinMsg("PIN set."); setPinInput(""); }
+    else setPinMsg(res?.error || "Couldn't set the PIN.");
+  }
+
+  async function save() {
+    if (!name.trim()) { setErr("Name is required."); return; }
+    setBusy(true); setErr("");
+    const payload = isEdit
+      ? { op: "edit", id: person!.id, name: name.trim(), role: role.trim() }
+      : { op: "add", name: name.trim(), role: role.trim(), active: true };
+    const res = await fetch("/api/roster-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then((r) => r.json()).catch(() => null);
+    if (!res?.ok) {
+      setErr(res?.error || "Couldn't save — try again.");
+      setBusy(false);
+      return;
+    }
+    // If a PIN was typed but "Set PIN" was never tapped, commit it here so the
+    // digits aren't silently discarded. Uses the just-saved name, so this still
+    // works when the name was renamed in the same save.
+    if (isEdit && pinInput.length === 4) {
+      const pinRes = await fetch("/api/foreman", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "set_pin", ownerPin: "5314", name: name.trim(), pin: pinInput }),
+      }).then((r) => r.json()).catch(() => ({ ok: false }));
+      if (!pinRes?.ok) {
+        setErr(pinRes?.error || "Saved, but the PIN didn't set. Try Set PIN again.");
+        setBusy(false);
+        return;
+      }
+    }
+    onSaved();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-4">
+          {isEdit ? "Edit worker" : "Add worker"}
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Name</label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Full name"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Role <span className="text-rebar font-normal normal-case">(optional — type "Foreman" for foremen)</span>
+        </label>
+        <input
+          value={role}
+          onChange={(e) => setRole(e.target.value)}
+          placeholder="e.g. Foreman, Ironworker"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        {err && <div className="text-sm mb-3" style={{ color: "#e5533c" }}>{err}</div>}
+
+        {isEdit && (
+          <div className="mb-4 pt-3" style={{ borderTop: "1px solid #39414c" }}>
+            <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+              Access PIN{" "}
+              <span className="text-rebar font-normal normal-case">
+                (4 digits — lets this foreman open their read-only "My submissions")
+              </span>
+            </label>
+            <input
+              type="tel"
+              inputMode="numeric"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+              placeholder="••••"
+              className="w-full min-w-0 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center tracking-[0.4em]"
+            />
+            <button
+              onClick={savePin}
+              disabled={pinBusy || pinInput.length !== 4}
+              className="w-full mt-2 bg-steel border border-line text-concrete rounded-xl h-11 font-bold text-sm disabled:opacity-40"
+            >
+              {pinBusy ? "…" : "Set PIN"}
+            </button>
+            {pinMsg && (
+              <div className="text-xs mt-2" style={{ color: pinMsg.startsWith("PIN") ? "#4a9e63" : "#e5533c" }}>
+                {pinMsg}
+              </div>
+            )}
+            <div className="text-rebar text-[11px] mt-1.5 leading-relaxed">
+              Setting a new PIN replaces the old one (that's the reset). They can change it
+              themselves once inside.
+            </div>
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={busy}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-60"
+          >
+            {busy ? "Saving…" : isEdit ? "Save" : "Add"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Bulk split: divide a whole submitted card between two jobs ----------
+// For when a foreman logged the whole crew under one job but the day was really
+// split (e.g. everyone did 6h on Job A + 2h on Job B). One default split applies
+// to the crew; individual workers can be adjusted or excluded (left untouched).
+// Balance is soft-checked: if someone's parts don't equal their original total,
+// you're warned but can proceed. Assigning both jobs clears the card from the
+// needs-project list. Reuses the same per-entry split op as the Lookup split.
+type BulkSplitRow = {
+  id: string;
+  worker: string;
+  total: number;
+  aHours: string;   // stays on Job A
+  bHours: string;   // moves to Job B
+  excluded: boolean; // leave this worker untouched (still needs project later)
+  foreman: string;
+  job: string;
+  date: string;
+};
+
+function ReconBulkSplitModal({
+  jobName,
+  dateLabel,
+  entries,
+  onClose,
+  onDone,
+}: {
+  jobName: string;
+  dateLabel: string;
+  entries: { id: string; worker: string; hours: number; foreman: string; job: string; date: string }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  useLockBodyScroll();
+  const [rows, setRows] = useState<BulkSplitRow[]>(
+    entries.map((e) => ({
+      id: e.id,
+      worker: e.worker,
+      total: e.hours,
+      aHours: String(e.hours),
+      bHours: "0",
+      excluded: false,
+      foreman: e.foreman,
+      job: e.job,
+      date: e.date,
+    }))
+  );
+  const [defaultB, setDefaultB] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [warnOpen, setWarnOpen] = useState(false);
+
+  // Job pickers (A = where remaining hours stay, B = where moved hours go)
+  const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
+  const [pickFor, setPickFor] = useState<"" | "A" | "B">("");
+  const [query, setQuery] = useState("");
+  const [jobA, setJobA] = useState<{ id: string; name: string } | null>(null);
+  const [jobB, setJobB] = useState<{ id: string; name: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/recon?action=projects")
+      .then((r) => r.json())
+      .then((d) => { if (Array.isArray(d?.projects)) setProjects(d.projects); })
+      .catch(() => {});
+  }, []);
+  const filtered = projects.filter(
+    (p) =>
+      p.name.toLowerCase().includes(query.toLowerCase()) ||
+      (p.jobId || "").toLowerCase().includes(query.toLowerCase())
+  );
+
+  // Apply the default "move N hours to Job B" to every non-excluded worker:
+  // B = N (capped at their total), A = total - B.
+  function applyDefault() {
+    const n = parseFloat(defaultB);
+    if (isNaN(n) || n < 0) return;
+    setRows((cur) =>
+      cur.map((r) => {
+        if (r.excluded) return r;
+        const b = Math.min(n, r.total);
+        return { ...r, bHours: String(+b.toFixed(2)), aHours: String(+(r.total - b).toFixed(2)) };
+      })
+    );
+  }
+
+  function setRow(id: string, field: "aHours" | "bHours", v: string) {
+    setRows((cur) =>
+      cur.map((r) => {
+        if (r.id !== id) return r;
+        const next = { ...r, [field]: v };
+        // Mirror the Lookup split: editing one side auto-fills the other to
+        // keep the total, but both stay editable (soft check catches drift).
+        const num = parseFloat(v);
+        if (!isNaN(num) && num >= 0 && num <= r.total) {
+          const other = +(r.total - num).toFixed(2);
+          if (field === "bHours") next.aHours = String(other);
+          else next.bHours = String(other);
+        }
+        return next;
+      })
+    );
+  }
+
+  const included = rows.filter((r) => !r.excluded);
+  const splitting = included.filter((r) => parseFloat(r.bHours) > 0);
+  const assignOnly = included.filter((r) => !(parseFloat(r.bHours) > 0)); // all hours stay on A
+  const unbalanced = included.filter((r) => {
+    const a = parseFloat(r.aHours);
+    const b = parseFloat(r.bHours);
+    return isNaN(a) || isNaN(b) || a < 0 || b < 0 || Math.abs(a + b - r.total) > 0.001;
+  });
+  const invalid = included.some((r) => {
+    const a = parseFloat(r.aHours);
+    const b = parseFloat(r.bHours);
+    return isNaN(a) || isNaN(b) || a < 0 || b < 0 || (a === 0 && b === 0);
+  });
+  const canSave = !!jobA && !!jobB && included.length > 0 && !invalid && jobA.id !== jobB.id;
+
+  function trySave() {
+    if (unbalanced.length > 0) setWarnOpen(true);
+    else void save();
+  }
+
+  async function save() {
+    setWarnOpen(false);
+    setSaving(true);
+    let done = 0;
+    let failed = 0;
+
+    // Workers keeping all hours on Job A → just assign the project (no split).
+    if (assignOnly.length > 0) {
+      setProgress(`Assigning ${assignOnly.length}…`);
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "bulk_project", ids: assignOnly.map((r) => r.id), projectId: jobA!.id }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.ok) done += assignOnly.length;
+      else failed += assignOnly.length;
+    }
+
+    // Workers splitting → one split op each (same op the Lookup split uses).
+    for (let i = 0; i < splitting.length; i++) {
+      const r = splitting[i];
+      setProgress(`Splitting ${i + 1}/${splitting.length}…`);
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "split",
+          id: r.id,
+          origHours: parseFloat(r.aHours),
+          origProjectId: jobA!.id,
+          origProjectName: jobA!.name,
+          newHours: parseFloat(r.bHours),
+          newProjectId: jobB!.id,
+          newProjectName: jobB!.name,
+          worker: r.worker,
+          date: r.date,
+          foreman: r.foreman,
+          job: r.job,
+        }),
+      }).then((x) => x.json()).catch(() => null);
+      if (res?.ok) done++;
+      else failed++;
+    }
+
+    setSaving(false);
+    if (failed === 0) onDone();
+    else setProgress(`${done} saved, ${failed} failed — check and retry.`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-end sm:items-center justify-center sm:p-5">
+      <div className="bg-graphite border border-line rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] flex flex-col">
+        <div className="p-5 pb-3">
+          <div className="text-concrete font-bold text-lg">Split between jobs</div>
+          <div className="text-rebar text-sm mt-0.5">
+            "{jobName}" · {dateLabel} · {entries.length} workers
+          </div>
+        </div>
+
+        {pickFor ? (
+          <>
+            <div className="px-5 pb-3 flex items-center justify-between">
+              <div className="text-concrete font-bold">
+                {pickFor === "A" ? "Job A — hours stay" : "Job B — hours move here"}
+              </div>
+              <button
+                onClick={() => { setPickFor(""); setQuery(""); }}
+                className="text-rebar text-sm font-bold"
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="px-5 pb-3">
+              <div className="relative">
+                <input
+                  autoFocus
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search by name or job ID…"
+                  className="w-full bg-steel border border-line rounded-full h-11 pl-4 pr-9 text-concrete focus:border-rebar outline-none"
+                />
+                {query && (
+                  <button
+                    onClick={() => setQuery("")}
+                    aria-label="Clear"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-rebar text-lg"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto overscroll-contain px-3 pb-4">
+              {filtered.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    if (pickFor === "A") setJobA({ id: p.id, name: p.name });
+                    else setJobB({ id: p.id, name: p.name });
+                    setPickFor(""); setQuery("");
+                  }}
+                  className="w-full text-left px-4 py-3.5 rounded-xl active:bg-steel text-concrete flex items-center justify-between gap-3"
+                >
+                  <span className="min-w-0 truncate">{p.name}</span>
+                  {p.jobId && <span className="text-rebar text-sm shrink-0">{p.jobId}</span>}
+                </button>
+              ))}
+              {filtered.length === 0 && <div className="text-rebar text-sm px-4 py-3">No matches.</div>}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="px-5 space-y-2.5">
+              <button
+                onClick={() => setPickFor("A")}
+                className="w-full bg-steel border border-line rounded-xl px-4 py-3 text-left flex items-center justify-between gap-3 active:border-rebar"
+              >
+                <div className="min-w-0">
+                  <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job A — hours stay</div>
+                  <div className={`truncate ${jobA ? "text-concrete font-bold" : "text-rebar"}`}>
+                    {jobA ? jobA.name : "Pick a project…"}
+                  </div>
+                </div>
+                <span className="text-rebar shrink-0">›</span>
+              </button>
+              <button
+                onClick={() => setPickFor("B")}
+                className="w-full bg-steel border border-line rounded-xl px-4 py-3 text-left flex items-center justify-between gap-3 active:border-rebar"
+              >
+                <div className="min-w-0">
+                  <div className="text-rebar text-[11px] font-bold uppercase tracking-wide">Job B — hours move here</div>
+                  <div className={`truncate ${jobB ? "text-concrete font-bold" : "text-rebar"}`}>
+                    {jobB ? jobB.name : "Pick a project…"}
+                  </div>
+                </div>
+                <span className="text-rebar shrink-0">›</span>
+              </button>
+              {jobA && jobB && jobA.id === jobB.id && (
+                <div className="text-sm" style={{ color: "#e5533c" }}>Job A and Job B must be different.</div>
+              )}
+
+              <div className="flex items-center gap-2 pt-1">
+                <input
+                  value={defaultB}
+                  onChange={(e) => setDefaultB(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="2"
+                  className="w-20 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center focus:border-rebar outline-none"
+                />
+                <div className="text-rebar text-sm flex-1 leading-tight">hours to Job B<br />for everyone</div>
+                <button
+                  onClick={applyDefault}
+                  className="bg-steel border border-line text-concrete rounded-xl px-4 h-11 text-sm font-bold"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto overscroll-contain px-5 mt-4">
+              <div className="flex items-center text-rebar text-[10px] font-bold uppercase tracking-wide pb-1.5">
+                <div className="flex-1">Worker</div>
+                <div className="w-16 text-center">Job A</div>
+                <div className="w-16 text-center">Job B</div>
+                <div className="w-16" />
+              </div>
+              {rows.map((r) => {
+                const a = parseFloat(r.aHours);
+                const b = parseFloat(r.bHours);
+                const bad = !r.excluded && (isNaN(a) || isNaN(b) || Math.abs(a + b - r.total) > 0.001);
+                return (
+                  <div
+                    key={r.id}
+                    className="flex items-center gap-2 py-2.5 border-t border-line/50"
+                    style={r.excluded ? { opacity: 0.4 } : undefined}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="text-concrete text-sm font-semibold truncate">{r.worker}</div>
+                      <div className="text-[11px]" style={{ color: bad ? "#e0a63b" : "#9aa3af" }}>
+                        {r.total}h total{bad ? ` · now ${((isNaN(a)?0:a)+(isNaN(b)?0:b)).toFixed(2)}h` : ""}
+                      </div>
+                    </div>
+                    <input
+                      value={r.aHours}
+                      onChange={(e) => setRow(r.id, "aHours", e.target.value)}
+                      disabled={r.excluded}
+                      inputMode="decimal"
+                      className="w-16 bg-steel border rounded-lg h-10 text-center text-concrete disabled:opacity-40 focus:border-rebar outline-none"
+                      style={{ borderColor: bad ? "#e0a63b" : undefined }}
+                    />
+                    <input
+                      value={r.bHours}
+                      onChange={(e) => setRow(r.id, "bHours", e.target.value)}
+                      disabled={r.excluded}
+                      inputMode="decimal"
+                      className="w-16 bg-steel border rounded-lg h-10 text-center text-concrete disabled:opacity-40 focus:border-rebar outline-none"
+                      style={{ borderColor: bad ? "#e0a63b" : undefined }}
+                    />
+                    <button
+                      onClick={() =>
+                        setRows((cur) => cur.map((x) => (x.id === r.id ? { ...x, excluded: !x.excluded } : x)))
+                      }
+                      className="w-16 text-[11px] font-bold rounded-full py-1.5 border"
+                      style={
+                        r.excluded
+                          ? { color: "#4a9e63", borderColor: "rgba(74,158,99,.5)" }
+                          : { color: "#9aa3af", borderColor: "rgba(154,163,175,.4)" }
+                      }
+                    >
+                      {r.excluded ? "Include" : "Skip"}
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="text-rebar text-[11px] py-3 leading-relaxed">
+                Skipped workers stay untouched and remain in this list. Anyone with 0h on Job B is
+                just assigned Job A (no split).
+              </div>
+            </div>
+
+            <div className="p-5 pt-3">
+              {progress && <div className="text-rebar text-sm mb-2">{progress}</div>}
+              <div className="flex gap-2">
+                <button
+                  onClick={onClose}
+                  disabled={saving}
+                  className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={trySave}
+                  disabled={!canSave || saving}
+                  className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+                >
+                  {saving ? "Saving…" : "Split & assign"}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {warnOpen && (
+          <div className="absolute inset-0 z-10 bg-black/70 flex items-center justify-center p-6 rounded-2xl">
+            <div className="bg-graphite border border-line rounded-2xl p-5 w-full max-w-sm">
+              <div className="text-concrete font-bold mb-2">Hours don't add up</div>
+              <div className="text-rebar text-sm mb-4">
+                {unbalanced.length} {unbalanced.length === 1 ? "worker's" : "workers'"} parts don't
+                equal their original total (shown in amber). This will change their total hours.
+                Proceed anyway?
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setWarnOpen(false)}
+                  className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+                >
+                  Go back
+                </button>
+                <button
+                  onClick={() => void save()}
+                  className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+                >
+                  Proceed
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Void a whole junk card from the needs-project section ----------
+// For duplicate / wrong-day / test cards. Voids every entry on the card (never
+// deletes — voids are reversible and stay visible under Voided in Lookup) with
+// an optional shared note, and logs each to the Rec Log. Requires an explicit
+// confirmation since it affects the whole crew's entries at once.
+function ReconVoidCardModal({
+  jobName,
+  dateLabel,
+  entries,
+  onClose,
+  onDone,
+}: {
+  jobName: string;
+  dateLabel: string;
+  entries: { id: string; worker: string; date: string }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  useLockBodyScroll();
+  const [note, setNote] = useState("");
+  const [confirm, setConfirm] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState("");
+
+  async function voidAll() {
+    setSaving(true);
+    let done = 0;
+    let failed = 0;
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      setProgress(`Voiding ${i + 1}/${entries.length}…`);
+      const res = await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "void",
+          id: e.id,
+          voided: true,
+          note: note.trim() || "Voided card (needs-project)",
+          logWorker: e.worker,
+          logDate: e.date,
+        }),
+      }).then((r) => r.json()).catch(() => null);
+      if (res?.ok) done++;
+      else failed++;
+    }
+    setSaving(false);
+    if (failed === 0) onDone();
+    else setProgress(`${done} voided, ${failed} failed — check Lookup and retry.`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-1">Void this card?</div>
+        <div className="text-rebar text-sm mb-4">
+          "{jobName}" · {dateLabel} — this voids all {entries.length}{" "}
+          {entries.length === 1 ? "entry" : "entries"} on the card. Voided entries don't count
+          toward hours or reports, but they're reversible and stay visible under Voided in Lookup.
+        </div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Reason (optional)
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="e.g. duplicate card, wrong day"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+        {progress && <div className="text-rebar text-sm mb-3">{progress}</div>}
+        {!confirm ? (
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={() => setConfirm(true)}
+              className="flex-1 rounded-xl py-3 font-bold text-white"
+              style={{ background: "#e5533c" }}
+            >
+              Void card
+            </button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <button
+              onClick={() => setConfirm(false)}
+              disabled={saving}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50"
+            >
+              Go back
+            </button>
+            <button
+              onClick={voidAll}
+              disabled={saving}
+              className="flex-1 rounded-xl py-3 font-bold text-white disabled:opacity-60"
+              style={{ background: "#e5533c" }}
+            >
+              {saving ? "Voiding…" : `Yes, void ${entries.length}`}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Card browser (Lookup "By card" mode) ----------
+// Lists submitted cards for the range (one per job+foreman+date), newest first,
+// searchable by foreman/job. Tapping a card opens it to see the full crew and
+// edit individually or in bulk. Defaults to this week's cards.
+function CardBrowser({
+  cards,
+  loading,
+  start,
+  end,
+  lang,
+  onOpen,
+}: {
+  cards: any[];
+  loading: boolean;
+  start: string;
+  end: string;
+  lang: Lang;
+  onOpen: (c: any) => void;
+}) {
+  const [q, setQ] = useState("");
+  const query = q.trim().toLowerCase();
+  const shown = cards.filter(
+    (c) =>
+      !query ||
+      (c.foreman || "").toLowerCase().includes(query) ||
+      (c.job || "").toLowerCase().includes(query)
+  );
+  // Group by date, newest first (cards already sorted by date desc from API).
+  const byDate = new Map<string, any[]>();
+  for (const c of shown) {
+    if (!byDate.has(c.date)) byDate.set(c.date, []);
+    byDate.get(c.date)!.push(c);
+  }
+
+  return (
+    <div>
+      <div className="relative mb-4">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search foreman or job…"
+          className="w-full bg-graphite border border-line rounded-full h-11 pl-4 pr-9 text-concrete text-sm"
+        />
+        {q && (
+          <button
+            onClick={() => setQ("")}
+            aria-label="Clear"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-rebar text-lg"
+          >
+            ×
+          </button>
+        )}
+      </div>
+
+      {loading && <div className="text-rebar text-sm px-1 py-2">Loading cards…</div>}
+      {!loading && shown.length === 0 && (
+        <div className="text-rebar text-sm px-1 py-2">No submitted cards in this range.</div>
+      )}
+
+      {!loading &&
+        Array.from(byDate.entries()).map(([date, dayCards]) => (
+          <div key={date} className="mb-4">
+            <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2 px-1">
+              {prettyDate(date, lang)}
+            </div>
+            {dayCards.map((c, i) => {
+              const total = round2(
+                c.entries.reduce((s: number, e: any) => s + (e.hours || 0), 0)
+              );
+              const needsProject = c.entries.some((e: any) => !e.projectId);
+              return (
+                <button
+                  key={i}
+                  onClick={() => onOpen(c)}
+                  className="w-full text-left bg-graphite border border-line rounded-2xl p-3.5 mb-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-concrete font-bold text-[15px]">{c.job}</span>
+                    <span className="text-rebar text-xs">
+                      {c.entries.length} {c.entries.length === 1 ? "worker" : "workers"} · {total}h ›
+                    </span>
+                  </div>
+                  <div className="text-rebar text-xs mt-0.5">
+                    Foreman: {c.foreman || "—"}
+                    {needsProject && (
+                      <span style={{ color: "#8fbcff" }}> · needs project</span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ))}
+    </div>
+  );
+}
+
+// Card detail — full crew of one submitted card, with per-entry actions.
+function CardDetailModal({
+  card,
+  lang,
+  onClose,
+  onEditEntry,
+  onVoidEntry,
+  onSplitEntry,
+  onBulk,
+}: {
+  card: any;
+  lang: Lang;
+  onClose: () => void;
+  onEditEntry: (e: any) => void;
+  onVoidEntry: (e: any) => void;
+  onSplitEntry: (e: any) => void;
+  onBulk: (kind: "project" | "split" | "void") => void;
+}) {
+  useLockBodyScroll();
+  const total = round2(card.entries.reduce((s: number, e: any) => s + (e.hours || 0), 0));
+  const needsProject = card.entries.some((e: any) => !e.projectId && !e.uncategorized);
+  return (
+    <div className="fixed inset-0 z-[70] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-4">
+          <div className="min-w-0">
+            <div className="font-bold text-concrete text-lg truncate">{card.job}</div>
+            <div className="text-rebar text-xs">
+              {prettyDate(card.date, lang)} · Foreman: {card.foreman || "—"} · {card.entries.length}{" "}
+              {card.entries.length === 1 ? "worker" : "workers"} · {total}h
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full shrink-0 ml-3"
+          >
+            Close
+          </button>
+        </div>
+
+        {/* Whole-card actions */}
+        <div className="flex gap-2 mb-4 flex-wrap">
+          {needsProject && (
+            <button
+              onClick={() => onBulk("project")}
+              className="text-xs font-bold px-3 py-2 rounded-full"
+              style={{ color: "#8fbcff", background: "rgba(47,115,216,.16)" }}
+            >
+              Set project
+            </button>
+          )}
+          <button
+            onClick={() => onBulk("split")}
+            className="text-rebar text-xs font-bold px-3 py-2 rounded-full bg-graphite border border-line"
+          >
+            Split between jobs
+          </button>
+          <button
+            onClick={() => onBulk("void")}
+            className="text-xs font-bold px-3 py-2 rounded-full bg-graphite border"
+            style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+          >
+            Void card
+          </button>
+        </div>
+
+        <div className="space-y-2">
+          {card.entries.map((e: any) => (
+            <div key={e.id} className="bg-graphite border border-line rounded-2xl px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div className="text-concrete font-bold text-[15px]">
+                  {e.worker}
+                  {e.underReview && (
+                    <span className="ml-2 text-[11px] font-bold" style={{ color: "#e0a63b" }}>
+                      ⟳ on hold
+                    </span>
+                  )}
+                  {e.uncategorized && (
+                    <span
+                      className="ml-2 text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                      style={{ color: "#9aa3af", background: "rgba(154,163,175,.15)" }}
+                    >
+                      UNCATEGORIZED
+                    </span>
+                  )}
+                </div>
+                <div className="text-concrete text-lg font-extrabold">{e.hours}h</div>
+              </div>
+              <div className="text-rebar text-xs mt-0.5">
+                {e.projectName || e.job || "—"}
+                {!e.projectId && !e.uncategorized && (
+                  <span style={{ color: "#8fbcff" }}> · needs project</span>
+                )}
+              </div>
+              <div className="flex gap-2 mt-2.5">
+                <button
+                  onClick={() => onEditEntry(e)}
+                  className="bg-steel border border-line text-concrete rounded-lg px-3.5 py-1.5 text-xs font-bold active:text-safety"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => onSplitEntry(e)}
+                  className="text-rebar border border-line rounded-lg px-3.5 py-1.5 text-xs font-bold active:text-safety"
+                >
+                  Split
+                </button>
+                <button
+                  onClick={() => onVoidEntry(e)}
+                  className="text-rebar border border-line rounded-lg px-3.5 py-1.5 text-xs font-bold active:text-safety"
+                >
+                  Void
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

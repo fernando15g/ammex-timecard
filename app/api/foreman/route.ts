@@ -53,11 +53,50 @@ async function ensurePinProperty(): Promise<void> {
 }
 
 // Find a roster page by (case-insensitive, trimmed) name. Returns page + pin.
+// Short-lived cache of name → roster record. The PIN screen validates once to
+// unlock and again when loading submissions; without this that's two full
+// Notion round trips back to back. TTL is deliberately short so a revoked PIN
+// stops working within a minute, and set/clear/change drop the entry outright.
+const rosterCache = new Map<string, { pageId: string; pin: string; ts: number }>();
+const ROSTER_TTL_MS = 60 * 1000;
+
+function dropCached(name: string) {
+  rosterCache.delete(nkey(name));
+}
+
 async function findRosterByName(
   name: string
 ): Promise<{ pageId: string; pin: string } | null> {
   const target = nkey(name);
   if (!target) return null;
+
+  const hit = rosterCache.get(target);
+  if (hit && Date.now() - hit.ts < ROSTER_TTL_MS)
+    return { pageId: hit.pageId, pin: hit.pin };
+
+  const remember = (pageId: string, pin: string) => {
+    rosterCache.set(target, { pageId, pin, ts: Date.now() });
+    return { pageId, pin };
+  };
+
+  // Fast path: ask Notion for just this one row instead of pulling the whole
+  // roster. Exact title match, so it misses on case or accent differences —
+  // which is what the full scan below is still here for.
+  try {
+    const res: any = await notion.databases.query({
+      database_id: CREW_ROSTER_DB_ID,
+      filter: { property: ROSTER_PROPS.name, title: { equals: name.trim() } },
+      page_size: 5,
+    });
+    for (const pg of res.results) {
+      const n = rt(pg.properties?.[ROSTER_PROPS.name]);
+      if (nkey(n) === target)
+        return remember(pg.id, rt(pg.properties?.[PIN_PROP]).trim());
+    }
+  } catch {
+    /* fall through to the scan */
+  }
+
   let cursor: string | undefined;
   do {
     const res: any = await notion.databases.query({
@@ -67,9 +106,8 @@ async function findRosterByName(
     });
     for (const pg of res.results) {
       const n = rt(pg.properties?.[ROSTER_PROPS.name]);
-      if (nkey(n) === target) {
-        return { pageId: pg.id, pin: rt(pg.properties?.[PIN_PROP]).trim() };
-      }
+      if (nkey(n) === target)
+        return remember(pg.id, rt(pg.properties?.[PIN_PROP]).trim());
     }
     cursor = res.has_more ? res.next_cursor : undefined;
   } while (cursor);
@@ -274,6 +312,7 @@ export async function POST(req: NextRequest) {
         page_id: rec.pageId,
         properties: { [PIN_PROP]: { rich_text: [{ text: { content: pin } }] } },
       });
+      dropCached(name || "");
       return NextResponse.json({ ok: true });
     }
 
@@ -288,6 +327,7 @@ export async function POST(req: NextRequest) {
         page_id: rec.pageId,
         properties: { [PIN_PROP]: { rich_text: [] } },
       });
+      dropCached(name || "");
       return NextResponse.json({ ok: true });
     }
 
@@ -306,6 +346,7 @@ export async function POST(req: NextRequest) {
         page_id: rec.pageId,
         properties: { [PIN_PROP]: { rich_text: [{ text: { content: newPin } }] } },
       });
+      dropCached(name || "");
       return NextResponse.json({ ok: true });
     }
 

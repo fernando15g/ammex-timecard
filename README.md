@@ -76,3 +76,4 @@ Then open http://localhost:3000
 
 If a property name ever changes in Notion, update it in `lib/notion.ts`
 so the code keeps matching.
+

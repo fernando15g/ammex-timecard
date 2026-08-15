@@ -106,6 +106,11 @@ export default function Page() {
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [adminPin, setAdminPin] = useState("");
   const [adminPinError, setAdminPinError] = useState(false);
+  // Foreman self-service: unlocked by the selected foreman's personal PIN
+  // (server-validated). Grants ONLY the read-only "My submissions" view.
+  const [foremanUnlocked, setForemanUnlocked] = useState(false);
+  const [foremanPin, setForemanPin] = useState("");
+  const [showMySubs, setShowMySubs] = useState(false);
   const [query, setQuery] = useState("");
 
   const [screen, setScreen] = useState<"form" | "review">("form");
@@ -368,6 +373,9 @@ export default function Page() {
   function chooseForeman(name: string) {
     const prev = foreman;
     setForeman(name);
+    // Switching identity revokes any foreman-PIN unlock from the previous one.
+    setForemanUnlocked(false);
+    setForemanPin("");
     try {
       localStorage.setItem(FOREMAN_KEY, name);
     } catch {}
@@ -975,7 +983,23 @@ export default function Page() {
             className="absolute top-16 left-4 bg-graphite rounded-2xl shadow-xl overflow-hidden min-w-[220px] border border-line"
             onClick={(e) => e.stopPropagation()}
           >
-            {!adminUnlocked ? (
+            {foremanUnlocked && !adminUnlocked ? (
+              // Foreman menu — their PIN opens ONLY this.
+              <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowMySubs(true);
+                }}
+                className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 3v4a1 1 0 0 0 1 1h4" />
+                  <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z" />
+                  <path d="M9 13h6M9 17h3" />
+                </svg>
+                {lang === "es" ? "Mis tarjetas" : "My submissions"}
+              </button>
+            ) : !adminUnlocked ? (
               // PIN entry — gates the whole admin area.
               <div className="p-5">
                 <div className="text-concrete font-semibold mb-1">{tr.enterPin}</div>
@@ -993,6 +1017,28 @@ export default function Page() {
                       if (digits === "5314") {
                         setAdminUnlocked(true);
                         setAdminPinError(false);
+                      } else if (foreman) {
+                        // Not the owner PIN — try it as the selected foreman's
+                        // personal PIN (validated server-side). Opens ONLY the
+                        // foreman's read-only "My submissions" menu.
+                        fetch(
+                          `/api/foreman?action=verify&name=${encodeURIComponent(foreman)}&pin=${digits}`
+                        )
+                          .then((r) => r.json())
+                          .then((d) => {
+                            if (d?.ok) {
+                              setForemanPin(digits);
+                              setForemanUnlocked(true);
+                              setAdminPinError(false);
+                            } else {
+                              setAdminPinError(true);
+                              setTimeout(() => setAdminPin(""), 350);
+                            }
+                          })
+                          .catch(() => {
+                            setAdminPinError(true);
+                            setTimeout(() => setAdminPin(""), 350);
+                          });
                       } else {
                         setAdminPinError(true);
                         setTimeout(() => setAdminPin(""), 350);
@@ -1119,6 +1165,14 @@ export default function Page() {
 
       {/* Crew roster management (owner-only) */}
       {showRoster && <RosterPanel onClose={() => setShowRoster(false)} />}
+      {showMySubs && foremanUnlocked && (
+        <MySubmissionsPanel
+          foreman={foreman}
+          pin={foremanPin}
+          lang={lang}
+          onClose={() => setShowMySubs(false)}
+        />
+      )}
     </div>
   );
 }
@@ -8067,6 +8121,250 @@ function CoverageAddModal({
   );
 }
 
+// ---------- Foreman self-service: My submissions (READ-ONLY) ----------
+// PIN-gated view of the selected foreman's OWN submitted cards. Every fetch is
+// validated server-side (name + PIN) and scoped to that foreman — nothing here
+// can read another foreman's data or any owner section. Read-only by design:
+// corrections go to the owner in Reconcile. Includes self-serve PIN change.
+function MySubmissionsPanel({
+  foreman,
+  pin,
+  lang,
+  onClose,
+}: {
+  foreman: string;
+  pin: string;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  type Day = { date: string; jobs: { job: string; total: number; crew: { worker: string; hours: number }[] }[] };
+  const [days, setDays] = useState<Day[]>([]);
+  const [grand, setGrand] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [range, setRange] = useState<"this" | "last" | "custom">("this");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
+  const [showPinChange, setShowPinChange] = useState(false);
+
+  // Week math: Mon–Sun of the current week (Phoenix-local, no UTC parsing).
+  function weekBounds(offsetWeeks: number): { start: string; end: string } {
+    const now = new Date();
+    const local = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = local.getDay(); // 0=Sun
+    const monOffset = dow === 0 ? -6 : 1 - dow;
+    const mon = new Date(local);
+    mon.setDate(local.getDate() + monOffset + offsetWeeks * 7);
+    const sun = new Date(mon);
+    sun.setDate(mon.getDate() + 6);
+    const iso = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    return { start: iso(mon), end: iso(sun) };
+  }
+
+  const bounds =
+    range === "this" ? weekBounds(0)
+    : range === "last" ? weekBounds(-1)
+    : { start: customStart, end: customEnd };
+
+  useEffect(() => {
+    if (!bounds.start || !bounds.end) { setDays([]); setGrand(0); return; }
+    setLoading(true);
+    setErr("");
+    fetch(
+      `/api/foreman?action=submissions&name=${encodeURIComponent(foreman)}&pin=${pin}&start=${bounds.start}&end=${bounds.end}`
+    )
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) { setDays(d.days || []); setGrand(d.grandTotal || 0); }
+        else setErr(d?.error || "Couldn't load.");
+        setLoading(false);
+      })
+      .catch(() => { setErr("Couldn't load."); setLoading(false); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range, customStart, customEnd]);
+
+  const es = lang === "es";
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-1">
+          <button
+            onClick={() => setShowPinChange(true)}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            PIN
+          </button>
+          <div className="font-bold text-concrete text-lg">{es ? "Mis tarjetas" : "My submissions"}</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            {es ? "Cerrar" : "Close"}
+          </button>
+        </div>
+        <div className="text-rebar text-xs text-center mb-4">{foreman} · {es ? "solo lectura" : "read-only"}</div>
+
+        {/* Range pills */}
+        <div className="flex gap-1.5 bg-graphite border border-line rounded-full p-1 mb-3">
+          {([
+            ["this", es ? "Esta semana" : "This week"],
+            ["last", es ? "Semana pasada" : "Last week"],
+            ["custom", es ? "Fechas" : "Custom"],
+          ] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => setRange(k)}
+              className={`flex-1 rounded-full py-2 text-xs font-bold ${range === k ? "bg-safety text-steel" : "text-rebar"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {range === "custom" && (
+          <div className="flex gap-2 mb-3">
+            <input
+              type="date"
+              value={customStart}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+            <input
+              type="date"
+              value={customEnd}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="flex-1 bg-graphite border border-line rounded-xl h-11 px-3 text-concrete text-sm"
+            />
+          </div>
+        )}
+
+        {loading && <div className="text-rebar text-sm px-1 py-2">{es ? "Cargando…" : "Loading…"}</div>}
+        {!loading && err && <div className="text-sm px-1 py-2" style={{ color: "#e5533c" }}>{err}</div>}
+        {!loading && !err && days.length === 0 && (
+          <div className="text-rebar text-sm px-1 py-2">
+            {es ? "No hay tarjetas en este rango." : "No submissions in this range."}
+          </div>
+        )}
+
+        {!loading && !err && days.length > 0 && (
+          <div className="text-rebar text-xs px-1 mb-3">
+            {es ? "Total del rango" : "Range total"}: <b className="text-concrete">{grand}h</b>
+          </div>
+        )}
+
+        {!loading && !err &&
+          days.map((d) => (
+            <div key={d.date} className="mb-4">
+              <div className="text-safety text-xs font-bold uppercase tracking-wider px-1 mb-1.5">
+                {prettyDate(d.date, lang)}
+              </div>
+              {d.jobs.map((j, ji) => (
+                <div key={ji} className="bg-graphite border border-line rounded-2xl p-4 mb-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-concrete font-bold text-[15px] truncate">{j.job}</div>
+                    <div className="text-concrete text-sm font-extrabold shrink-0 ml-2">{j.total}h</div>
+                  </div>
+                  <div className="space-y-1">
+                    {j.crew.map((c, ci) => (
+                      <div key={ci} className="flex items-center justify-between text-sm">
+                        <span className="text-concrete min-w-0 truncate">{c.worker}</span>
+                        <span className="text-rebar shrink-0 ml-2">{c.hours}h</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+
+        <div className="text-rebar text-[11px] px-1 mt-2 leading-relaxed">
+          {es
+            ? "Si algo está mal, avísale a Fernando para corregirlo."
+            : "If something looks wrong, tell Fernando so he can fix it."}
+        </div>
+      </div>
+
+      {showPinChange && (
+        <ForemanPinChangeModal
+          foreman={foreman}
+          currentPin={pin}
+          lang={lang}
+          onClose={() => setShowPinChange(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Foreman changes their own PIN (old PIN validated server-side).
+function ForemanPinChangeModal({
+  foreman,
+  currentPin,
+  lang,
+  onClose,
+}: {
+  foreman: string;
+  currentPin: string;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  const [newPin, setNewPin] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const es = lang === "es";
+
+  async function save() {
+    if (!/^\d{4}$/.test(newPin)) { setMsg(es ? "El PIN debe ser 4 números." : "PIN must be 4 digits."); return; }
+    setBusy(true);
+    setMsg("");
+    const res = await fetch("/api/foreman", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "change_pin", name: foreman, oldPin: currentPin, newPin }),
+    })
+      .then((r) => r.json())
+      .catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) {
+      setMsg(es ? "PIN cambiado. Úsalo la próxima vez." : "PIN changed. Use it next time.");
+      setTimeout(onClose, 1600);
+    } else {
+      setMsg(res?.error || (es ? "No se pudo cambiar." : "Couldn't change it."));
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold text-lg mb-1">{es ? "Cambiar PIN" : "Change PIN"}</div>
+        <div className="text-rebar text-xs mb-4">{foreman}</div>
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          {es ? "Nuevo PIN (4 números)" : "New PIN (4 digits)"}
+        </label>
+        <input
+          type="tel"
+          inputMode="numeric"
+          autoFocus
+          value={newPin}
+          onChange={(e) => setNewPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
+          placeholder="••••"
+          className="w-full bg-steel border border-line rounded-xl h-12 px-4 text-concrete text-center tracking-[0.5em] text-xl mb-3"
+        />
+        {msg && <div className="text-xs mb-3" style={{ color: msg.includes("hang") || msg.toLowerCase().includes("chang") ? "#4a9e63" : "#e0a63b" }}>{msg}</div>}
+        <div className="flex gap-2">
+          <button onClick={onClose} disabled={busy} className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-50">
+            {es ? "Cancelar" : "Cancel"}
+          </button>
+          <button onClick={save} disabled={busy || newPin.length !== 4} className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-50">
+            {busy ? "…" : es ? "Guardar" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Crew Roster management (owner-only) ----------
 // Writes to the same Crew Roster DB the owner platform reads. Add / edit /
 // deactivate only — no schema changes. Deactivating removes a worker from the
@@ -8289,6 +8587,25 @@ function RosterEditModal({
   const [role, setRole] = useState(person?.role || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // Access PIN (foreman self-service). Owner-set; validated server-side.
+  const [pinInput, setPinInput] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinMsg, setPinMsg] = useState("");
+
+  async function savePin() {
+    setPinBusy(true);
+    setPinMsg("");
+    const res = await fetch("/api/foreman", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "set_pin", ownerPin: "5314", name: person!.name, pin: pinInput }),
+    })
+      .then((r) => r.json())
+      .catch(() => ({ ok: false }));
+    setPinBusy(false);
+    if (res?.ok) { setPinMsg("PIN set."); setPinInput(""); }
+    else setPinMsg(res?.error || "Couldn't set the PIN.");
+  }
 
   async function save() {
     if (!name.trim()) { setErr("Name is required."); return; }
@@ -8328,6 +8645,44 @@ function RosterEditModal({
           className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
         />
         {err && <div className="text-sm mb-3" style={{ color: "#e5533c" }}>{err}</div>}
+
+        {isEdit && (
+          <div className="mb-4 pt-3" style={{ borderTop: "1px solid #39414c" }}>
+            <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+              Access PIN{" "}
+              <span className="text-rebar font-normal normal-case">
+                (4 digits — lets this foreman open their read-only "My submissions")
+              </span>
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="tel"
+                inputMode="numeric"
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value.replace(/\D/g, "").slice(0, 4))}
+                placeholder="••••"
+                className="flex-1 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center tracking-[0.4em]"
+              />
+              <button
+                onClick={savePin}
+                disabled={pinBusy || pinInput.length !== 4}
+                className="bg-steel border border-line text-concrete rounded-xl px-4 font-bold text-sm disabled:opacity-40"
+              >
+                {pinBusy ? "…" : "Set PIN"}
+              </button>
+            </div>
+            {pinMsg && (
+              <div className="text-xs mt-2" style={{ color: pinMsg.startsWith("PIN") ? "#4a9e63" : "#e5533c" }}>
+                {pinMsg}
+              </div>
+            )}
+            <div className="text-rebar text-[11px] mt-1.5 leading-relaxed">
+              Setting a new PIN replaces the old one (that's the reset). They can change it
+              themselves once inside.
+            </div>
+          </div>
+        )}
+
         <div className="flex gap-2">
           <button
             onClick={onClose}

@@ -8347,7 +8347,13 @@ function ForemanPinChangeModal({
     <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-5">
       <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
         <div className="text-concrete font-bold text-lg mb-1">{es ? "Cambiar PIN" : "Change PIN"}</div>
-        <div className="text-rebar text-xs mb-4">{foreman}</div>
+        <div className="text-rebar text-xs mb-3">{foreman}</div>
+        <div className="bg-steel border border-line rounded-xl px-3 py-2 mb-4 flex items-center justify-between">
+          <span className="text-rebar text-xs font-bold uppercase tracking-wide">
+            {es ? "PIN actual" : "Current PIN"}
+          </span>
+          <span className="text-concrete font-bold tracking-[0.3em]">{currentPin}</span>
+        </div>
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
           {es ? "Nuevo PIN (4 números)" : "New PIN (4 digits)"}
         </label>
@@ -8379,7 +8385,7 @@ function ForemanPinChangeModal({
 // deactivate only — no schema changes. Deactivating removes a worker from the
 // timesheet crew picker (Active=false); it's a reversible checkbox, never a
 // delete, so history stays intact.
-type RosterPerson = { id: string; name: string; role: string; active: boolean; status: string };
+type RosterPerson = { id: string; name: string; role: string; active: boolean; status: string; pin: string };
 
 function RosterPanel({ onClose }: { onClose: () => void }) {
   const [people, setPeople] = useState<RosterPerson[]>([]);
@@ -8396,7 +8402,7 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
 
   function load() {
     setLoading(true);
-    fetch("/api/roster-manage")
+    fetch("/api/roster-manage?ownerPin=5314")
       .then((r) => r.json())
       .then((d) => {
         setPeople(d.people || []);
@@ -8416,7 +8422,7 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
     const res = await fetch("/api/roster-manage", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ op: "set_active", id: p.id, active }),
+      body: JSON.stringify({ ownerPin: "5314", op: "set_active", id: p.id, active }),
     }).then((r) => r.json()).catch(() => null);
     if (!res?.ok) {
       setPeople((cur) => cur.map((x) => (x.id === p.id ? { ...x, active: !active } : x))); // rollback
@@ -8563,6 +8569,14 @@ function RosterRow({
         <div className="text-rebar text-xs mt-0.5">
           {p.role || "—"}
           {p.status ? ` · ${p.status}` : ""}
+          {p.pin ? (
+            <>
+              {" · "}
+              <span className="text-concrete font-bold">PIN: {p.pin}</span>
+            </>
+          ) : (
+            " · PIN: not set"
+          )}
         </div>
       </div>
       <button
@@ -8600,6 +8614,9 @@ function RosterEditModal({
   const [pinInput, setPinInput] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
   const [pinMsg, setPinMsg] = useState("");
+  // Mirrors the PIN currently stored on the roster so the label stays truthful
+  // after a set or a clear, without reloading the whole roster.
+  const [currentPin, setCurrentPin] = useState(person?.pin || "");
 
   async function savePin() {
     setPinBusy(true);
@@ -8612,16 +8629,33 @@ function RosterEditModal({
       .then((r) => r.json())
       .catch(() => ({ ok: false }));
     setPinBusy(false);
-    if (res?.ok) { setPinMsg("PIN set."); setPinInput(""); }
+    if (res?.ok) { setPinMsg("PIN set."); setPinInput(""); setCurrentPin(pinInput); }
     else setPinMsg(res?.error || "Couldn't set the PIN.");
+  }
+
+  // Revoke access. Clears the PIN on the roster; the foreman can no longer open
+  // "My submissions" until a new one is issued.
+  async function clearPin() {
+    setPinBusy(true);
+    setPinMsg("");
+    const res = await fetch("/api/foreman", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "clear_pin", ownerPin: "5314", name: person!.name }),
+    })
+      .then((r) => r.json())
+      .catch(() => ({ ok: false }));
+    setPinBusy(false);
+    if (res?.ok) { setPinMsg("PIN cleared."); setPinInput(""); setCurrentPin(""); }
+    else setPinMsg(res?.error || "Couldn't clear the PIN.");
   }
 
   async function save() {
     if (!name.trim()) { setErr("Name is required."); return; }
     setBusy(true); setErr("");
     const payload = isEdit
-      ? { op: "edit", id: person!.id, name: name.trim(), role: role.trim() }
-      : { op: "add", name: name.trim(), role: role.trim(), active: true };
+      ? { ownerPin: "5314", op: "edit", id: person!.id, name: name.trim(), role: role.trim() }
+      : { ownerPin: "5314", op: "add", name: name.trim(), role: role.trim(), active: true };
     const res = await fetch("/api/roster-manage", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -8682,6 +8716,15 @@ function RosterEditModal({
                 (4 digits — lets this foreman open their read-only "My submissions")
               </span>
             </label>
+            <div className="text-xs mb-2">
+              {currentPin ? (
+                <span className="text-concrete">
+                  Current PIN: <b className="tracking-[0.2em]">{currentPin}</b>
+                </span>
+              ) : (
+                <span className="text-rebar">No PIN issued — this foreman has no access yet.</span>
+              )}
+            </div>
             <input
               type="tel"
               inputMode="numeric"
@@ -8690,13 +8733,25 @@ function RosterEditModal({
               placeholder="••••"
               className="w-full min-w-0 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-center tracking-[0.4em]"
             />
-            <button
-              onClick={savePin}
-              disabled={pinBusy || pinInput.length !== 4}
-              className="w-full mt-2 bg-steel border border-line text-concrete rounded-xl h-11 font-bold text-sm disabled:opacity-40"
-            >
-              {pinBusy ? "…" : "Set PIN"}
-            </button>
+            <div className="flex flex-col gap-2 mt-2">
+              <button
+                onClick={savePin}
+                disabled={pinBusy || pinInput.length !== 4}
+                className="w-full bg-steel border border-line text-concrete rounded-xl h-11 font-bold text-sm disabled:opacity-40"
+              >
+                {pinBusy ? "…" : currentPin ? "Replace PIN" : "Set PIN"}
+              </button>
+              {currentPin && (
+                <button
+                  onClick={clearPin}
+                  disabled={pinBusy}
+                  className="w-full rounded-xl h-11 font-bold text-sm border disabled:opacity-40"
+                  style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                >
+                  Clear PIN (revoke access)
+                </button>
+              )}
+            </div>
             {pinMsg && (
               <div className="text-xs mt-2" style={{ color: pinMsg.startsWith("PIN") ? "#4a9e63" : "#e5533c" }}>
                 {pinMsg}

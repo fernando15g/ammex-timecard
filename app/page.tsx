@@ -8185,9 +8185,12 @@ function SearchPick({
 }) {
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
+  // Picked items drop out of the list entirely — they're already shown as chips
+  // above, and repeating them wastes rows in a window only three tall.
+  const available = options.filter((o) => !selectedKeys.includes(o.key));
   const matches = needle
-    ? options.filter((o) => o.label.toLowerCase().includes(needle))
-    : options;
+    ? available.filter((o) => o.label.toLowerCase().includes(needle))
+    : available;
 
   return (
     <div className="mb-3">
@@ -8231,27 +8234,25 @@ function SearchPick({
         {/* ~3 rows tall, then scrolls — the search box does the real work */}
         <div className="max-h-[141px] overflow-y-auto overscroll-contain">
           {matches.length === 0 ? (
-            <div className="px-4 py-3 text-rebar text-sm">No matches.</div>
+            <div className="px-4 py-3 text-rebar text-sm">
+              {needle ? "No matches." : "Nothing left to pick."}
+            </div>
           ) : (
-            matches.map((o) => {
-              const on = selectedKeys.includes(o.key);
-              return (
-                <button
-                  key={o.key}
-                  onClick={() => onPick(o.key)}
-                  className={`w-full text-left px-4 py-3 border-b border-line/30 last:border-0 flex items-center justify-between gap-2 ${
-                    on ? "bg-steel text-concrete font-bold" : "text-concrete active:bg-steel"
-                  }`}
-                >
-                  <span className="truncate">{o.label}</span>
-                  {on && (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e8801a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
-                      <path d="M20 6L9 17l-5-5" />
-                    </svg>
-                  )}
-                </button>
-              );
-            })
+            matches.map((o) => (
+              <button
+                key={o.key}
+                onClick={() => {
+                  onPick(o.key);
+                  // Clear the search so the next name can be typed straight
+                  // away — picking a whole crew shouldn't mean deleting the
+                  // last search by hand between each one.
+                  setQ("");
+                }}
+                className="w-full text-left px-4 py-3 border-b border-line/30 last:border-0 text-concrete active:bg-steel truncate"
+              >
+                {o.label}
+              </button>
+            ))
           )}
         </div>
       </div>

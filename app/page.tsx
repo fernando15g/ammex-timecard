@@ -8150,8 +8150,6 @@ function MySubmissionsPanel({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [range, setRange] = useState<"this" | "last" | "custom">("this");
-  const [customStart, setCustomStart] = useState("");
-  const [customEnd, setCustomEnd] = useState("");
   const [showPinChange, setShowPinChange] = useState(false);
 
   // Week math: Mon–Sun of the current week (Phoenix-local, no UTC parsing).
@@ -8168,6 +8166,11 @@ function MySubmissionsPanel({
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     return { start: iso(mon), end: iso(sun) };
   }
+
+  // Custom starts prefilled with this week so the fields read as pickable dates
+  // instead of empty boxes — tap either one to widen or move the range.
+  const [customStart, setCustomStart] = useState(() => weekBounds(0).start);
+  const [customEnd, setCustomEnd] = useState(() => weekBounds(0).end);
 
   const bounds =
     range === "this" ? weekBounds(0)
@@ -8267,7 +8270,7 @@ function MySubmissionsPanel({
               </div>
               {d.jobs.map((j, ji) => (
                 <div key={ji} className="bg-graphite border border-line rounded-2xl p-4 mb-2">
-                  <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
                     <div className="text-concrete font-bold text-[15px] truncate">{j.job}</div>
                     <div className="text-concrete text-sm font-extrabold shrink-0 ml-2">{j.total}h</div>
                   </div>

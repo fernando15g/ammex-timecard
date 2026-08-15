@@ -8172,14 +8172,14 @@ function SearchPick({
   label,
   hint,
   placeholder,
-  selectedKey,
+  selectedKeys,
   options,
   onPick,
 }: {
   label: string;
   hint?: string;
   placeholder: string;
-  selectedKey: string;
+  selectedKeys: string[]; // one entry for single-pick fields, many for multi
   options: { key: string; label: string }[];
   onPick: (key: string) => void;
 }) {
@@ -8195,6 +8195,31 @@ function SearchPick({
         {label}
         {hint ? <span className="font-normal normal-case text-rebar"> {hint}</span> : null}
       </label>
+
+      {/* Picked names ride at the top so they stay visible — the list below is
+          only three rows tall, so a selection made and scrolled past would
+          otherwise be invisible. Tap a chip to remove it. */}
+      {selectedKeys.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-2">
+          {selectedKeys.map((k) => {
+            const opt = options.find((o) => o.key === k);
+            return (
+              <button
+                key={k}
+                onClick={() => onPick(k)}
+                className="flex items-center gap-1.5 bg-steel border border-line rounded-full pl-3 pr-2 py-1.5 text-concrete text-sm font-bold max-w-full"
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#e8801a" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+                <span className="truncate">{opt?.label || k}</span>
+                <span className="text-rebar text-base leading-none pl-0.5">×</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="bg-graphite rounded-2xl border border-line overflow-hidden">
         <input
           type="text"
@@ -8203,13 +8228,13 @@ function SearchPick({
           placeholder={placeholder}
           className="w-full bg-transparent px-4 py-3.5 text-concrete placeholder:text-rebar/60 outline-none border-b border-line/60"
         />
-        {/* ~6 rows tall, then scrolls */}
-        <div className="max-h-[282px] overflow-y-auto overscroll-contain">
+        {/* ~3 rows tall, then scrolls — the search box does the real work */}
+        <div className="max-h-[141px] overflow-y-auto overscroll-contain">
           {matches.length === 0 ? (
             <div className="px-4 py-3 text-rebar text-sm">No matches.</div>
           ) : (
             matches.map((o) => {
-              const on = o.key === selectedKey;
+              const on = selectedKeys.includes(o.key);
               return (
                 <button
                   key={o.key}
@@ -8278,7 +8303,7 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [worker, setWorker] = useState("");
+  const [workers, setWorkers] = useState<string[]>([]);
   const [dateISO, setDateISO] = useState("");
   const [projectId, setProjectId] = useState("");
   const [hours, setHours] = useState("");
@@ -8308,34 +8333,46 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
     loadEntries(payWeek);
   }, [payWeek]);
 
+  function clearForm() {
+    setWorkers([]); setDateISO(""); setProjectId(""); setHours(""); setReason("");
+  }
+
   async function add() {
     const h = parseFloat(hours);
-    if (!worker) { setMsg("Pick a worker."); return; }
+    if (workers.length === 0) { setMsg("Pick at least one worker."); return; }
     if (!Number.isFinite(h) || h <= 0) { setMsg("Enter the hours he was shorted."); return; }
     setBusy(true);
     setMsg("");
     const proj = jobs.find((j) => j.id === projectId);
-    const res = await fetch("/api/short-pay", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ownerPin: "5314",
-        op: "add",
-        worker,
-        dateISO: dateISO || undefined,
-        projectId: projectId || undefined,
-        jobText: proj?.name || "",
-        hours: h,
-        payWeek,
-        reason,
-      }),
-    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    // One row per selected worker. The hours entered apply to each of them —
+    // same job, same date, same shortfall.
+    let failed = 0;
+    for (const w of workers) {
+      const res = await fetch("/api/short-pay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ownerPin: "5314",
+          op: "add",
+          worker: w,
+          dateISO: dateISO || undefined,
+          projectId: projectId || undefined,
+          jobText: proj?.name || "",
+          hours: h,
+          payWeek,
+          reason,
+        }),
+      }).then((r) => r.json()).catch(() => ({ ok: false }));
+      if (!res?.ok) failed++;
+    }
     setBusy(false);
-    if (res?.ok) {
-      setMsg("Added.");
-      setWorker(""); setDateISO(""); setProjectId(""); setHours(""); setReason("");
-      loadEntries(payWeek);
-    } else setMsg(res?.error || "Couldn't save that entry.");
+    if (failed === 0) {
+      setMsg(workers.length > 1 ? `Added ${workers.length} entries.` : "Added.");
+      clearForm();
+    } else {
+      setMsg(`${failed} of ${workers.length} didn't save — check and retry.`);
+    }
+    loadEntries(payWeek);
   }
 
   async function remove(id: string) {
@@ -8406,9 +8443,14 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
           <SearchPick
             label="Worker"
             placeholder="Type a name…"
-            selectedKey={worker}
+            hint={workers.length > 1 ? `(${workers.length} selected)` : "(tap more than one if a whole crew was shorted)"}
+            selectedKeys={workers}
             options={roster.map((n) => ({ key: n, label: n }))}
-            onPick={(k) => setWorker(k === worker ? "" : k)}
+            onPick={(k) =>
+              setWorkers((list) =>
+                list.includes(k) ? list.filter((n) => n !== k) : [...list, k]
+              )
+            }
           />
 
           <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
@@ -8425,7 +8467,7 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
           <SearchPick
             label="Project"
             placeholder="Type a job name or code…"
-            selectedKey={projectId}
+            selectedKeys={projectId ? [projectId] : []}
             options={jobs.map((j) => ({
               key: j.id,
               label: j.jobId ? `${j.name} (${j.jobId})` : j.name,
@@ -8435,6 +8477,9 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
 
           <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
             Hours shorted
+            <span className="font-normal normal-case text-rebar">
+              {" "}(applies to each worker selected)
+            </span>
           </label>
           <input
             type="number"
@@ -8458,17 +8503,26 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
             className={`${fieldCls} mb-3`}
           />
 
-          <button
-            onClick={add}
-            disabled={busy}
-            className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
-          >
-            {busy ? "…" : "Add to pay week"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { clearForm(); setMsg(""); }}
+              disabled={busy}
+              className="shrink-0 bg-steel border border-line text-rebar rounded-xl px-4 py-3 font-bold disabled:opacity-40"
+            >
+              Clear
+            </button>
+            <button
+              onClick={add}
+              disabled={busy}
+              className="flex-1 min-w-0 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+            >
+              {busy ? "…" : workers.length > 1 ? `Add ${workers.length} entries` : "Add to pay week"}
+            </button>
+          </div>
           {msg && (
             <div
               className="text-xs mt-2 font-bold"
-              style={{ color: msg === "Added." ? "#4a9e63" : "#e5533c" }}
+              style={{ color: msg.startsWith("Added") ? "#4a9e63" : "#e5533c" }}
             >
               {msg}
             </div>

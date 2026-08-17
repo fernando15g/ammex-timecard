@@ -253,8 +253,19 @@ function attentionThreshold(dateISO: string): number {
 }
 
 // Roster rows a foreman created that the owner hasn't confirmed yet
-// Missing cards the owner has manually closed (logged with kind "Missing card").
-// Keyed by jobId|date so a closed card stays closed for that job+day.
+// Job+dates that should NOT raise a "missing card" flag. Two sources, both
+// keyed by jobId|date:
+//
+//   "Missing card"   — the owner manually closed the flag.
+//   "Job cancelled"  — the crew was stood down, so no card was ever owed.
+//
+// The cancellation path already writes Refs in this exact key format, which is
+// why nothing new has to be written here. Partial cancellations write
+// "jobId|date|partial" instead — some crew did work, so a card may still be
+// owed and that flag is left alone. The suffix means those keys simply never
+// match the lookup, so no extra filtering is needed.
+//
+// Reversing a cancellation archives its record, so the flag returns on its own.
 async function closedMissingKeys(startISO: string, endISO: string): Promise<Set<string>> {
   const out = new Set<string>();
   try {
@@ -264,7 +275,12 @@ async function closedMissingKeys(startISO: string, endISO: string): Promise<Set<
         database_id: RECON_LOG_DB_ID,
         filter: {
           and: [
-            { property: RECON_PROPS.kind, select: { equals: "Missing card" } },
+            {
+              or: [
+                { property: RECON_PROPS.kind, select: { equals: "Missing card" } },
+                { property: RECON_PROPS.kind, select: { equals: "Job cancelled" } },
+              ],
+            },
             { property: RECON_PROPS.date, date: { on_or_after: startISO } },
             { property: RECON_PROPS.date, date: { on_or_before: endISO } },
           ],

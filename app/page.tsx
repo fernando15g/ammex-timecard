@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Lang, t } from "@/lib/strings";
+import { supabase, authConfigured, isOwnerName, OWNER_FOREMAN } from "@/lib/supabase";
 
 // Locks the underlying page's scroll while a full-screen panel is open, so
 // touch scrolling can't grab the timesheet page behind Reports/Schedule/Review.
@@ -101,6 +102,12 @@ export default function Page() {
   const [showVisits, setShowVisits] = useState(false);
   const [showRoster, setShowRoster] = useState(false);
   const [showShortPay, setShowShortPay] = useState(false);
+  // Owner sign-in. `ownerEmail` non-empty means a live Supabase session exists.
+  // `ownerBypass` means the owner chose the PIN fallback because sign-in was
+  // unreachable — it lasts for this session only and is never persisted.
+  const [ownerEmail, setOwnerEmail] = useState("");
+  const [ownerBypass, setOwnerBypass] = useState(false);
+  const [pendingOwnerPick, setPendingOwnerPick] = useState("");
   const [showMenu, setShowMenu] = useState(false);
   // PIN gates the hamburger (admin area); unlock lasts the session so Reports
   // and Schedule share one entry.
@@ -371,6 +378,30 @@ export default function Page() {
     setWorkers((prev) => prev.map((w) => ({ ...w, hours })));
   }
 
+  // Restore an existing session on load so the owner isn't asked again after a
+  // hard close — Supabase keeps it in localStorage and refreshes it silently.
+  useEffect(() => {
+    const sb = supabase();
+    if (!sb) return;
+    sb.auth
+      .getSession()
+      .then(({ data }) => {
+        if (data.session?.user?.email) setOwnerEmail(data.session.user.email);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Selecting the owner's name requires a password; everyone else is unchanged.
+  function requestForeman(name: string) {
+    const needsAuth =
+      authConfigured && isOwnerName(name) && !ownerEmail && !ownerBypass;
+    if (needsAuth) {
+      setPendingOwnerPick(name);
+      return;
+    }
+    chooseForeman(name);
+  }
+
   function chooseForeman(name: string) {
     const prev = foreman;
     setForeman(name);
@@ -531,7 +562,7 @@ export default function Page() {
         tr={tr}
         lang={lang}
         setLang={setLang}
-        onPick={chooseForeman}
+        onPick={requestForeman}
         current={foreman}
         onCancel={foreman ? () => setShowForemanPicker(false) : undefined}
       />
@@ -1197,6 +1228,25 @@ export default function Page() {
 
       {/* Crew roster management (owner-only) */}
       {showRoster && <RosterPanel onClose={() => setShowRoster(false)} />}
+
+      {/* Owner sign-in — only ever raised by picking the owner's own name */}
+      {pendingOwnerPick && (
+        <OwnerSignIn
+          onSuccess={(email) => {
+            setOwnerEmail(email);
+            const name = pendingOwnerPick;
+            setPendingOwnerPick("");
+            chooseForeman(name);
+          }}
+          onCancel={() => setPendingOwnerPick("")}
+          onFallback={() => {
+            setOwnerBypass(true);
+            const name = pendingOwnerPick;
+            setPendingOwnerPick("");
+            chooseForeman(name);
+          }}
+        />
+      )}
 
       {/* Short pay (owner-only) */}
       {showShortPay && <ShortPayPanel onClose={() => setShowShortPay(false)} />}
@@ -8161,6 +8211,131 @@ function CoverageAddModal({
 // validated server-side (name + PIN) and scoped to that foreman — nothing here
 // can read another foreman's data or any owner section. Read-only by design:
 // corrections go to the owner in Reconcile. Includes self-serve PIN change.
+// Owner sign-in gate. Selecting the owner's name on the foreman screen is what
+// asks for a password — every other foreman is unaffected. Once through, he is
+// simply the selected foreman and the hamburger asks for his PIN exactly as it
+// does today, so nothing downstream changes.
+//
+// If Supabase can't be reached (paused free-tier project, outage, no signal)
+// the gate offers to continue with the PIN instead. That fallback is permanent
+// by design — a third-party outage must never take the app away from him.
+function OwnerSignIn({
+  onSuccess,
+  onCancel,
+  onFallback,
+}: {
+  onSuccess: (email: string) => void;
+  onCancel: () => void;
+  onFallback: () => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [unreachable, setUnreachable] = useState(false);
+
+  async function signIn() {
+    const sb = supabase();
+    if (!sb) {
+      onFallback();
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      const { data, error } = await sb.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      setBusy(false);
+      if (error) {
+        // Distinguish "wrong password" from "can't reach Supabase" — only the
+        // second one should offer the PIN fallback.
+        const msg = (error.message || "").toLowerCase();
+        if (msg.includes("fetch") || msg.includes("network") || msg.includes("failed")) {
+          setUnreachable(true);
+          setErr("Can't reach sign-in right now.");
+        } else {
+          setErr("That email or password didn't work.");
+        }
+        return;
+      }
+      onSuccess(data.user?.email || email.trim());
+    } catch {
+      setBusy(false);
+      setUnreachable(true);
+      setErr("Can't reach sign-in right now.");
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-black/70 flex items-end sm:items-center justify-center p-4">
+      <div className="bg-graphite border border-line rounded-2xl p-5 w-full max-w-sm">
+        <div className="text-concrete font-bold text-lg mb-1">Sign in</div>
+        <div className="text-rebar text-xs mb-4">
+          {OWNER_FOREMAN} — owner access
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Email
+        </label>
+        <input
+          type="email"
+          inputMode="email"
+          autoCapitalize="none"
+          autoCorrect="off"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Password
+        </label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") signIn();
+          }}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        {err && (
+          <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>
+            {err}
+          </div>
+        )}
+
+        <button
+          onClick={signIn}
+          disabled={busy || !email.trim() || !password}
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40 mb-2"
+        >
+          {busy ? "…" : "Sign in"}
+        </button>
+
+        {unreachable && (
+          <button
+            onClick={onFallback}
+            className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold mb-2"
+          >
+            Continue with PIN instead
+          </button>
+        )}
+
+        <button
+          onClick={onCancel}
+          className="w-full text-rebar text-sm font-bold py-2"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // Search-and-scroll picker, same shape as the crew add box on the home screen:
 // search field on top, scrollable list underneath sized to about six rows. The
 // list stays visible after a pick so changing your mind is one tap, and the

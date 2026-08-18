@@ -555,17 +555,41 @@ export default function Page() {
 
   // ---- Foreman picker (first-run / change) ----
   if (showForemanPicker) {
+    // The picker is an early return, so the sign-in sheet has to be rendered
+    // here as well — otherwise picking the owner's name sets the pending state
+    // but the sheet stays invisible until the picker is dismissed.
     return (
-      <ForemanPicker
-        roster={foremen}
-        rosterLoaded={rosterLoaded}
-        tr={tr}
-        lang={lang}
-        setLang={setLang}
-        onPick={requestForeman}
-        current={foreman}
-        onCancel={foreman ? () => setShowForemanPicker(false) : undefined}
-      />
+      <>
+        <ForemanPicker
+          roster={foremen}
+          rosterLoaded={rosterLoaded}
+          tr={tr}
+          lang={lang}
+          setLang={setLang}
+          onPick={requestForeman}
+          current={foreman}
+          onCancel={foreman ? () => setShowForemanPicker(false) : undefined}
+        />
+        {pendingOwnerPick && (
+          <OwnerSignIn
+            onSuccess={(email) => {
+              setOwnerEmail(email);
+              const name = pendingOwnerPick;
+              setPendingOwnerPick("");
+              chooseForeman(name);
+              setShowForemanPicker(false);
+            }}
+            onCancel={() => setPendingOwnerPick("")}
+            onFallback={() => {
+              setOwnerBypass(true);
+              const name = pendingOwnerPick;
+              setPendingOwnerPick("");
+              chooseForeman(name);
+              setShowForemanPicker(false);
+            }}
+          />
+        )}
+      </>
     );
   }
 
@@ -8269,7 +8293,7 @@ function OwnerSignIn({
   }
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/70 flex items-end sm:items-center justify-center p-4">
+    <div className="fixed inset-0 z-[95] bg-black/70 flex items-end sm:items-center justify-center p-4">
       <div className="bg-graphite border border-line rounded-2xl p-5 w-full max-w-sm">
         <div className="text-concrete font-bold text-lg mb-1">Sign in</div>
         <div className="text-rebar text-xs mb-4">

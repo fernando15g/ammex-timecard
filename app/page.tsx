@@ -386,9 +386,24 @@ export default function Page() {
     sb.auth
       .getSession()
       .then(({ data }) => {
-        if (data.session?.user?.email) setOwnerEmail(data.session.user.email);
+        const email = data.session?.user?.email || "";
+        if (email) {
+          setOwnerEmail(email);
+          return;
+        }
+        // No session. The owner's name is remembered on this device, so the
+        // app would otherwise open with him already selected and never ask —
+        // the password would protect nothing on his own phone. Raise the sheet
+        // at startup so a saved selection is gated exactly like a fresh tap.
+        try {
+          const saved = localStorage.getItem(FOREMAN_KEY) || "";
+          if (saved && isOwnerName(saved)) setPendingOwnerPick(saved);
+        } catch {}
       })
-      .catch(() => {});
+      .catch(() => {
+        // Supabase unreachable — leave the saved selection alone. The PIN
+        // fallback stands; an outage must never lock him out.
+      });
   }, []);
 
   // Selecting the owner's name requires a password; everyone else is unchanged.
@@ -8293,7 +8308,7 @@ function OwnerSignIn({
   }
 
   return (
-    <div className="fixed inset-0 z-[95] bg-black/70 flex items-end sm:items-center justify-center p-4">
+    <div className="fixed inset-0 z-[95] bg-black/70 flex items-center justify-center p-4">
       <div className="bg-graphite border border-line rounded-2xl p-5 w-full max-w-sm">
         <div className="text-concrete font-bold text-lg mb-1">Sign in</div>
         <div className="text-rebar text-xs mb-4">

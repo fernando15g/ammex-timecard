@@ -88,3 +88,23 @@ export const RECON_PROPS = {
 };
 
 export const PAYROLL_RECIPIENT = "fernando@ammexrebar.com";
+
+// Wages — owner-only wage increase history. Deliberately NOT the Crew Roster:
+// that database has many readers (including Ammex OS) and wage data shouldn't
+// sit behind the same permissions. Append-only; the current rate for a worker
+// is the most recent non-voided row. Worker is matched by name, the same way
+// timecards are — no relation, so nothing appears on the roster side.
+export const WAGES_DB_ID =
+  process.env.WAGES_DB_ID || "3c09aeba538380ffa4f6d3f49525fefe";
+
+export const WAGE_PROPS = {
+  worker: "Worker",
+  effective: "Effective date",
+  previousRate: "Previous rate",
+  newRate: "New rate",
+  rateUnit: "Rate unit",
+  reason: "Reason",
+  issued: "Date issued",
+  voided: "Voided",
+  voidNote: "Void note",
+};

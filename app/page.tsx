@@ -102,6 +102,7 @@ export default function Page() {
   const [showVisits, setShowVisits] = useState(false);
   const [showRoster, setShowRoster] = useState(false);
   const [showShortPay, setShowShortPay] = useState(false);
+  const [showWages, setShowWages] = useState(false);
   // Owner sign-in. `ownerEmail` non-empty means a live Supabase session exists.
   // `ownerBypass` means the owner chose the PIN fallback because sign-in was
   // unreachable — it lasts for this session only and is never persisted.
@@ -1198,6 +1199,19 @@ export default function Page() {
                 <button
                   onClick={() => {
                     setShowMenu(false);
+                    setShowWages(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 17l6-6 4 4 8-8" />
+                    <path d="M15 7h6v6" />
+                  </svg>
+                  Wages
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
                     setShowShortPay(true);
                   }}
                   className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
@@ -1289,6 +1303,9 @@ export default function Page() {
 
       {/* Short pay (owner-only) */}
       {showShortPay && <ShortPayPanel onClose={() => setShowShortPay(false)} />}
+
+      {/* Wages (owner-only, behind Supabase auth) */}
+      {showWages && <WagesPanel onClose={() => setShowWages(false)} />}
       {showMySubs && foremanUnlocked && (
         <MySubmissionsPanel
           foreman={foreman}
@@ -8469,6 +8486,330 @@ function SearchPick({
             ))
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Wages — owner-only wage increase notices. Sits behind Supabase auth with NO
+// PIN fallback: every request carries the access token and the server verifies
+// it. If sign-in is unavailable this section is unavailable, which is the right
+// trade-off for wage data.
+function WagesPanel({ onClose }: { onClose: () => void }) {
+  type Current = { worker: string; rate: number; rateUnit: string; effectiveISO: string };
+  type Hist = {
+    id: string;
+    worker: string;
+    effectiveISO: string;
+    previousRate: number | null;
+    newRate: number;
+    rateUnit: string;
+    reason: string;
+    issuedISO: string;
+  };
+
+  function todayISO(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+  function pretty(iso: string): string {
+    if (!iso) return "";
+    const [y, m, d] = iso.split("-").map(Number);
+    const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    return `${MO[m - 1]} ${d}, ${y}`;
+  }
+
+  const [roster, setRoster] = useState<string[]>([]);
+  const [current, setCurrent] = useState<Current[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [authErr, setAuthErr] = useState(false);
+
+  const [worker, setWorker] = useState("");
+  const [history, setHistory] = useState<Hist[]>([]);
+  const [prevRate, setPrevRate] = useState("");
+  const [newRate, setNewRate] = useState("");
+  const [effective, setEffective] = useState(() => todayISO());
+  const [unit, setUnit] = useState<"Hourly" | "Salary">("Hourly");
+  const [reason, setReason] = useState("");
+  const [lang, setNoticeLang] = useState<"es" | "en">("es");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function token(): Promise<string> {
+    const sb = supabase();
+    if (!sb) return "";
+    const { data } = await sb.auth.getSession();
+    return data.session?.access_token || "";
+  }
+
+  async function load() {
+    setLoading(true);
+    const t = await token();
+    if (!t) {
+      setAuthErr(true);
+      setLoading(false);
+      return;
+    }
+    const [rd, wd] = await Promise.all([
+      fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/wages", { headers: { Authorization: `Bearer ${t}` } })
+        .then((r) => r.json())
+        .catch(() => ({ ok: false })),
+    ]);
+    if (Array.isArray(rd?.workers)) setRoster(rd.workers);
+    if (wd?.ok) setCurrent(wd.current || []);
+    else setAuthErr(true);
+    setLoading(false);
+  }
+  useEffect(() => {
+    load();
+  }, []);
+
+  // When a worker is picked, pull his history and pre-fill previous pay from
+  // the most recent row — so a raise is one number, not two.
+  useEffect(() => {
+    if (!worker) {
+      setHistory([]);
+      setPrevRate("");
+      return;
+    }
+    (async () => {
+      const t = await token();
+      if (!t) return;
+      const d = await fetch(`/api/wages?worker=${encodeURIComponent(worker)}`, {
+        headers: { Authorization: `Bearer ${t}` },
+      })
+        .then((r) => r.json())
+        .catch(() => ({ ok: false }));
+      const rows: Hist[] = d?.ok ? d.history || [] : [];
+      setHistory(rows);
+      if (rows.length) {
+        setPrevRate(String(rows[0].newRate));
+        setUnit(rows[0].rateUnit === "Salary" ? "Salary" : "Hourly");
+      } else {
+        setPrevRate("");
+      }
+    })();
+  }, [worker]);
+
+  async function issue() {
+    const nr = parseFloat(newRate);
+    if (!worker) { setMsg("Pick a worker."); return; }
+    if (!Number.isFinite(nr) || nr <= 0) { setMsg("Enter the new pay."); return; }
+    setBusy(true);
+    setMsg("");
+    const t = await token();
+    const res = await fetch("/api/wages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
+      body: JSON.stringify({
+        op: "issue",
+        worker,
+        previousRate: prevRate === "" ? null : parseFloat(prevRate),
+        newRate: nr,
+        effectiveISO: effective,
+        rateUnit: unit,
+        reason,
+        lang,
+      }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (!res?.ok) {
+      setMsg(res?.error || "Couldn't save that notice.");
+      return;
+    }
+    // Open the PDF so it can be shared straight to a text message.
+    try {
+      const bin = atob(res.pdfBase64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      window.open(url, "_blank");
+    } catch {}
+    setMsg("Notice created.");
+    setNewRate(""); setReason("");
+    load();
+  }
+
+  const fieldCls = "w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete";
+  const currentFor = current.find((c) => c.worker === worker);
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-1">
+          <div className="font-bold text-concrete text-lg">Wages</div>
+          <button
+            onClick={onClose}
+            className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full"
+          >
+            Close
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          Issue a wage increase notice and keep the history.
+        </div>
+
+        {authErr ? (
+          <div className="bg-graphite border border-line rounded-2xl p-4 text-rebar text-sm">
+            Sign-in required. Close this, switch to another foreman and back to
+            yourself to sign in, then try again.
+          </div>
+        ) : loading ? (
+          <div className="text-rebar text-sm">Loading…</div>
+        ) : (
+          <>
+            <SearchPick
+              label="Worker"
+              placeholder="Type a name…"
+              selectedKeys={worker ? [worker] : []}
+              options={roster.map((n) => ({ key: n, label: n }))}
+              onPick={(k) => setWorker(k === worker ? "" : k)}
+            />
+
+            {worker && (
+              <div className="bg-graphite border border-line rounded-2xl p-4 mb-4">
+                <div className="text-concrete font-bold text-[15px] pb-2 mb-3 border-b border-white/10">
+                  {currentFor
+                    ? `Current: $${currentFor.rate.toFixed(2)} ${currentFor.rateUnit === "Salary" ? "per year" : "per hour"}`
+                    : "No wage on record yet"}
+                </div>
+
+                <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                  Previous pay{" "}
+                  <span className="font-normal normal-case text-rebar">
+                    {history.length ? "(from his last notice)" : "(first notice — optional)"}
+                  </span>
+                </label>
+                <input
+                  type="number" inputMode="decimal" step="0.01" min="0"
+                  value={prevRate}
+                  onChange={(e) => setPrevRate(e.target.value)}
+                  placeholder="—"
+                  className={`${fieldCls} mb-3`}
+                />
+
+                <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                  New pay
+                </label>
+                <input
+                  type="number" inputMode="decimal" step="0.01" min="0"
+                  value={newRate}
+                  onChange={(e) => setNewRate(e.target.value)}
+                  placeholder="0.00"
+                  className={`${fieldCls} mb-3`}
+                />
+
+                <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                  Effective date
+                </label>
+                <input
+                  type="date"
+                  value={effective}
+                  onChange={(e) => setEffective(e.target.value)}
+                  className={`${fieldCls} mb-3`}
+                />
+
+                <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                  Reason{" "}
+                  <span className="font-normal normal-case text-rebar">
+                    (your records only — not printed)
+                  </span>
+                </label>
+                <input
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder="Annual review"
+                  className={`${fieldCls} mb-3`}
+                />
+
+                <div className="flex gap-2 mb-3">
+                  {(["Hourly", "Salary"] as const).map((u) => (
+                    <button
+                      key={u}
+                      onClick={() => setUnit(u)}
+                      className={`flex-1 rounded-full h-10 text-sm font-bold ${
+                        unit === u ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+                      }`}
+                    >
+                      {u}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex gap-2 mb-4">
+                  {([["es", "Español"], ["en", "English"]] as const).map(([k, label]) => (
+                    <button
+                      key={k}
+                      onClick={() => setNoticeLang(k)}
+                      className={`flex-1 rounded-full h-10 text-sm font-bold ${
+                        lang === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  onClick={issue}
+                  disabled={busy}
+                  className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+                >
+                  {busy ? "…" : "Generate notice"}
+                </button>
+                {msg && (
+                  <div
+                    className="text-xs mt-2 font-bold"
+                    style={{ color: msg.startsWith("Notice") ? "#4a9e63" : "#e5533c" }}
+                  >
+                    {msg}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {worker && history.length > 0 && (
+              <>
+                <div className="text-concrete font-bold text-[15px] mb-2">History</div>
+                {history.map((h) => (
+                  <div key={h.id} className="bg-graphite border border-line rounded-2xl p-4 mb-2">
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                      <div className="text-concrete font-bold text-[15px]">
+                        {h.previousRate !== null ? `$${h.previousRate.toFixed(2)} → ` : ""}
+                        ${h.newRate.toFixed(2)}
+                      </div>
+                      <div className="text-rebar text-xs shrink-0 ml-2">
+                        {pretty(h.effectiveISO)}
+                      </div>
+                    </div>
+                    <div className="text-rebar text-xs">
+                      {h.rateUnit === "Salary" ? "Per year" : "Per hour"}
+                      {h.reason ? ` · ${h.reason}` : ""}
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {!worker && current.length > 0 && (
+              <>
+                <div className="text-concrete font-bold text-[15px] mb-2">Current rates</div>
+                {current
+                  .slice()
+                  .sort((a, b) => a.worker.localeCompare(b.worker))
+                  .map((c) => (
+                    <div key={c.worker} className="bg-graphite border border-line rounded-2xl p-3 mb-2 flex items-center justify-between">
+                      <span className="text-concrete truncate">{c.worker}</span>
+                      <span className="text-concrete font-bold shrink-0 ml-2">
+                        ${c.rate.toFixed(2)}
+                      </span>
+                    </div>
+                  ))}
+              </>
+            )}
+          </>
+        )}
       </div>
     </div>
   );

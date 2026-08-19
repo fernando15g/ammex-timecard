@@ -46,6 +46,15 @@ function nkey(s: string): string {
   return (s || "").normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+// Today in Phoenix, not in UTC. Vercel runs in UTC, so after 5pm local the
+// server's date is already tomorrow — which is why a notice issued Tuesday
+// evening printed "Emitido el 19". Arizona doesn't observe DST, so a fixed
+// UTC-7 offset is correct year round.
+function phoenixTodayISO(): string {
+  const d = new Date(Date.now() - 7 * 60 * 60 * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
 function isISO(s: any): boolean {
   return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
@@ -240,8 +249,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: "Enter the new pay." }, { status: 400 });
       if (!isISO(body.effectiveISO))
         return NextResponse.json({ ok: false, error: "Pick an effective date." }, { status: 400 });
-      const now = new Date();
-      const issuedISO = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const issuedISO = phoenixTodayISO();
       const bytes = await buildWageNoticePdf({
         worker,
         effectiveISO: body.effectiveISO,
@@ -281,8 +289,7 @@ export async function POST(req: NextRequest) {
     if (previousRate !== null && (!Number.isFinite(previousRate) || previousRate < 0))
       return NextResponse.json({ ok: false, error: "Previous pay looks wrong." }, { status: 400 });
 
-    const now = new Date();
-    const issuedISO = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const issuedISO = phoenixTodayISO();
 
     // 1) Record it. Append-only — never edits an earlier row.
     const props: any = {

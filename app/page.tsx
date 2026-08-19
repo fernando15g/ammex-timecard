@@ -8534,6 +8534,11 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
   const [lang, setNoticeLang] = useState<"es" | "en">("es");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  // Tapping a name under Current rates opens its history without disturbing
+  // whatever is half-typed in the form above.
+  const [peekWorker, setPeekWorker] = useState("");
+  const [peekRows, setPeekRows] = useState<Hist[]>([]);
+  const [peekLoading, setPeekLoading] = useState(false);
 
   async function token(): Promise<string> {
     const sb = supabase();
@@ -8591,6 +8596,23 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
       }
     })();
   }, [worker]);
+
+  function clearForm() {
+    setWorker(""); setPrevRate(""); setNewRate(""); setReason("");
+    setEffective(todayISO()); setMsg("");
+  }
+
+  async function openPeek(name: string) {
+    setPeekWorker(name);
+    setPeekRows([]);
+    setPeekLoading(true);
+    const t = await token();
+    const d = await fetch(`/api/wages?worker=${encodeURIComponent(name)}`, {
+      headers: { Authorization: `Bearer ${t}` },
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setPeekRows(d?.ok ? d.history || [] : []);
+    setPeekLoading(false);
+  }
 
   function openPdf(base64: string) {
     try {
@@ -8784,13 +8806,22 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
                 >
                   {busy ? "…" : "Generate & save"}
                 </button>
-                <button
-                  onClick={() => issue("preview")}
-                  disabled={busy}
-                  className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-40"
-                >
-                  Generate
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => issue("preview")}
+                    disabled={busy}
+                    className="flex-1 min-w-0 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-40"
+                  >
+                    Generate
+                  </button>
+                  <button
+                    onClick={clearForm}
+                    disabled={busy}
+                    className="shrink-0 bg-steel border border-line text-rebar rounded-xl px-5 py-3 font-bold disabled:opacity-40"
+                  >
+                    Clear
+                  </button>
+                </div>
                 {msg && (
                   <div
                     className="text-xs mt-2 font-bold"
@@ -8839,18 +8870,84 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
                   .slice()
                   .sort((a, b) => a.worker.localeCompare(b.worker))
                   .map((c) => (
-                    <div key={c.worker} className="bg-graphite border border-line rounded-2xl p-3 mb-2 flex items-center justify-between">
+                    <button
+                      key={c.worker}
+                      onClick={() => openPeek(c.worker)}
+                      className="w-full text-left bg-graphite border border-line rounded-2xl p-3 mb-2 flex items-center justify-between active:bg-steel"
+                    >
                       <span className="text-concrete truncate">{c.worker}</span>
                       <span className="text-concrete font-bold shrink-0 ml-2">
                         ${c.rate.toFixed(2)}
                       </span>
-                    </div>
+                    </button>
                   ))}
               </>
             )}
           </>
         )}
       </div>
+
+      {/* History for one worker, opened from Current rates. Read-only — the
+          form above keeps whatever was being typed. */}
+      {peekWorker && (
+        <div className="fixed inset-0 z-[80] bg-black/70 flex items-center justify-center p-4">
+          <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center justify-between p-4 border-b border-line sticky top-0 bg-graphite">
+              <div className="text-concrete font-bold truncate">{peekWorker}</div>
+              <button
+                onClick={() => setPeekWorker("")}
+                className="shrink-0 ml-2 text-rebar text-xs font-bold bg-steel px-3 py-1.5 rounded-full"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="p-4">
+              {peekLoading ? (
+                <div className="text-rebar text-sm">Loading…</div>
+              ) : peekRows.length === 0 ? (
+                <div className="text-rebar text-sm">No notices on record.</div>
+              ) : (
+                peekRows.map((h) => (
+                  <div key={h.id} className="bg-steel border border-line rounded-xl p-3 mb-2">
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                      <div className="text-concrete font-bold">
+                        {h.previousRate !== null ? `$${h.previousRate.toFixed(2)} → ` : ""}
+                        ${h.newRate.toFixed(2)}
+                      </div>
+                      <div className="text-rebar text-xs shrink-0 ml-2">
+                        {pretty(h.effectiveISO)}
+                      </div>
+                    </div>
+                    <div className="text-rebar text-xs">
+                      {h.rateUnit === "Salary" ? "Per year" : "Per hour"}
+                      {h.reason ? ` · ${h.reason}` : ""}
+                    </div>
+                    <button
+                      onClick={() => getPdf(h.id)}
+                      disabled={busy}
+                      className="mt-3 text-xs font-bold rounded-full px-3 py-1.5 bg-graphite border border-line text-concrete disabled:opacity-40"
+                    >
+                      Get PDF
+                    </button>
+                  </div>
+                ))
+              )}
+
+              <button
+                onClick={() => {
+                  const n = peekWorker;
+                  setPeekWorker("");
+                  setWorker(n);
+                }}
+                className="w-full mt-2 bg-safety text-steel rounded-xl py-3 font-bold"
+              >
+                Give a raise
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

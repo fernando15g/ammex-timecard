@@ -647,7 +647,10 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   // filter out resolved discrepancies (no-show / confirmed / fixed in the log)
   const resolved = new Set<string>();
   const resolvedJob = new Map<string, Set<string>>(); // job-scoped "No timecard" resolutions
-  const noShowSet = new Set<string>(); // `${worker}|${date}` marked No-show
+  // `${worker}|${date}` -> why he isn't on the card. "No-show" and "Dismissed"
+  // (the Ignore button) are the two outcomes the owner can record; the note is
+  // whatever he typed, which the past schedule shows beside the struck name.
+  const absences = new Map<string, { status: string; note: string }>();
   try {
     let cursor: string | undefined;
     do {
@@ -681,7 +684,14 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
             resolved.add(base);
           }
         }
-        if (w && d && st === "No-show") noShowSet.add(`${w.toLowerCase()}|${d}`);
+        if (w && d && (st === "No-show" || st === "Dismissed")) {
+          const note = (p[RECON_PROPS.note]?.rich_text || [])
+            .map((t: any) => t.plain_text)
+            .join("")
+            .trim();
+          // Last write wins — a later decision supersedes an earlier one.
+          absences.set(`${w.toLowerCase()}|${d}`, { status: st, note });
+        }
       }
       cursor = res.has_more ? res.next_cursor : undefined;
     } while (cursor);
@@ -703,7 +713,20 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     crews[jk] = rec.crew.slice().sort((a, b) => a.worker.localeCompare(b.worker));
   }
 
-  return { discrepancies: open, missingCards, crews, unconfirmedWorkers, noShows: Array.from(noShowSet) };
+  // noShows stays a plain key list for existing callers; absences carries the
+  // status + note the past schedule needs.
+  return {
+    discrepancies: open,
+    missingCards,
+    crews,
+    unconfirmedWorkers,
+    noShows: Array.from(absences.keys()),
+    absences: Array.from(absences.entries()).map(([key, v]) => ({
+      key,
+      status: v.status,
+      note: v.note,
+    })),
+  };
 }
 
 export async function GET(req: Request) {

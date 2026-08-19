@@ -1104,9 +1104,25 @@ export default function Page() {
                     setAdminPin(digits);
                     setAdminPinError(false);
                     if (digits.length === 4) {
-                      if (digits === "5314") {
+                      // The owner PIN opens the admin menu ONLY when the owner
+                      // is the selected identity AND he has signed in. All
+                      // three must hold: his name selected, a live session,
+                      // then the PIN. A foreman typing 5314 on his own name
+                      // gets nothing — the PIN alone is no longer a door.
+                      //
+                      // ownerBypass covers Supabase being unreachable, and
+                      // !authConfigured covers the env vars being absent, so a
+                      // third-party outage can never lock the owner out.
+                      const ownerHere =
+                        isOwnerName(foreman) &&
+                        (!authConfigured || !!ownerEmail || ownerBypass);
+                      if (digits === "5314" && ownerHere) {
                         setAdminUnlocked(true);
                         setAdminPinError(false);
+                      } else if (digits === "5314") {
+                        // Right PIN, wrong identity — fails like any bad PIN.
+                        setAdminPinError(true);
+                        setTimeout(() => setAdminPin(""), 350);
                       } else if (foreman) {
                         // Not the owner PIN — try it as the selected foreman's
                         // personal PIN (validated server-side). Opens ONLY the

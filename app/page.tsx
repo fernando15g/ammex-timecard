@@ -1973,6 +1973,11 @@ function SchedulePanel({
   const [historyMode, setHistoryMode] = useState(false);
   const [histDate, setHistDate] = useState<string>("");
   const [histJobs, setHistJobs] = useState<SchedJob[]>([]);
+  // Why a scheduled man has no hours on a past day: he worked another job, or
+  // the owner marked him no-show / ignored in Reconcile. Both come from the
+  // reconcile action, which the schedule history endpoint doesn't carry.
+  const [histElsewhere, setHistElsewhere] = useState<Record<string, string>>({});
+  const [histAbsence, setHistAbsence] = useState<Record<string, string>>({});
   const [histLoading, setHistLoading] = useState(false);
   const [histEmpty, setHistEmpty] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -2064,6 +2069,35 @@ function SchedulePanel({
 
   // ---- Past-schedules review mode (read-only) ----
   const [histMsg, setHistMsg] = useState("");
+
+  // Pull the reconcile picture for the day on screen. `crews` carries
+  // elsewhereJob per scheduled man; `absences` carries no-show / ignored.
+  useEffect(() => {
+    if (!historyMode || !histDate) return;
+    let cancelled = false;
+    fetch(`/api/recon?action=reconcile&start=${histDate}&end=${histDate}&today=${histDate}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled || !d?.ok) return;
+        const elsewhere: Record<string, string> = {};
+        for (const list of Object.values<any>(d.crews || {})) {
+          for (const c of list || []) {
+            if (!c.logged && c.elsewhereJob) elsewhere[c.worker.toLowerCase()] = c.elsewhereJob;
+          }
+        }
+        const absent: Record<string, string> = {};
+        for (const a of d.absences || []) {
+          const worker = String(a.key || "").split("|")[0];
+          if (worker) absent[worker] = a.status === "No-show" ? "No show" : "Ignored";
+        }
+        setHistElsewhere(elsewhere);
+        setHistAbsence(absent);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [historyMode, histDate]);
   function applyHist(d: any, jumpedDate?: string) {
     if (d?.date) {
       setHistDate(d.date);
@@ -2433,6 +2467,15 @@ function SchedulePanel({
                   <div className="space-y-1">
                     {j.crew.map((c: any, i: number) => {
                       const worked = c.hours != null;
+                      // A scheduled man with no hours here is either accounted
+                      // for — worked another job, or marked no-show/ignored —
+                      // or still unexplained. Accounted-for names get struck
+                      // through with a short note, so the card reads as
+                      // settled rather than full of blanks.
+                      const key = (c.worker || "").toLowerCase();
+                      const away = !worked && !c.unscheduled ? histElsewhere[key] : "";
+                      const absent = !worked && !c.unscheduled ? histAbsence[key] : "";
+                      const settled = !!away || !!absent;
                       return (
                         <div key={i} className="flex items-center gap-2 text-sm">
                           <span
@@ -2441,11 +2484,22 @@ function SchedulePanel({
                                 ? { color: "#e0a63b" }
                                 : worked
                                 ? { color: "#f4f3f0" }
-                                : { color: "#f4f3f0", opacity: 0.45 }
+                                : {
+                                    color: "#f4f3f0",
+                                    opacity: settled ? 0.38 : 0.45,
+                                    textDecoration: settled ? "line-through" : "none",
+                                    textDecorationColor: "rgba(244,243,240,.45)",
+                                  }
                             }
                           >
                             {c.worker}
                           </span>
+                          {away && (
+                            <span className="text-rebar text-[11px] shrink-0 truncate">at {away}</span>
+                          )}
+                          {!away && absent && (
+                            <span className="text-rebar text-[11px] shrink-0">{absent}</span>
+                          )}
                           {worked && !c.unscheduled && (
                             <span className="text-[11px] font-bold" style={{ color: "#4a9e63" }}>✓</span>
                           )}
@@ -6796,10 +6850,6 @@ function ReconCardBrowser({
     }[]
   >([]);
   const [covOpen, setCovOpen] = useState<Record<string, boolean>>({}); // expanded coverage dropdowns
-  // `worker|date` -> why a scheduled man isn't on the card. Populated from the
-  // reconcile action so the past schedule can strike him out and say why,
-  // instead of leaving him looking simply absent.
-  const [absences, setAbsences] = useState<Record<string, { status: string; note: string }>>({});
   // Add-to-card: when set, opens the add modal prefilled with this card's
   // job/date/foreman. `worker` is set for a quick-add of a known missing
   // person, or "" to pick anyone (walk-on the foreman forgot).
@@ -6838,18 +6888,6 @@ function ReconCardBrowser({
         setLoading(false);
       })
       .catch(() => setLoading(false));
-
-    // Absence reasons ride along — a separate call so the cards list renders
-    // without waiting on it.
-    fetch(`/api/recon?action=reconcile&start=${start}&end=${end}&today=${today}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (!d?.ok || !Array.isArray(d.absences)) return;
-        const map: Record<string, { status: string; note: string }> = {};
-        for (const a of d.absences) map[a.key] = { status: a.status, note: a.note };
-        setAbsences(map);
-      })
-      .catch(() => {});
   }, [start, end, today, heldOnly]);
 
   useEffect(() => {
@@ -7028,60 +7066,27 @@ function ReconCardBrowser({
 
                           {open && cov && (
                             <div className="mt-2 pt-2 space-y-1" style={{ borderTop: "1px solid rgba(229,83,60,.25)" }}>
-                              {cov.people.map((p, pi) => {
-                                // A scheduled man who isn't on this card is
-                                // accounted for in one of three ways: he
-                                // worked elsewhere, the owner marked him
-                                // no-show / ignored, or he's genuinely
-                                // missing. The first two get struck through —
-                                // they're settled, not outstanding.
-                                const abs = !p.logged
-                                  ? absences[`${p.worker.toLowerCase()}|${m.date}`]
-                                  : undefined;
-                                const settled = !p.logged && (!!p.elsewhereJob || !!abs);
-                                // Deliberately the short status, not the typed
-                                // note — a sentence-long reason would swamp
-                                // the row. The full note stays in Reconcile.
-                                const absLabel = abs
-                                  ? abs.status === "No-show"
-                                    ? "No show"
-                                    : "Ignored"
-                                  : "";
-                                return (
-                                  <div key={pi} className="flex items-center gap-2 text-sm">
-                                    {p.logged ? (
-                                      <span className="text-[11px] font-bold w-3 shrink-0" style={{ color: "#4a9e63" }}>✓</span>
-                                    ) : (
-                                      <span className="w-3 shrink-0" />
-                                    )}
-                                    <span
-                                      className="min-w-0 truncate"
-                                      style={
-                                        p.logged
-                                          ? { color: "#f4f3f0" }
-                                          : {
-                                              color: "#f4f3f0",
-                                              opacity: settled ? 0.38 : 0.45,
-                                              textDecoration: settled ? "line-through" : "none",
-                                              textDecorationColor: "rgba(244,243,240,.45)",
-                                            }
-                                      }
-                                    >
-                                      {p.worker}
-                                    </span>
-                                    {!p.logged && p.elsewhereJob && (
-                                      <span className="text-rebar text-[11px] shrink-0">at {p.elsewhereJob}</span>
-                                    )}
-                                    {!p.logged && !p.elsewhereJob && abs && (
-                                      <span className="text-rebar text-[11px] shrink-0 truncate">{absLabel}</span>
-                                    )}
-                                    {/* Unaccounted-for men are simply left dim.
-                                        A red "missing" tag on every one of
-                                        them turns the list into noise — the
-                                        absence of a check is the signal. */}
-                                  </div>
-                                );
-                              })}
+                              {cov.people.map((p, pi) => (
+                                <div key={pi} className="flex items-center gap-2 text-sm">
+                                  {p.logged ? (
+                                    <span className="text-[11px] font-bold w-3 shrink-0" style={{ color: "#4a9e63" }}>✓</span>
+                                  ) : (
+                                    <span className="w-3 shrink-0" />
+                                  )}
+                                  <span
+                                    className="min-w-0 truncate"
+                                    style={p.logged ? { color: "#f4f3f0" } : { color: "#f4f3f0", opacity: 0.45 }}
+                                  >
+                                    {p.worker}
+                                  </span>
+                                  {!p.logged && p.elsewhereJob && (
+                                    <span className="text-rebar text-[11px] shrink-0">at {p.elsewhereJob}</span>
+                                  )}
+                                  {!p.logged && !p.elsewhereJob && (
+                                    <span className="text-[11px] shrink-0 ml-1" style={{ color: "#e5533c" }}>missing</span>
+                                  )}
+                                </div>
+                              ))}
                               {cov.walkOns.map((w, wi) => (
                                 <div key={`w${wi}`} className="flex items-center gap-2 text-sm">
                                   <span className="w-3 shrink-0" />

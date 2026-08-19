@@ -8614,18 +8614,32 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
     setPeekLoading(false);
   }
 
-  function openPdf(base64: string) {
+  // The tab has to be opened while the user's tap is still "live" — Safari
+  // blocks window.open once an await has happened, which is exactly what a
+  // fetch does. So the caller opens a blank tab first and we point it at the
+  // PDF when it arrives. If it was blocked anyway, fall back to a download.
+  function openPdf(base64: string, tab: Window | null, fileName?: string) {
     try {
       const bin = atob(base64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-      window.open(url, "_blank");
+      if (tab && !tab.closed) {
+        tab.location.href = url;
+        return;
+      }
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || "wage-notice.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     } catch {}
   }
 
   // Re-open a notice already on record. Doesn't write a row or send email.
   async function getPdf(id: string) {
+    const tab = window.open("", "_blank");
     setBusy(true);
     const t = await token();
     const res = await fetch("/api/wages", {
@@ -8634,14 +8648,18 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
       body: JSON.stringify({ op: "pdf", id, lang }),
     }).then((r) => r.json()).catch(() => ({ ok: false }));
     setBusy(false);
-    if (res?.ok) openPdf(res.pdfBase64);
-    else setMsg(res?.error || "Couldn't rebuild that notice.");
+    if (res?.ok) openPdf(res.pdfBase64, tab, res.fileName);
+    else {
+      if (tab && !tab.closed) tab.close();
+      setMsg(res?.error || "Couldn't rebuild that notice.");
+    }
   }
 
   // "save" writes the row and emails a copy. "preview" writes nothing at all
   // — no Notion row, no email — it just renders the PDF from the form.
   async function issue(action: "save" | "preview") {
     const nr = parseFloat(newRate);
+    const tab = window.open("", "_blank");
     if (!worker) { setMsg("Pick a worker."); return; }
     if (!Number.isFinite(nr) || nr <= 0) { setMsg("Enter the new pay."); return; }
     setBusy(true);
@@ -8663,15 +8681,27 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
     }).then((r) => r.json()).catch(() => ({ ok: false }));
     setBusy(false);
     if (!res?.ok) {
+      if (tab && !tab.closed) tab.close();
       setMsg(res?.error || "Couldn't build that notice.");
       return;
     }
     // Open the PDF so it can be shared straight to a text message.
-    openPdf(res.pdfBase64);
+    openPdf(res.pdfBase64, tab, res.fileName);
     if (action === "save") {
       setMsg("Saved and emailed to you.");
       setNewRate(""); setReason("");
       load();
+      // Pull his history again so the notice just issued appears immediately,
+      // and previous pay reflects the new rate for the next raise.
+      (async () => {
+        const t2 = await token();
+        const d = await fetch(`/api/wages?worker=${encodeURIComponent(worker)}`, {
+          headers: { Authorization: `Bearer ${t2}` },
+        }).then((r) => r.json()).catch(() => ({ ok: false }));
+        const rows: Hist[] = d?.ok ? d.history || [] : [];
+        setHistory(rows);
+        if (rows.length) setPrevRate(String(rows[0].newRate));
+      })();
     } else {
       // Preview leaves the form untouched — nothing was recorded, so he may
       // still want to save the same notice.

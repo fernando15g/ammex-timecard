@@ -111,7 +111,7 @@ export async function buildWageNoticePdf(d: WageNoticeData): Promise<Uint8Array>
   if (d.previousRate !== null) {
     line(es ? "Pago anterior:" : "Previous pay:", money(d.previousRate) + unit);
   }
-  line(es ? "Pago nuevo:" : "New pay:", money(d.newRate) + unit, 40);
+  line(es ? "Pago nuevo:" : "New pay:", money(d.newRate) + unit, 62);
 
   // Thanks
   page.drawText(
@@ -130,13 +130,15 @@ export async function buildWageNoticePdf(d: WageNoticeData): Promise<Uint8Array>
       : "If you have any questions about your new pay rate, feel free to reach out to:",
     { x: MARGIN, y, size: 11, font, color: INK }
   );
-  y -= 20;
+  y -= 30;
   page.drawText("Oscar Garcia — (602) 501-2734", { x: MARGIN + 12, y, size: 11, font: bold, color: INK });
   y -= 17;
   page.drawText("Fernando Garcia — (602) 501-3809", { x: MARGIN + 12, y, size: 11, font: bold, color: INK });
-  y -= 52;
+  // Signature block is pinned near the foot of the page rather than flowing on
+  // from the text — a signature that floats mid-page reads as unfinished. The
+  // body above is short and fixed in length, so there's no risk of collision.
+  y = 232;
 
-  // Signature block
   const sig = await pdf.embedPng(Buffer.from(SIGNATURE_PNG, "base64"));
   const sigW = 150;
   const sigH = (sig.height / sig.width) * sigW;

@@ -8592,7 +8592,33 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
     })();
   }, [worker]);
 
-  async function issue() {
+  function openPdf(base64: string) {
+    try {
+      const bin = atob(base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      window.open(url, "_blank");
+    } catch {}
+  }
+
+  // Re-open a notice already on record. Doesn't write a row or send email.
+  async function getPdf(id: string) {
+    setBusy(true);
+    const t = await token();
+    const res = await fetch("/api/wages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
+      body: JSON.stringify({ op: "pdf", id, lang }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) openPdf(res.pdfBase64);
+    else setMsg(res?.error || "Couldn't rebuild that notice.");
+  }
+
+  // "save" writes the row and emails a copy. "preview" writes nothing at all
+  // — no Notion row, no email — it just renders the PDF from the form.
+  async function issue(action: "save" | "preview") {
     const nr = parseFloat(newRate);
     if (!worker) { setMsg("Pick a worker."); return; }
     if (!Number.isFinite(nr) || nr <= 0) { setMsg("Enter the new pay."); return; }
@@ -8603,7 +8629,7 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
       body: JSON.stringify({
-        op: "issue",
+        op: action === "save" ? "issue" : "preview",
         worker,
         previousRate: prevRate === "" ? null : parseFloat(prevRate),
         newRate: nr,
@@ -8615,20 +8641,20 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
     }).then((r) => r.json()).catch(() => ({ ok: false }));
     setBusy(false);
     if (!res?.ok) {
-      setMsg(res?.error || "Couldn't save that notice.");
+      setMsg(res?.error || "Couldn't build that notice.");
       return;
     }
     // Open the PDF so it can be shared straight to a text message.
-    try {
-      const bin = atob(res.pdfBase64);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
-      window.open(url, "_blank");
-    } catch {}
-    setMsg("Notice created.");
-    setNewRate(""); setReason("");
-    load();
+    openPdf(res.pdfBase64);
+    if (action === "save") {
+      setMsg("Saved and emailed to you.");
+      setNewRate(""); setReason("");
+      load();
+    } else {
+      // Preview leaves the form untouched — nothing was recorded, so he may
+      // still want to save the same notice.
+      setMsg("Generated — not saved.");
+    }
   }
 
   const fieldCls = "w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete";
@@ -8752,16 +8778,23 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <button
-                  onClick={issue}
+                  onClick={() => issue("save")}
                   disabled={busy}
-                  className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+                  className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40 mb-2"
                 >
-                  {busy ? "…" : "Generate notice"}
+                  {busy ? "…" : "Generate & save"}
+                </button>
+                <button
+                  onClick={() => issue("preview")}
+                  disabled={busy}
+                  className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-40"
+                >
+                  Generate
                 </button>
                 {msg && (
                   <div
                     className="text-xs mt-2 font-bold"
-                    style={{ color: msg.startsWith("Notice") ? "#4a9e63" : "#e5533c" }}
+                    style={{ color: /^(Saved|Generated)/.test(msg) ? "#4a9e63" : "#e5533c" }}
                   >
                     {msg}
                   </div>
@@ -8787,6 +8820,13 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
                       {h.rateUnit === "Salary" ? "Per year" : "Per hour"}
                       {h.reason ? ` · ${h.reason}` : ""}
                     </div>
+                    <button
+                      onClick={() => getPdf(h.id)}
+                      disabled={busy}
+                      className="mt-3 text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
+                    >
+                      Get PDF
+                    </button>
                   </div>
                 ))}
               </>

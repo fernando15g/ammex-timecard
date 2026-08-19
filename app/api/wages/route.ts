@@ -189,6 +189,75 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
+    // Rebuild the PDF for a notice already on record. Deliberately does NOT
+    // write a row or send email — this is "show me the document I already
+    // issued", not a new notice. Without it, losing the text thread and the
+    // email would leave the numbers on record but no document.
+    if (body.op === "pdf") {
+      if (!body.id)
+        return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+      const pg: any = await notion.pages.retrieve({ page_id: body.id });
+      const p = pg.properties || {};
+      const worker = rt(p[WAGE_PROPS.worker]).trim();
+      const newRate =
+        typeof p[WAGE_PROPS.newRate]?.number === "number" ? p[WAGE_PROPS.newRate].number : 0;
+      const previousRate =
+        typeof p[WAGE_PROPS.previousRate]?.number === "number"
+          ? p[WAGE_PROPS.previousRate].number
+          : null;
+      const effectiveISO = p[WAGE_PROPS.effective]?.date?.start?.slice(0, 10) || "";
+      const issuedISO = p[WAGE_PROPS.issued]?.date?.start?.slice(0, 10) || effectiveISO;
+      const hourly = (rt(p[WAGE_PROPS.rateUnit]) || "Hourly") !== "Salary";
+      const bytes = await buildWageNoticePdf({
+        worker,
+        effectiveISO,
+        previousRate,
+        newRate,
+        hourly,
+        issuedISO,
+        lang: body.lang === "en" ? "en" : "es",
+      });
+      return NextResponse.json({
+        ok: true,
+        fileName: `Wage_Notice_${worker.replace(/[^a-z0-9]+/gi, "-")}_${effectiveISO}.pdf`,
+        pdfBase64: Buffer.from(bytes).toString("base64"),
+      });
+    }
+
+    // Preview — builds the PDF from what's on the form and writes NOTHING.
+    // No Notion row, no email. For checking the wording or handing someone a
+    // copy without committing it to the record.
+    if (body.op === "preview") {
+      const worker = (body.worker || "").trim();
+      const newRate = Number(body.newRate);
+      const previousRate =
+        body.previousRate === null || body.previousRate === "" || body.previousRate === undefined
+          ? null
+          : Number(body.previousRate);
+      if (!worker)
+        return NextResponse.json({ ok: false, error: "Pick a worker." }, { status: 400 });
+      if (!Number.isFinite(newRate) || newRate <= 0)
+        return NextResponse.json({ ok: false, error: "Enter the new pay." }, { status: 400 });
+      if (!isISO(body.effectiveISO))
+        return NextResponse.json({ ok: false, error: "Pick an effective date." }, { status: 400 });
+      const now = new Date();
+      const issuedISO = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      const bytes = await buildWageNoticePdf({
+        worker,
+        effectiveISO: body.effectiveISO,
+        previousRate,
+        newRate,
+        hourly: body.rateUnit !== "Salary",
+        issuedISO,
+        lang: body.lang === "en" ? "en" : "es",
+      });
+      return NextResponse.json({
+        ok: true,
+        fileName: `Wage_Notice_${worker.replace(/[^a-z0-9]+/gi, "-")}_${body.effectiveISO}.pdf`,
+        pdfBase64: Buffer.from(bytes).toString("base64"),
+      });
+    }
+
     if (body.op !== "issue")
       return NextResponse.json({ ok: false, error: "Unknown op." }, { status: 400 });
 

@@ -32,6 +32,23 @@ const OWNER_EMAILS = (process.env.OWNER_EMAILS || "")
 const RECIPIENT = "fernando@ammexrebar.com";
 const FROM = "Ammex Timecard <timecards@send.ammexrebar.com>";
 
+// Filename the worker actually sees in Messages and Files. iOS shows the name
+// from Content-Disposition; a blob URL has none, which is why these arrived as
+// "Unknown". Format: "Aviso de Aumento - E. Fonseca - 2026-09-01.pdf" — initial
+// plus surname because the surname is what you scan for, and the EFFECTIVE
+// date because that's the one that matters when a folder of these is sorted.
+function noticeFileName(worker: string, effectiveISO: string, lang: "es" | "en"): string {
+  const parts = (worker || "").trim().split(/\s+/).filter(Boolean);
+  let who = worker.trim();
+  if (parts.length >= 2) {
+    who = `${parts[0][0].toUpperCase()}. ${parts.slice(1).join(" ")}`;
+  }
+  const title = lang === "en" ? "Wage Increase Notice" : "Aviso de Aumento";
+  // Strip characters iOS and email clients handle badly in filenames.
+  const safe = `${title} - ${who} - ${effectiveISO}`.replace(/[\/\\:*?"<>|]/g, "");
+  return `${safe}.pdf`;
+}
+
 function rt(prop: any): string {
   if (!prop) return "";
   if (prop.type === "rich_text")
@@ -228,7 +245,7 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json({
         ok: true,
-        fileName: `Wage_Notice_${worker.replace(/[^a-z0-9]+/gi, "-")}_${effectiveISO}.pdf`,
+        fileName: noticeFileName(worker, effectiveISO, body.lang === "en" ? "en" : "es"),
         pdfBase64: Buffer.from(bytes).toString("base64"),
       });
     }
@@ -261,7 +278,7 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json({
         ok: true,
-        fileName: `Wage_Notice_${worker.replace(/[^a-z0-9]+/gi, "-")}_${body.effectiveISO}.pdf`,
+        fileName: noticeFileName(worker, body.effectiveISO, body.lang === "en" ? "en" : "es"),
         pdfBase64: Buffer.from(bytes).toString("base64"),
       });
     }
@@ -322,7 +339,7 @@ export async function POST(req: NextRequest) {
       lang,
     });
     const pdfBase64 = Buffer.from(pdfBytes).toString("base64");
-    const fileName = `Wage_Notice_${worker.replace(/[^a-z0-9]+/gi, "-")}_${effectiveISO}.pdf`;
+    const fileName = noticeFileName(worker, effectiveISO, lang);
 
     // 3) Email a copy for the record — the notice existing on a given date is
     //    half the value if a rate is ever disputed.

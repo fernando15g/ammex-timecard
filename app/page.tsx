@@ -8693,9 +8693,23 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
       const bin = atob(base64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      // A blob URL carries no filename, which is why iOS showed these as
+      // "Unknown" and why Copy also grabbed the vercel.app URL alongside the
+      // file — as far as iOS is concerned that URL is where the document
+      // lives. Naming the File gives the share sheet a real document name and
+      // nothing extra to attach.
+      const named =
+        typeof File === "function"
+          ? new File([bytes], fileName || "Wage Notice.pdf", { type: "application/pdf" })
+          : new Blob([bytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(named);
       if (tab && !tab.closed) {
         tab.location.href = url;
+        // Give the tab the document's name too, so the title bar and any
+        // subsequent share shows it rather than the blob id.
+        try {
+          tab.document.title = fileName || "Wage Notice.pdf";
+        } catch {}
         return;
       }
       const a = document.createElement("a");

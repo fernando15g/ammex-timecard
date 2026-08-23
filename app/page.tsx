@@ -2531,6 +2531,8 @@ function SchedulePanel({
                         myDiscs.find((x) => x.scheduledJobId && x.scheduledJobId === j.jobPageId) ||
                         myDiscs[0] ||
                         null;
+                      // Every open flag he carries that day, deduped — shown
+                      // in the pop-up so the card itself stays clean.
                       const flagSummary = Array.from(
                         new Set(myDiscs.map((x) => x.kind).filter(Boolean))
                       ).join(" · ");
@@ -2538,7 +2540,7 @@ function SchedulePanel({
                         <div key={i}>
                         <div className="flex items-center gap-2 text-sm">
                           <span
-                            onClick={disc ? () => setHistChooser(disc) : undefined}
+                            onClick={disc ? () => setHistChooser({ ...disc, _summary: flagSummary }) : undefined}
                             role={disc ? "button" : undefined}
                             style={
                               c.unscheduled
@@ -2581,11 +2583,6 @@ function SchedulePanel({
                             </span>
                           )}
                         </div>
-                        {disc && !settled && flagSummary && (
-                          <div className="text-rebar text-[11px] pl-0.5 -mt-0.5 mb-0.5 opacity-80">
-                            {flagSummary}
-                          </div>
-                        )}
                         </div>
                       );
                     })}
@@ -2616,8 +2613,11 @@ function SchedulePanel({
           <div className="fixed inset-0 z-[85] bg-black/70 flex items-center justify-center p-4" onClick={() => setHistChooser(null)}>
             <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
               <div className="text-concrete font-bold mb-0.5">{histChooser.worker}</div>
-              <div className="text-rebar text-xs mb-4">
-                {histChooser.scheduledJob || "(job)"} · {histChooser.kind}
+              <div className="text-rebar text-xs mb-1">
+                {histChooser.scheduledJob || "(job)"}
+              </div>
+              <div className="text-xs font-bold mb-4" style={{ color: "#e0a63b" }}>
+                {histChooser._summary || histChooser.kind}
               </div>
               <button
                 onClick={() => { const d = histChooser; setHistChooser(null); setHistAdd(d); }}

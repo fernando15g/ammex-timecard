@@ -1978,6 +1978,17 @@ function SchedulePanel({
   // reconcile action, which the schedule history endpoint doesn't carry.
   const [histElsewhere, setHistElsewhere] = useState<Record<string, string>>({});
   const [histElsewhereConfirmed, setHistElsewhereConfirmed] = useState<Record<string, boolean>>({});
+  // Open flags for the viewed day, kept as the EXACT objects the reconcile
+  // action returns and passed to the modals untouched. Resolutions match flags
+  // on worker|date|kind (+ scheduled job id in refs), so reconstructing these
+  // from what the schedule knows would risk writing a row that clears nothing.
+  const [histDiscs, setHistDiscs] = useState<any[]>([]);
+  // The three actions, borrowed whole from Reconcile.
+  const [histChooser, setHistChooser] = useState<any | null>(null); // tapped name -> pick an action
+  const [histNoShow, setHistNoShow] = useState<any | null>(null);
+  const [histAdd, setHistAdd] = useState<any | null>(null);
+  const [histDismiss, setHistDismiss] = useState<any | null>(null);
+  const [histActMsg, setHistActMsg] = useState("");
   const [histAbsence, setHistAbsence] = useState<Record<string, string>>({});
   const [histLoading, setHistLoading] = useState(false);
   const [histEmpty, setHistEmpty] = useState(false);
@@ -2073,13 +2084,11 @@ function SchedulePanel({
 
   // Pull the reconcile picture for the day on screen. `crews` carries
   // elsewhereJob per scheduled man; `absences` carries no-show / ignored.
-  useEffect(() => {
-    if (!historyMode || !histDate) return;
-    let cancelled = false;
-    fetch(`/api/recon?action=reconcile&start=${histDate}&end=${histDate}&today=${histDate}`)
+  const loadHistRecon = useCallback((date: string, isCancelled?: () => boolean) => {
+    fetch(`/api/recon?action=reconcile&start=${date}&end=${date}&today=${date}`)
       .then((r) => r.json())
       .then((d) => {
-        if (cancelled || !d?.ok) return;
+        if ((isCancelled && isCancelled()) || !d?.ok) return;
         const elsewhere: Record<string, string> = {};
         const confirmed: Record<string, boolean> = {};
         for (const list of Object.values<any>(d.crews || {})) {
@@ -2103,12 +2112,35 @@ function SchedulePanel({
         setHistElsewhere(elsewhere);
         setHistElsewhereConfirmed(confirmed);
         setHistAbsence(absent);
+        setHistDiscs(Array.isArray(d.discrepancies) ? d.discrepancies : []);
       })
       .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!historyMode || !histDate) return;
+    let cancelled = false;
+    loadHistRecon(histDate, () => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [historyMode, histDate]);
+  }, [historyMode, histDate, loadHistRecon]);
+
+  // Same write Reconcile makes — op "log" with the disc's own kind and the
+  // scheduled job id in refs, so a no-show on job A can't clear job B.
+  async function histResolve(d: any, status: string, note: string) {
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "log", worker: d.worker, date: d.date, kind: d.kind, status, note, refs: d.scheduledJobId || "" }),
+    }).then((r) => r.json()).catch(() => null);
+    if (res?.id) {
+      loadHistRecon(histDate); // strike-through + flag list refresh together
+    } else {
+      setHistActMsg("That didn't save — check your connection and try again.");
+      setTimeout(() => setHistActMsg(""), 3500);
+    }
+  }
   function applyHist(d: any, jumpedDate?: string) {
     if (d?.date) {
       setHistDate(d.date);
@@ -2488,9 +2520,22 @@ function SchedulePanel({
                       const absent = !worked && !c.unscheduled ? histAbsence[key] : "";
                       const awayConfirmed = !!away && histElsewhereConfirmed[key] === true;
                       const settled = awayConfirmed || !!absent;
+                      // An open flag makes the name tappable — the SAME three
+                      // actions Reconcile offers, resolved through the same
+                      // write. Matching prefers the flag scoped to THIS job so
+                      // a man scheduled on two jobs resolves the right one.
+                      const myDiscs = !worked && !c.unscheduled
+                        ? histDiscs.filter((x) => (x.worker || "").toLowerCase() === key && x.date === histDate)
+                        : [];
+                      const disc =
+                        myDiscs.find((x) => x.scheduledJobId && x.scheduledJobId === j.jobPageId) ||
+                        myDiscs[0] ||
+                        null;
                       return (
                         <div key={i} className="flex items-center gap-2 text-sm">
                           <span
+                            onClick={disc ? () => setHistChooser(disc) : undefined}
+                            role={disc ? "button" : undefined}
                             style={
                               c.unscheduled
                                 ? { color: "#e0a63b" }
@@ -2499,8 +2544,9 @@ function SchedulePanel({
                                 : {
                                     color: "#f4f3f0",
                                     opacity: settled ? 0.38 : 0.45,
-                                    textDecoration: settled ? "line-through" : "none",
+                                    textDecoration: settled ? "line-through" : disc ? "underline" : "none",
                                     textDecorationColor: "rgba(244,243,240,.45)",
+                                    textDecorationStyle: disc && !settled ? "dotted" : "solid",
                                   }
                             }
                           >
@@ -2548,6 +2594,80 @@ function SchedulePanel({
               </div>
             ))}
         </div>
+
+        {histActMsg && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-graphite border border-line rounded-full px-4 py-2 text-xs font-bold z-[90]" style={{ color: "#e5533c" }}>
+            {histActMsg}
+          </div>
+        )}
+
+        {/* Tap a flagged name -> the same three actions Reconcile offers. The
+            disc object is the one the reconcile action returned, untouched. */}
+        {histChooser && (
+          <div className="fixed inset-0 z-[85] bg-black/70 flex items-center justify-center p-4" onClick={() => setHistChooser(null)}>
+            <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
+              <div className="text-concrete font-bold mb-0.5">{histChooser.worker}</div>
+              <div className="text-rebar text-xs mb-4">
+                {histChooser.scheduledJob || "(job)"} · {histChooser.kind}
+              </div>
+              <button
+                onClick={() => { const d = histChooser; setHistChooser(null); setHistAdd(d); }}
+                className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-2"
+              >
+                Add timecard
+              </button>
+              <button
+                onClick={() => { const d = histChooser; setHistChooser(null); setHistNoShow(d); }}
+                className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold mb-2"
+              >
+                No-show
+              </button>
+              <button
+                onClick={() => { const d = histChooser; setHistChooser(null); setHistDismiss(d); }}
+                className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold mb-2"
+              >
+                Ignore
+              </button>
+              <button onClick={() => setHistChooser(null)} className="w-full text-rebar text-sm font-bold py-2">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {histNoShow && (
+          <ReconNoShowModal
+            disc={histNoShow}
+            lang={"en" as Lang}
+            onClose={() => setHistNoShow(null)}
+            onDone={(note) => {
+              histResolve(histNoShow, "No-show", note);
+              setHistNoShow(null);
+            }}
+          />
+        )}
+        {histAdd && (
+          <ReconAddModal
+            disc={histAdd}
+            lang={"en" as Lang}
+            onClose={() => setHistAdd(null)}
+            onDone={() => {
+              setHistAdd(null);
+              loadHistRecon(histDate); // hours were written — refresh the day
+            }}
+          />
+        )}
+        {histDismiss && (
+          <ReconDismissNoteModal
+            disc={histDismiss}
+            lang={"en" as Lang}
+            onClose={() => setHistDismiss(null)}
+            onConfirm={(note) => {
+              histResolve(histDismiss, "Dismissed", note);
+              setHistDismiss(null);
+            }}
+          />
+        )}
       </div>
     );
   }

@@ -2531,16 +2531,11 @@ function SchedulePanel({
                         myDiscs.find((x) => x.scheduledJobId && x.scheduledJobId === j.jobPageId) ||
                         myDiscs[0] ||
                         null;
-                      // Every open flag he carries that day, deduped — shown
-                      // in the pop-up so the card itself stays clean.
-                      const flagSummary = Array.from(
-                        new Set(myDiscs.map((x) => x.kind).filter(Boolean))
-                      ).join(" · ");
                       return (
                         <div key={i}>
                         <div className="flex items-center gap-2 text-sm">
                           <span
-                            onClick={disc ? () => setHistChooser({ ...disc, _summary: flagSummary }) : undefined}
+                            onClick={disc ? () => setHistChooser({ ...disc, _all: myDiscs }) : undefined}
                             role={disc ? "button" : undefined}
                             style={
                               c.unscheduled
@@ -2613,11 +2608,37 @@ function SchedulePanel({
           <div className="fixed inset-0 z-[85] bg-black/70 flex items-center justify-center p-4" onClick={() => setHistChooser(null)}>
             <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
               <div className="text-concrete font-bold mb-0.5">{histChooser.worker}</div>
-              <div className="text-rebar text-xs mb-1">
+              <div className="text-rebar text-xs mb-2">
                 {histChooser.scheduledJob || "(job)"}
               </div>
-              <div className="text-xs font-bold mb-4" style={{ color: "#e0a63b" }}>
-                {histChooser._summary || histChooser.kind}
+              {/* Same pills as Reconcile: red = needs attention, grey =
+                  pending, amber = worth a glance; LEFT OFF CARD rides a
+                  No-timecard flag whose foreman card arrived without him. */}
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {(histChooser._all || [histChooser]).map((f: any, fi: number) => {
+                  const color =
+                    f.severity === "attention" ? "#e5533c" : f.severity === "glance" ? "#e0a63b" : "#9aa3af";
+                  const label =
+                    f.kind === "No timecard" && f.severity === "pending" ? "No hours yet" : f.kind;
+                  return (
+                    <span key={fi} className="inline-flex items-center gap-1.5">
+                      <span
+                        className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+                        style={{ color, background: `${color}22` }}
+                      >
+                        {label}
+                      </span>
+                      {f.kind === "No timecard" && f.cardSubmitted && (
+                        <span
+                          className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                          style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}
+                        >
+                          LEFT OFF CARD
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
               <button
                 onClick={() => { const d = histChooser; setHistChooser(null); setHistAdd(d); }}

@@ -2531,8 +2531,12 @@ function SchedulePanel({
                         myDiscs.find((x) => x.scheduledJobId && x.scheduledJobId === j.jobPageId) ||
                         myDiscs[0] ||
                         null;
+                      const flagSummary = Array.from(
+                        new Set(myDiscs.map((x) => x.kind).filter(Boolean))
+                      ).join(" · ");
                       return (
-                        <div key={i} className="flex items-center gap-2 text-sm">
+                        <div key={i}>
+                        <div className="flex items-center gap-2 text-sm">
                           <span
                             onClick={disc ? () => setHistChooser(disc) : undefined}
                             role={disc ? "button" : undefined}
@@ -2544,9 +2548,8 @@ function SchedulePanel({
                                 : {
                                     color: "#f4f3f0",
                                     opacity: settled ? 0.38 : 0.45,
-                                    textDecoration: settled ? "line-through" : disc ? "underline" : "none",
+                                    textDecoration: settled ? "line-through" : "none",
                                     textDecorationColor: "rgba(244,243,240,.45)",
-                                    textDecorationStyle: disc && !settled ? "dotted" : "solid",
                                   }
                             }
                           >
@@ -2577,6 +2580,12 @@ function SchedulePanel({
                               FOREMAN
                             </span>
                           )}
+                        </div>
+                        {disc && !settled && flagSummary && (
+                          <div className="text-rebar text-[11px] pl-0.5 -mt-0.5 mb-0.5 opacity-80">
+                            {flagSummary}
+                          </div>
+                        )}
                         </div>
                       );
                     })}

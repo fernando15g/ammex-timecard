@@ -1977,6 +1977,7 @@ function SchedulePanel({
   // the owner marked him no-show / ignored in Reconcile. Both come from the
   // reconcile action, which the schedule history endpoint doesn't carry.
   const [histElsewhere, setHistElsewhere] = useState<Record<string, string>>({});
+  const [histElsewhereConfirmed, setHistElsewhereConfirmed] = useState<Record<string, boolean>>({});
   const [histAbsence, setHistAbsence] = useState<Record<string, string>>({});
   const [histLoading, setHistLoading] = useState(false);
   const [histEmpty, setHistEmpty] = useState(false);
@@ -2080,9 +2081,18 @@ function SchedulePanel({
       .then((d) => {
         if (cancelled || !d?.ok) return;
         const elsewhere: Record<string, string> = {};
+        const confirmed: Record<string, boolean> = {};
         for (const list of Object.values<any>(d.crews || {})) {
           for (const c of list || []) {
-            if (!c.logged && c.elsewhereJob) elsewhere[c.worker.toLowerCase()] = c.elsewhereJob;
+            if (!c.logged && c.elsewhereJob) {
+              const k = c.worker.toLowerCase();
+              elsewhere[k] = c.elsewhereJob;
+              // Only a card with a project assigned proves he was on a
+              // DIFFERENT job. An unassigned card carries the foreman's typed
+              // text, which may well name this very job — unresolved, not
+              // settled, so the name isn't struck through.
+              confirmed[k] = !!c.elsewhereAssigned;
+            }
           }
         }
         const absent: Record<string, string> = {};
@@ -2091,6 +2101,7 @@ function SchedulePanel({
           if (worker) absent[worker] = a.status === "No-show" ? "No show" : "Ignored";
         }
         setHistElsewhere(elsewhere);
+        setHistElsewhereConfirmed(confirmed);
         setHistAbsence(absent);
       })
       .catch(() => {});
@@ -2475,7 +2486,8 @@ function SchedulePanel({
                       const key = (c.worker || "").toLowerCase();
                       const away = !worked && !c.unscheduled ? histElsewhere[key] : "";
                       const absent = !worked && !c.unscheduled ? histAbsence[key] : "";
-                      const settled = !!away || !!absent;
+                      const awayConfirmed = !!away && histElsewhereConfirmed[key] === true;
+                      const settled = awayConfirmed || !!absent;
                       return (
                         <div key={i} className="flex items-center gap-2 text-sm">
                           <span

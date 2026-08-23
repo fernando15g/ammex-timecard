@@ -359,10 +359,18 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   const submittersByJobDate = new Map<string, Set<string>>(); // `${jobId}|${date}` → foremen
   const loggedPeopleByJobDate = new Map<string, Map<string, number>>(); // `${jobId}|${date}` → workerLower → hours
   const displayName = new Map<string, string>(); // workerLower → display casing
+  const loggedJobAssigned = new Map<string, boolean>();
   for (const c of live) {
     loggedWorkerAnyDate.add(`${c.worker.toLowerCase()}|${c.date}`);
     const wd = `${c.worker.toLowerCase()}|${c.date}`;
-    if (!loggedJobByWorkerDate.has(wd)) loggedJobByWorkerDate.set(wd, c.projectName || c.job || "");
+    if (!loggedJobByWorkerDate.has(wd)) {
+      loggedJobByWorkerDate.set(wd, c.projectName || c.job || "");
+      // Whether that row has a project assigned yet. Without one it can't be
+      // matched to a scheduled job, so "he worked elsewhere" is a guess based
+      // on the foreman's typed text — it may well be THIS job. The schedule
+      // uses this to show the label without striking the name through.
+      loggedJobAssigned.set(wd, !!c.projectId);
+    }
     if (c.projectId) {
       const jk = `${c.projectId}|${c.date}`;
       loggedOnJobDate.add(jk);
@@ -384,7 +392,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   const crewByJobDate = new Map<
     string,
     { total: number; logged: number; elsewhere: number; foreman: string; jobName: string; date: string; jobId: string;
-      crew: { worker: string; logged: boolean; elsewhereJob: string }[] }
+      crew: { worker: string; logged: boolean; elsewhereJob: string; elsewhereAssigned: boolean }[] }
   >();
   for (const s of sched) {
     const jk = `${s.jobId}|${s.date}`;
@@ -404,7 +412,10 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     const elsewhereJob = !didLog && loggedAnywhere
       ? loggedJobByWorkerDate.get(`${s.worker.toLowerCase()}|${s.date}`) || ""
       : "";
-    rec.crew.push({ worker: s.worker, logged: didLog, elsewhereJob });
+    const elsewhereAssigned = elsewhereJob
+      ? loggedJobAssigned.get(`${s.worker.toLowerCase()}|${s.date}`) === true
+      : false;
+    rec.crew.push({ worker: s.worker, logged: didLog, elsewhereJob, elsewhereAssigned });
     if (s.jobName && !rec.jobName) rec.jobName = s.jobName;
   }
 
@@ -457,7 +468,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
           submitted: rec.logged,
           total: rec.total,
           submittedBy: submitters.join(", "),
-          people: rec.crew.map((c) => ({ worker: c.worker, logged: c.logged, elsewhereJob: c.elsewhereJob })),
+          people: rec.crew.map((c) => ({ worker: c.worker, logged: c.logged, elsewhereJob: c.elsewhereJob, elsewhereAssigned: c.elsewhereAssigned })),
           walkOns,
         },
       });
@@ -708,7 +719,7 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
 
   // scheduled crew per job+date (for the "view crew" popup): who was scheduled
   // and whether each logged on that job.
-  const crews: Record<string, { worker: string; logged: boolean; elsewhereJob: string }[]> = {};
+  const crews: Record<string, { worker: string; logged: boolean; elsewhereJob: string; elsewhereAssigned: boolean }[]> = {};
   for (const [jk, rec] of crewByJobDate) {
     crews[jk] = rec.crew.slice().sort((a, b) => a.worker.localeCompare(b.worker));
   }

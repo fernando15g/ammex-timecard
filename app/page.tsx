@@ -5007,9 +5007,22 @@ function DiscCard({
           {/* Pills sit in a flex row that wraps as whole units — inline spans
               let a long badge break mid-flow and hang half-indented. */}
           <div className="flex flex-wrap items-center gap-1.5 mt-1">
+            {/* When the job was called off, the reason for the flag is
+                settled — so this pill steps back (struck, grey) and the
+                cancellation carries the eye instead. The flag itself still
+                stands and still needs closing; only the emphasis changes. */}
             <span
               className="text-[11px] font-bold px-2 py-0.5 rounded-full"
-              style={{ color, background: `${color}22` }}
+              style={
+                cancelled
+                  ? {
+                      color: "#9aa3af",
+                      background: "rgba(154,163,175,.15)",
+                      textDecoration: "line-through",
+                      textDecorationColor: "rgba(154,163,175,.7)",
+                    }
+                  : { color, background: `${color}22` }
+              }
             >
               {kindLabel}
             </span>
@@ -5023,11 +5036,9 @@ function DiscCard({
               </span>
             )}
             {cancelled && (
-              // Deeper brick red, distinct from the severity pill's brighter
-              // red so the two don't read as one blob.
               <span
                 className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                style={{ color: "#d98a80", background: "rgba(140,42,32,.35)" }}
+                style={{ color: "#e5533c", background: "rgba(229,83,60,.15)" }}
                 title="This job was called off — the flag still stands in case anyone logged hours elsewhere."
               >
                 {cancelled.partial ? "PARTIALLY CANCELLED" : "JOB CANCELLED"}
@@ -5038,7 +5049,7 @@ function DiscCard({
             cancelled.note &&
             cancelled.note !== "Job cancelled" &&
             cancelled.note !== "Partially cancelled" && (
-              <div className="text-[11px] mt-1" style={{ color: "#d98a80" }}>
+              <div className="text-[11px] mt-1" style={{ color: "#e5533c" }}>
                 {cancelled.note}
               </div>
             )}

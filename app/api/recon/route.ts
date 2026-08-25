@@ -662,6 +662,36 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
   // (the Ignore button) are the two outcomes the owner can record; the note is
   // whatever he typed, which the past schedule shows beside the struck name.
   const absences = new Map<string, { status: string; note: string }>();
+  // `jobPageId|date` -> the cancellation and whatever reason the owner typed.
+  // Purely informational: it annotates flags, it never suppresses one.
+  const cancellations = new Map<string, { note: string; partial: boolean }>();
+  try {
+    let cCur: string | undefined;
+    do {
+      const cRes: any = await notion.databases.query({
+        database_id: RECON_LOG_DB_ID,
+        filter: {
+          and: [
+            { property: RECON_PROPS.kind, select: { equals: "Job cancelled" } },
+            { property: RECON_PROPS.date, date: { on_or_after: startISO } },
+            { property: RECON_PROPS.date, date: { on_or_before: endISO } },
+          ],
+        },
+        start_cursor: cCur,
+        page_size: 100,
+      });
+      for (const pg of cRes.results as any[]) {
+        const ref = (pg.properties?.[RECON_PROPS.refs]?.rich_text || [])
+          .map((t: any) => t.plain_text).join("");
+        const note = (pg.properties?.[RECON_PROPS.note]?.rich_text || [])
+          .map((t: any) => t.plain_text).join("");
+        const [jobPageId, d, partialFlag] = ref.split("|");
+        if (jobPageId && d)
+          cancellations.set(`${jobPageId}|${d}`, { note, partial: partialFlag === "partial" });
+      }
+      cCur = cRes.has_more ? cRes.next_cursor : undefined;
+    } while (cCur);
+  } catch { /* additive — never block reconcile */ }
   try {
     let cursor: string | undefined;
     do {
@@ -732,6 +762,11 @@ async function reconcile(startISO: string, endISO: string, todayISO: string) {
     crews,
     unconfirmedWorkers,
     noShows: Array.from(absences.keys()),
+    cancellations: Array.from(cancellations.entries()).map(([key, v]) => ({
+      key,
+      note: v.note,
+      partial: v.partial,
+    })),
     absences: Array.from(absences.entries()).map(([key, v]) => ({
       key,
       status: v.status,

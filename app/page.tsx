@@ -4957,7 +4957,9 @@ function DiscCard({
   onViewCrew,
   unconfirmedTag,
   onUnconfirmedTap,
+  cancelled,
 }: {
+  cancelled?: { note: string; partial: boolean };
   d: any;
   lang: Lang;
   color: string;
@@ -5015,6 +5017,20 @@ function DiscCard({
               title="The foreman's card for this job came in without this person — likely a no-show."
             >
               LEFT OFF CARD
+            </span>
+          )}
+          {cancelled && (
+            <span
+              className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ml-1.5"
+              style={{ color: "#e5533c", background: "rgba(229,83,60,.15)" }}
+              title="This job was called off — the flag still stands in case anyone logged hours elsewhere."
+            >
+              {(cancelled.partial ? "PARTIALLY CANCELLED" : "JOB CANCELLED") +
+                (cancelled.note &&
+                cancelled.note !== "Job cancelled" &&
+                cancelled.note !== "Partially cancelled"
+                  ? ` — ${cancelled.note}`
+                  : "")}
             </span>
           )}
         </div>
@@ -5187,6 +5203,9 @@ function ReconReviewView({
   const [showHeld, setShowHeld] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState<{ id: string; name: string }[]>([]);
   const [noShows, setNoShows] = useState<Set<string>>(new Set());
+  // `jobPageId|date` -> why the job was called off. Annotates flags only —
+  // the crew still flag normally, so hours logged elsewhere are never buried.
+  const [cancellations, setCancellations] = useState<Record<string, { note: string; partial: boolean }>>({});
   const [confirmWorker, setConfirmWorker] = useState<{ id: string; name: string } | null>(null);
   const [heldCount, setHeldCount] = useState(0);
   const [heldHours, setHeldHours] = useState(0);
@@ -5279,6 +5298,9 @@ function ReconReviewView({
     setCrews(d.crews || {});
     setUnconfirmed(d.unconfirmedWorkers || []);
     setNoShows(new Set<string>(d.noShows || []));
+    const cx: Record<string, { note: string; partial: boolean }> = {};
+    for (const c of d.cancellations || []) cx[c.key] = { note: c.note, partial: c.partial };
+    setCancellations(cx);
   }, []);
 
   const loadDiscs = useCallback(() => {
@@ -5950,6 +5972,11 @@ function ReconReviewView({
                                   lang={lang}
                                   color={color}
                                   sev={sev}
+                                  cancelled={
+                                    d.scheduledJobId
+                                      ? cancellations[`${d.scheduledJobId}|${d.date}`]
+                                      : undefined
+                                  }
                                   busy={busyKey === bk}
                                   onAdd={() => setAddFor(d)}
                                   onNoShow={() => setNoShowFor(d)}

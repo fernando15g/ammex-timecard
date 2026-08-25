@@ -5004,35 +5004,44 @@ function DiscCard({
               </button>
             )}
           </div>
-          <div
-            className="inline-block text-[11px] font-bold px-2 py-0.5 rounded-full mt-1"
-            style={{ color, background: `${color}22` }}
-          >
-            {kindLabel}
+          {/* Pills sit in a flex row that wraps as whole units — inline spans
+              let a long badge break mid-flow and hang half-indented. */}
+          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+            <span
+              className="text-[11px] font-bold px-2 py-0.5 rounded-full"
+              style={{ color, background: `${color}22` }}
+            >
+              {kindLabel}
+            </span>
+            {isNoTimecard && d.cardSubmitted && (
+              <span
+                className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}
+                title="The foreman's card for this job came in without this person — likely a no-show."
+              >
+                LEFT OFF CARD
+              </span>
+            )}
+            {cancelled && (
+              // Deeper brick red, distinct from the severity pill's brighter
+              // red so the two don't read as one blob.
+              <span
+                className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                style={{ color: "#d98a80", background: "rgba(140,42,32,.35)" }}
+                title="This job was called off — the flag still stands in case anyone logged hours elsewhere."
+              >
+                {cancelled.partial ? "PARTIALLY CANCELLED" : "JOB CANCELLED"}
+              </span>
+            )}
           </div>
-          {isNoTimecard && d.cardSubmitted && (
-            <span
-              className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ml-1.5"
-              style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}
-              title="The foreman's card for this job came in without this person — likely a no-show."
-            >
-              LEFT OFF CARD
-            </span>
-          )}
-          {cancelled && (
-            <span
-              className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full mt-1 ml-1.5"
-              style={{ color: "#e5533c", background: "rgba(229,83,60,.15)" }}
-              title="This job was called off — the flag still stands in case anyone logged hours elsewhere."
-            >
-              {(cancelled.partial ? "PARTIALLY CANCELLED" : "JOB CANCELLED") +
-                (cancelled.note &&
-                cancelled.note !== "Job cancelled" &&
-                cancelled.note !== "Partially cancelled"
-                  ? ` — ${cancelled.note}`
-                  : "")}
-            </span>
-          )}
+          {cancelled &&
+            cancelled.note &&
+            cancelled.note !== "Job cancelled" &&
+            cancelled.note !== "Partially cancelled" && (
+              <div className="text-[11px] mt-1" style={{ color: "#d98a80" }}>
+                {cancelled.note}
+              </div>
+            )}
         </div>
         {isNoTimecard && onViewCrew ? (
           <button

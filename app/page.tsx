@@ -8818,6 +8818,11 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
   const [peekWorker, setPeekWorker] = useState("");
   const [peekRows, setPeekRows] = useState<Hist[]>([]);
   const [peekLoading, setPeekLoading] = useState(false);
+  // Rates are masked whenever this screen opens — the list is the one place
+  // wages appear without being asked for. Tapping an amount reveals just that
+  // one; tapping the name still opens history. Deliberately not remembered
+  // between opens, so a tap weeks ago can't leave wages on screen today.
+  const [shownRates, setShownRates] = useState<Set<string>>(new Set());
 
   async function token(): Promise<string> {
     const sb = supabase();
@@ -9199,8 +9204,21 @@ function WagesPanel({ onClose }: { onClose: () => void }) {
                       className="w-full text-left bg-graphite border border-line rounded-2xl p-3 mb-2 flex items-center justify-between active:bg-steel"
                     >
                       <span className="text-concrete truncate">{c.worker}</span>
-                      <span className="text-concrete font-bold shrink-0 ml-2">
-                        ${c.rate.toFixed(2)}
+                      <span
+                        onClick={(e) => {
+                          // Reveal this one rate without opening his history.
+                          e.stopPropagation();
+                          setShownRates((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(c.worker)) next.delete(c.worker);
+                            else next.add(c.worker);
+                            return next;
+                          });
+                        }}
+                        className="text-concrete font-bold shrink-0 ml-2"
+                        style={shownRates.has(c.worker) ? undefined : { letterSpacing: "0.08em" }}
+                      >
+                        {shownRates.has(c.worker) ? `$${c.rate.toFixed(2)}` : "$••.••"}
                       </span>
                     </button>
                   ))}

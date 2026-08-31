@@ -732,3 +732,62 @@ export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> 
 
   return pdf.save();
 }
+
+// Multi-week payroll grid. A longer custom range is rendered as one weekly
+// grid per week, concatenated into a single PDF — the grid has seven day
+// columns by design, so there is no orientation in which 60 days fit.
+//
+// Each week is built by the SAME buildPayrollGridPdf the single-week report
+// uses and then copied in page by page, so the weekly report's rendering is
+// literally unchanged. If a week fails to build, its pages are replaced with a
+// visible notice rather than being quietly omitted — the original bug silently
+// dropped eight weeks and the PDF looked complete.
+export async function buildMultiWeekPayrollGridPdf(
+  weeks: { span: { start: string; end: string }; grid: PayrollGrid }[]
+): Promise<Uint8Array> {
+  const out = await PDFDocument.create();
+  const notices: string[] = [];
+
+  for (const wk of weeks) {
+    try {
+      const oneWeek = await buildPayrollGridPdf(wk.grid);
+      const src = await PDFDocument.load(oneWeek);
+      const pages = await out.copyPages(src, src.getPageIndices());
+      for (const pg of pages) out.addPage(pg);
+    } catch (err: any) {
+      notices.push(
+        `${wk.span.start} to ${wk.span.end} — could not be built (${err?.message || "unknown error"})`
+      );
+    }
+  }
+
+  if (notices.length) {
+    const font = await out.embedFont(StandardFonts.Helvetica);
+    const bold = await out.embedFont(StandardFonts.HelveticaBold);
+    const page = out.addPage([612, 792]);
+    let y = 792 - MARGIN;
+    page.drawText("WEEKS THAT DID NOT BUILD", {
+      x: MARGIN, y, size: 13, font: bold, color: rgb(0.9, 0.33, 0.24),
+    });
+    y -= 24;
+    page.drawText("These weeks are missing from this report. Re-run them individually.", {
+      x: MARGIN, y, size: 10, font, color: rgb(0.35, 0.38, 0.42),
+    });
+    y -= 24;
+    for (const n of notices) {
+      page.drawText(`• ${n}`, { x: MARGIN, y, size: 10, font, color: rgb(0.1, 0.12, 0.15) });
+      y -= 16;
+    }
+  }
+
+  // Nothing built at all — say so rather than returning an empty document.
+  if (out.getPageCount() === 0) {
+    const font = await out.embedFont(StandardFonts.Helvetica);
+    const page = out.addPage([612, 792]);
+    page.drawText("No payroll data for this range.", {
+      x: MARGIN, y: 792 - MARGIN, size: 12, font, color: rgb(0.1, 0.12, 0.15),
+    });
+  }
+
+  return out.save();
+}

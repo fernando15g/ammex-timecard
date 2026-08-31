@@ -12,9 +12,9 @@ import {
   SCHEDULE_DB_ID,
   SCHEDULE_PROPS,
 } from "./notion";
-import { buildReport, RawRow, ShortPayEntry, prettifyJob } from "./report";
+import { buildReport, RawRow, ShortPayEntry, prettifyJob, addDaysISO } from "./report";
 import { buildReportXlsx, buildWorkerXlsx, buildDailyXlsx } from "./report-excel";
-import { buildReportPdf, buildWorkerPdf, buildDailyPdf, buildPayrollGridPdf } from "./report-pdf";
+import { buildReportPdf, buildWorkerPdf, buildDailyPdf, buildPayrollGridPdf, buildMultiWeekPayrollGridPdf } from "./report-pdf";
 import { buildDailyReport } from "./report-daily";
 import { buildPayrollGrid } from "./report-payrollgrid";
 import { PDFDocument } from "pdf-lib";
@@ -158,6 +158,22 @@ export interface RunOptions {
 // query can never find them. They are located by `Pay Week` instead, which is
 // exactly what keeps them from being paid twice: the grid pays rows by Date,
 // this pays rows by Pay Week, and no row satisfies both rules.
+// Split a span into consecutive 7-day blocks. The payroll grid is structurally
+// a one-week document — seven day columns — so a longer range is rendered as
+// one grid per week rather than silently truncated to the first seven days,
+// which is what it used to do.
+export function weekSpansForRange(startISO: string, endISO: string): { start: string; end: string }[] {
+  const out: { start: string; end: string }[] = [];
+  let cur = startISO;
+  // Hard ceiling matches the API's MAX_SPAN_DAYS guard upstream.
+  for (let guard = 0; guard < 60 && cur <= endISO; guard++) {
+    const wkEnd = addDaysISO(cur, 6);
+    out.push({ start: cur, end: wkEnd < endISO ? wkEnd : endISO });
+    cur = addDaysISO(cur, 7);
+  }
+  return out;
+}
+
 export async function loadShortPayForSpan(
   startISO: string,
   endISO: string
@@ -615,9 +631,25 @@ export async function runReport(
 
   // 5-PG) Payroll Grid: every worker × day, PDF only.
   if (reportView === "payrollGrid") {
+    const spans = weekSpansForRange(startISO, endISO);
+    const allShortPay = await loadShortPayForSpan(startISO, endISO);
     const pg = buildPayrollGrid(rows, activeRoster, startISO, endISO, lang);
-    pg.shortPay = await loadShortPayForSpan(startISO, endISO);
-    const pgPdf = await buildPayrollGridPdf(pg);
+    pg.shortPay = allShortPay;
+
+    // One grid per week, concatenated. Each week goes through the SAME weekly
+    // builder the single-week report uses, so that path is untouched.
+    const pgPdf =
+      spans.length <= 1
+        ? await buildPayrollGridPdf(pg)
+        : await buildMultiWeekPayrollGridPdf(
+            spans.map((sp) => {
+              const wk = buildPayrollGrid(rows, activeRoster, sp.start, sp.end, lang);
+              wk.shortPay = (allShortPay || []).filter(
+                (e) => e.payWeekISO >= sp.start && e.payWeekISO <= sp.end
+              );
+              return { span: sp, grid: wk };
+            })
+          );
     const pgB64 = Buffer.from(pgPdf).toString("base64");
     const pgName = `Ammex_PayrollGrid_${startISO}_to_${endISO}`;
     if (mode === "view") {

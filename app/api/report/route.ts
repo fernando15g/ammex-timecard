@@ -7,7 +7,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 const REPORT_PIN = "5314";
-const MAX_SPAN_DAYS = 62; // guard against absurd custom ranges
+// A full quarter. Raised from 62 once the payroll grid learned to render one
+// weekly grid per week instead of silently truncating to the first seven days.
+// The real ceiling is the route's 60s budget: a long range means pulling every
+// timecard in the span from Notion and rendering a grid per week, so a year
+// would time out. Anything beyond a quarter wants a different approach, not a
+// bigger number here.
+const MAX_SPAN_DAYS = 92;
 
 function todayISO(): string {
   const d = new Date();

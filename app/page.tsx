@@ -9332,6 +9332,12 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
   }
 
   const [payWeek, setPayWeek] = useState(() => weekStartISO(0));
+  // The list below is a LOOK-BACK and has its own range. The pay-week control
+  // above is an input — which check an entry rides — so overloading it with
+  // history would make one control mean two different things.
+  const [viewRange, setViewRange] = useState<"this" | "last" | "custom">("this");
+  const [viewStart, setViewStart] = useState(() => weekStartISO(0));
+  const [viewEnd, setViewEnd] = useState(() => addDays(weekStartISO(0), 6));
   const [roster, setRoster] = useState<string[]>([]);
   const [jobs, setJobs] = useState<{ id: string; name: string; jobId: string }[]>([]);
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -9355,17 +9361,37 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
     });
   }, []);
 
-  function loadEntries(wk: string) {
+  function loadEntries(startISO: string, endISO?: string) {
     setLoading(true);
-    fetch(`/api/short-pay?ownerPin=5314&start=${wk}&end=${addDays(wk, 6)}`)
+    const e = endISO || addDays(startISO, 6);
+    fetch(`/api/short-pay?ownerPin=5314&start=${startISO}&end=${e}`)
       .then((r) => r.json())
       .then((d) => setEntries(Array.isArray(d?.entries) ? d.entries : []))
       .catch(() => setEntries([]))
       .finally(() => setLoading(false));
   }
+  // Recompute the viewed span whenever the range changes.
+  const spanStart =
+    viewRange === "this" ? weekStartISO(0) : viewRange === "last" ? weekStartISO(-1) : viewStart;
+  const spanEnd =
+    viewRange === "custom" ? viewEnd : addDays(spanStart, 6);
+
   useEffect(() => {
+    loadEntries(spanStart, spanEnd);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spanStart, spanEnd]);
+
+  // A new entry lands in the pay week chosen above — jump the view there so it
+  // is visible straight away rather than seeming not to have saved.
+  function afterAdd() {
+    if (payWeek === weekStartISO(0)) setViewRange("this");
+    else {
+      setViewRange("custom");
+      setViewStart(payWeek);
+      setViewEnd(addDays(payWeek, 6));
+    }
     loadEntries(payWeek);
-  }, [payWeek]);
+  }
 
   function clearForm() {
     setWorkers([]); setDateISO(""); setProjectId(""); setHours(""); setReason("");
@@ -9417,7 +9443,7 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
       body: JSON.stringify({ ownerPin: "5314", op: "void", id }),
     }).catch(() => null);
     setBusy(false);
-    loadEntries(payWeek);
+    loadEntries(spanStart, spanEnd);
   }
 
   const total = Math.round(entries.reduce((s, e) => s + e.hours, 0) * 100) / 100;
@@ -9563,19 +9589,58 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        {/* What's already queued for this pay week */}
+        {/* Look-back: what was entered for any week, not just the one being
+            paid into. Header follows the selection so it never claims to be
+            showing the current week when it isn't. */}
         <div className="flex items-center justify-between mb-2">
           <div className="text-concrete font-bold text-[15px]">
-            Paying this week
+            {viewRange === "this"
+              ? "Paying this week"
+              : viewRange === "last"
+              ? `Paid week of ${pretty(spanStart)}`
+              : `${pretty(spanStart)} – ${pretty(spanEnd)}`}
           </div>
           <div className="text-concrete text-sm font-extrabold">{total}h</div>
         </div>
+
+        <div className="flex gap-2 mb-3">
+          {([["this", "This week"], ["last", "Last week"], ["custom", "Custom"]] as const).map(
+            ([k, label]) => (
+              <button
+                key={k}
+                onClick={() => setViewRange(k)}
+                className={`flex-1 rounded-full h-9 text-xs font-bold ${
+                  viewRange === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+                }`}
+              >
+                {label}
+              </button>
+            )
+          )}
+        </div>
+
+        {viewRange === "custom" && (
+          <div className="flex gap-2 mb-3">
+            <input
+              type="date"
+              value={viewStart}
+              onChange={(e) => setViewStart(e.target.value)}
+              className="flex-1 min-w-0 bg-steel border border-line rounded-xl h-11 px-3 text-concrete"
+            />
+            <input
+              type="date"
+              value={viewEnd}
+              onChange={(e) => setViewEnd(e.target.value)}
+              className="flex-1 min-w-0 bg-steel border border-line rounded-xl h-11 px-3 text-concrete"
+            />
+          </div>
+        )}
 
         {loading ? (
           <div className="text-rebar text-sm">Loading…</div>
         ) : entries.length === 0 ? (
           <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">
-            Nothing added for this pay week.
+            {viewRange === "this" ? "Nothing added for this pay week." : "Nothing in this range."}
           </div>
         ) : (
           entries.map((e) => (
@@ -9598,14 +9663,19 @@ function ShortPayPanel({ onClose }: { onClose: () => void }) {
               {e.reason && (
                 <div className="text-rebar text-xs mt-1 italic">{e.reason}</div>
               )}
-              <button
-                onClick={() => remove(e.id)}
-                disabled={busy}
-                className="mt-3 text-xs font-bold rounded-full px-3 py-1.5 border disabled:opacity-40"
-                style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
-              >
-                Remove
-              </button>
+              {/* Remove only on the week still being paid into. Voiding a
+                  past entry wouldn't unpay the man — it would just erase the
+                  record of what he was actually paid. */}
+              {e.payWeekISO >= weekStartISO(0) && (
+                <button
+                  onClick={() => remove(e.id)}
+                  disabled={busy}
+                  className="mt-3 text-xs font-bold rounded-full px-3 py-1.5 border disabled:opacity-40"
+                  style={{ color: "#e0a63b", borderColor: "rgba(224,166,59,.5)" }}
+                >
+                  Remove
+                </button>
+              )}
             </div>
           ))
         )}

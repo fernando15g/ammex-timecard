@@ -10391,7 +10391,8 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
                   inactive.map((p) => (
                     <RosterRow key={p.id} p={p} busy={busyId === p.id} inactive
                       onEdit={() => setEditing(p)} onToggle={() => setActive(p, true)}
-                      onConfirm={() => setConfirmPerson(p)} />
+                      onConfirm={() => setConfirmPerson(p)}
+                      onMerge={() => setMergeFrom(p)} />
                   ))}
               </div>
             )}
@@ -11656,7 +11657,7 @@ function RosterMergeModal({
 
   const needle = q.trim().toLowerCase();
   const options = people
-    .filter((p) => p.id !== from.id && p.active)
+    .filter((p) => p.id !== from.id)
     .filter((p) => !needle || p.name.toLowerCase().includes(needle));
 
   async function runPreview(name: string) {

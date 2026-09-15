@@ -5184,6 +5184,77 @@ function ReconReviewView({
   const [bulkGroup, setBulkGroup] = useState<string | null>(null); // "job|date" key
   const [editGroup, setEditGroup] = useState<string | null>(null); // full card edit
   const [splitGroup, setSplitGroup] = useState<string | null>(null); // bulk split between two jobs
+  // Entry-level cleanup inside a card: pick several people off a duplicated
+  // submission and void them together, or set the same corrected hours across
+  // a group, without opening each one.
+  const [selMode, setSelMode] = useState<Record<string, boolean>>({});
+  const [selIds, setSelIds] = useState<Set<string>>(new Set());
+  const [bulkHoursFor, setBulkHoursFor] = useState<any | null>(null);
+  const [addWorkerFor, setAddWorkerFor] = useState<any | null>(null);
+  const [selBusy, setSelBusy] = useState(false);
+
+  function toggleSel(id: string) {
+    setSelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // Void the selected entries. Void-not-delete, same as everywhere else, so a
+  // duplicated card leaves a trail rather than vanishing.
+  async function voidSelected(g: any) {
+    const ids = g.items.filter((e: any) => selIds.has(e.id)).map((e: any) => e.id);
+    if (!ids.length) return;
+    setSelBusy(true);
+    for (const id of ids) {
+      const item = g.items.find((e: any) => e.id === id);
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "void",
+          id,
+          voided: true,
+          note: "Duplicate / removed from card",
+          logWorker: item?.worker || "",
+          logDate: g.date,
+        }),
+      }).catch(() => null);
+    }
+    setSelBusy(false);
+    setSelIds(new Set());
+    setSelMode((m) => ({ ...m, [g.key]: false }));
+    load();
+  }
+
+  // Set the same hours on every selected entry.
+  async function setHoursSelected(g: any, hours: number) {
+    const ids = g.items.filter((e: any) => selIds.has(e.id)).map((e: any) => e.id);
+    if (!ids.length) return;
+    setSelBusy(true);
+    for (const id of ids) {
+      const item = g.items.find((e: any) => e.id === id);
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "edit",
+          id,
+          hours,
+          logWorker: item?.worker || "",
+          logDate: g.date,
+          changeDesc: `Hours set to ${hours} (bulk)`,
+        }),
+      }).catch(() => null);
+    }
+    setSelBusy(false);
+    setSelIds(new Set());
+    setSelMode((m) => ({ ...m, [g.key]: false }));
+    setBulkHoursFor(null);
+    load();
+  }
   const [voidGroup, setVoidGroup] = useState<string | null>(null); // void a whole junk card
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [editEntry, setEditEntry] = useState<Miss | null>(null);
@@ -5587,6 +5658,65 @@ function ReconReviewView({
 
                   {open && (
                     <div className="mt-3 pt-3 border-t border-line">
+                      <div className="flex items-center gap-2 mb-3">
+                        <button
+                          onClick={() => {
+                            setSelIds(new Set());
+                            setSelMode((m) => ({ ...m, [g.key]: !m[g.key] }));
+                          }}
+                          className={`text-xs font-bold rounded-full px-3 py-1.5 border ${
+                            selMode[g.key]
+                              ? "bg-safety text-steel border-transparent"
+                              : "text-rebar border-line"
+                          }`}
+                        >
+                          {selMode[g.key] ? "Done" : "Select"}
+                        </button>
+                        <button
+                          onClick={() => setAddWorkerFor(g)}
+                          className="text-xs font-bold rounded-full px-3 py-1.5 border text-rebar border-line"
+                        >
+                          + Add worker
+                        </button>
+                        {selMode[g.key] && (
+                          <button
+                            onClick={() =>
+                              setSelIds(
+                                selIds.size === g.items.length
+                                  ? new Set()
+                                  : new Set(g.items.map((x) => x.id))
+                              )
+                            }
+                            className="text-xs font-bold rounded-full px-3 py-1.5 border text-rebar border-line ml-auto"
+                          >
+                            {selIds.size === g.items.length ? "None" : "All"}
+                          </button>
+                        )}
+                      </div>
+
+                      {selMode[g.key] && selIds.size > 0 && (
+                        <div className="flex items-center gap-2 mb-3">
+                          <span className="text-rebar text-xs font-bold">
+                            {selIds.size} selected
+                          </span>
+                          <button
+                            onClick={() => setBulkHoursFor(g)}
+                            disabled={selBusy}
+                            className="ml-auto text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
+                          >
+                            Set hours
+                          </button>
+                          <button
+                            onClick={() => voidSelected(g)}
+                            disabled={selBusy}
+                            className="text-xs font-bold rounded-full px-3 py-1.5 border disabled:opacity-40"
+                            style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                          >
+                            {selBusy ? "…" : "Remove"}
+                          </button>
+                        </div>
+                      )}
+
                       <div className="space-y-2">
                         {g.items.map((e) => {
                           const isForeman =
@@ -5605,7 +5735,22 @@ function ReconReviewView({
                                   : { background: "rgba(28,33,39,.4)" }
                               }
                             >
-                              <div className="text-concrete text-sm font-semibold truncate min-w-0">
+                              <div
+                                className="text-concrete text-sm font-semibold truncate min-w-0 flex items-center gap-2"
+                                onClick={selMode[g.key] ? () => toggleSel(e.id) : undefined}
+                              >
+                                {selMode[g.key] && (
+                                  <span
+                                    className="shrink-0 w-4 h-4 rounded border flex items-center justify-center text-[10px] font-bold"
+                                    style={
+                                      selIds.has(e.id)
+                                        ? { background: "#e8801a", borderColor: "#e8801a", color: "#1c2127" }
+                                        : { borderColor: "rgba(154,163,175,.6)", color: "transparent" }
+                                    }
+                                  >
+                                    ✓
+                                  </span>
+                                )}
                                 {e.worker}
                                 {isForeman && (
                                   <span
@@ -6081,6 +6226,28 @@ function ReconReviewView({
           onClose={() => setBulkGroup(null)}
           onDone={() => {
             setBulkGroup(null);
+            load();
+          }}
+        />
+      )}
+
+      {/* Set the same hours across the selected entries. */}
+      {bulkHoursFor && (
+        <BulkHoursModal
+          count={selIds.size}
+          onClose={() => setBulkHoursFor(null)}
+          onSave={(h) => setHoursSelected(bulkHoursFor, h)}
+        />
+      )}
+
+      {/* Add a person the foreman left off this card. Inherits the card's
+          date, job text and foreman so the entry groups with the rest. */}
+      {addWorkerFor && (
+        <AddToCardModal
+          group={addWorkerFor}
+          onClose={() => setAddWorkerFor(null)}
+          onDone={() => {
+            setAddWorkerFor(null);
             load();
           }}
         />
@@ -10508,8 +10675,19 @@ function ReconBulkSplitModal({
   }
 
   return (
-    <div className="fixed inset-0 z-[80] bg-black/60 flex items-end sm:items-center justify-center sm:p-5">
-      <div className="bg-graphite border border-line rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg max-h-[92vh] flex flex-col">
+    // While the job picker is open the sheet anchors to the TOP: the on-screen
+    // keyboard takes the bottom half, and a bottom-anchored sheet pushes the
+    // results underneath it where they can't be seen.
+    <div
+      className={`fixed inset-0 z-[80] bg-black/60 flex justify-center sm:p-5 ${
+        pickFor ? "items-start pt-3 sm:items-center sm:pt-0" : "items-end sm:items-center"
+      }`}
+    >
+      <div
+        className={`bg-graphite border border-line rounded-2xl sm:rounded-2xl w-full sm:max-w-lg flex flex-col ${
+          pickFor ? "max-h-[60vh] sm:max-h-[92vh]" : "rounded-t-2xl max-h-[92vh]"
+        }`}
+      >
         <div className="p-5 pb-3">
           <div className="text-concrete font-bold text-lg">Split between jobs</div>
           <div className="text-rebar text-sm mt-0.5">
@@ -11055,6 +11233,177 @@ function CardDetailModal({
               </div>
             </div>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Set one hours value across every selected entry on a card.
+function BulkHoursModal({
+  count,
+  onClose,
+  onSave,
+}: {
+  count: number;
+  onClose: () => void;
+  onSave: (hours: number) => void;
+}) {
+  const [v, setV] = useState("8");
+  const h = parseFloat(v);
+  const valid = Number.isFinite(h) && h >= 0;
+  return (
+    <div className="fixed inset-0 z-[85] bg-black/70 flex items-center justify-center p-4">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold mb-1">Set hours</div>
+        <div className="text-rebar text-xs mb-4">
+          Applies to all {count} selected {count === 1 ? "entry" : "entries"}.
+        </div>
+        <input
+          type="number"
+          inputMode="decimal"
+          step="0.5"
+          min="0"
+          value={v}
+          onChange={(e) => setV(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-12 px-3 text-concrete text-lg font-bold mb-4"
+        />
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold">
+            Cancel
+          </button>
+          <button
+            disabled={!valid}
+            onClick={() => onSave(h)}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Add a worker the foreman left off a card. The new entry inherits the card's
+// date, job text and foreman, so it lands in the same group rather than
+// creating a second card.
+function AddToCardModal({
+  group,
+  onClose,
+  onDone,
+}: {
+  group: any;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [roster, setRoster] = useState<string[]>([]);
+  const [q, setQ] = useState("");
+  const [picked, setPicked] = useState("");
+  const [hours, setHours] = useState("8");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    fetch("/api/roster")
+      .then((r) => r.json())
+      .then((d) => setRoster(Array.isArray(d?.workers) ? d.workers : []))
+      .catch(() => {});
+  }, []);
+
+  const already = new Set((group.items || []).map((i: any) => i.worker.toLowerCase()));
+  const needle = q.trim().toLowerCase();
+  const matches = roster
+    .filter((n) => !already.has(n.toLowerCase()))
+    .filter((n) => !needle || n.toLowerCase().includes(needle));
+
+  async function save() {
+    const h = parseFloat(hours);
+    if (!picked) { setErr("Pick a worker."); return; }
+    if (!Number.isFinite(h) || h <= 0) { setErr("Enter hours."); return; }
+    setBusy(true);
+    setErr("");
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "add",
+        worker: picked,
+        date: group.date,
+        job: group.job,
+        hours: h,
+        foreman: group.foreman !== "—" ? group.foreman : "",
+        ownerAdded: true,
+      }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) onDone();
+    else setErr("Couldn't add that entry.");
+  }
+
+  return (
+    // Top-anchored: the roster list has to stay visible above the keyboard.
+    <div className="fixed inset-0 z-[85] bg-black/70 flex items-start justify-center p-4 pt-6">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4 max-h-[75vh] flex flex-col">
+        <div className="text-concrete font-bold mb-0.5">Add worker</div>
+        <div className="text-rebar text-xs mb-3 truncate">
+          {group.job} · {group.foreman}
+        </div>
+
+        {picked ? (
+          <div className="flex items-center justify-between bg-steel border border-line rounded-xl h-11 px-3 mb-3">
+            <span className="text-concrete truncate">{picked}</span>
+            <button onClick={() => setPicked("")} className="text-rebar text-xs font-bold bg-graphite rounded-full px-3 py-1.5 shrink-0 ml-2">
+              Change
+            </button>
+          </div>
+        ) : (
+          <>
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Type a name…"
+              className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-2"
+            />
+            <div className="flex-1 overflow-y-auto overscroll-contain border border-line rounded-xl mb-3">
+              {matches.length === 0 ? (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              ) : (
+                matches.slice(0, 40).map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => { setPicked(n); setQ(""); }}
+                    className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-0 truncate"
+                  >
+                    {n}
+                  </button>
+                ))
+              )}
+            </div>
+          </>
+        )}
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Hours</label>
+        <input
+          type="number"
+          inputMode="decimal"
+          step="0.5"
+          min="0"
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3"
+        />
+
+        {err && <div className="text-xs font-bold mb-2" style={{ color: "#e5533c" }}>{err}</div>}
+
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold">
+            Cancel
+          </button>
+          <button onClick={save} disabled={busy} className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40">
+            {busy ? "…" : "Add"}
+          </button>
         </div>
       </div>
     </div>

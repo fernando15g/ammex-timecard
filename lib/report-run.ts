@@ -601,7 +601,14 @@ export async function runReport(
     const projectPageId = relationIds(props[TIMECARD_PROPS.projectHelper])[0] || "";
 
     if (!worker || !dateISO) continue;
-    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman, projectPageId });
+    rows.push({
+      worker, dateISO, hours, jobText, projectName, jobId, foreman, projectPageId,
+      // Owner review flag — must be carried here too. This is the loader the
+      // on-demand report path uses; the weekly bundle has its own above, and
+      // patching only one meant a flag never reached a manually run grid.
+      needsReview: !!props[TIMECARD_PROPS.needsReview]?.checkbox,
+      reviewNote: readText(props[TIMECARD_PROPS.reviewNote]),
+    });
   }
 
   // 4) Active roster

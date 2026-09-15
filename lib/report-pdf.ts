@@ -233,6 +233,44 @@ export async function buildReportPdf(rd: ReportData): Promise<Uint8Array> {
     y -= 30;
   }
 
+  // Flagged by owner — entries he looked at, judged odd, and passed through as
+  // submitted. Kept separate from the flags section below: those are patterns
+  // the system spotted, these are his own call, and merging them would blur
+  // what either one means.
+  const of = rd.ownerFlags || [];
+  if (of.length > 0) {
+    ensure(46);
+    page.drawRectangle({
+      x: MARGIN, y: y - 18, width: PAGE_W - MARGIN * 2, height: 20, color: flagBg,
+    });
+    page.drawText(tr.ownerFlagHeader, {
+      x: MARGIN + 4, y: y - 13, size: 11, font: bold, color: steel,
+    });
+    y -= 26;
+    page.drawText(tr.ownerFlagNote, { x: MARGIN, y: y - 9, size: 8.5, font, color: gray });
+    y -= 20;
+    for (const f of of) {
+      ensure(26);
+      page.drawText(`${f.worker.toUpperCase()} — ${f.hours} ${tr.hrs}`, {
+        x: MARGIN, y: y - 9, size: 9.5, font: bold, color: steel,
+      });
+      y -= 13;
+      page.drawText(clip(`${f.dateLabel}  ·  ${f.job}`, font, 9, PAGE_W - MARGIN * 2 - 20), {
+        x: MARGIN + 10, y: y - 9, size: 9, font, color: gray,
+      });
+      y -= 13;
+      if (f.note) {
+        ensure(14);
+        page.drawText(clip(f.note, font, 8.5, PAGE_W - MARGIN * 2 - 20), {
+          x: MARGIN + 10, y: y - 9, size: 8.5, font, color: rgb(0.9, 0.24, 0.18),
+        });
+        y -= 13;
+      }
+      y -= 3;
+    }
+    y -= 10;
+  }
+
   // Short Pay — corrections PAID in this span. Dated to the day the work
   // happened, so they also appear in that earlier week's job totals; this
   // section is what explains them and names the week that paid them.
@@ -435,6 +473,16 @@ export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
       const hrs = `${j.hours}`;
       const hrsW = bold.widthOfTextAtSize(hrs, 11);
       const hrsX = rightX - hrsW;
+      // Owner-flagged day: a red dot just before the hours, so the eye catches
+      // it scanning down the column. The hours themselves are as submitted.
+      if (j.needsReview) {
+        page.drawCircle({
+          x: hrsX - 11,
+          y: y + 3.5,
+          size: 2.6,
+          color: rgb(0.9, 0.24, 0.18),
+        });
+      }
       page.drawText(hrs, { x: hrsX, y, size: 11, font: bold, color: steel });
       const leftEnd = MARGIN + 6 + font.widthOfTextAtSize(leftClipped, 10) + 6;
       if (hrsX - 6 > leftEnd) {
@@ -447,6 +495,13 @@ export async function buildWorkerPdf(rd: ReportData): Promise<Uint8Array> {
         });
       }
       y -= 15;
+      if (j.needsReview) {
+        const label = j.reviewNote ? `Needs review — ${j.reviewNote}` : "Needs review";
+        page.drawText(clip(label, font, 8.5, PW - MARGIN * 2 - 90), {
+          x: MARGIN + 18, y: y + 3, size: 8.5, font, color: rgb(0.9, 0.24, 0.18),
+        });
+        y -= 12;
+      }
     }
     y -= 8;
   }

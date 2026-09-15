@@ -136,6 +136,7 @@ export interface RunResult {
   jobs: number;
   unassigned: number;
   shortPay: number;
+  ownerFlags?: number;
   flags: number;
   debug: any;
   pdfBase64?: string; // present in "view" mode
@@ -671,6 +672,7 @@ export async function runReport(
         jobs: pg.rows.length,
         unassigned: 0,
         shortPay: pg.shortPay?.length || 0,
+        ownerFlags: rows.filter((r) => r.needsReview).length,
         flags: 0,
         debug: { workers: pg.rows.length },
         pdfBase64: pgB64,
@@ -686,7 +688,10 @@ export async function runReport(
         `Payroll Grid attached (PDF).\n\n` +
         `Range: ${startISO} to ${endISO}\n` +
         `Workers with hours: ${pg.rows.length}\n` +
-        `Short pay entries: ${pg.shortPay?.length || 0}`,
+        `Short pay entries: ${pg.shortPay?.length || 0}\n` +
+        // Owner-flagged entries — worth seeing in the email rather than only
+        // inside the PDF.
+        `Flagged for review: ${rows.filter((r) => r.needsReview).length}`,
       attachments: [{ filename: `${pgName}.pdf`, content: pgB64 }],
     });
     return {

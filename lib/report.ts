@@ -55,6 +55,8 @@ export interface WorkerJobLine {
   hours: number;
   firstDayIdx: number; // index into dayLabels (chronological)
   firstDayLabel: string; // e.g., "Mon 6/22"
+  needsReview?: boolean; // owner flagged this day; annotation only
+  reviewNote?: string;
 }
 
 export interface WorkerSummary {
@@ -81,6 +83,17 @@ export interface ReportData {
   dayLabels: string[]; // ["Sun 6/22", ...]
   sections: JobSection[]; // assigned jobs first, then unassigned
   shortPay?: ShortPayEntry[]; // corrections PAID in this span (see report-run)
+  // Entries the owner looked at, judged odd, and passed through AS SUBMITTED.
+  // Deliberately kept apart from `flags`: those are patterns the system spotted,
+  // these are the owner's own judgement, and merging them would blur what the
+  // flags section means.
+  ownerFlags?: {
+    worker: string;
+    dateLabel: string;
+    job: string;
+    hours: number;
+    note: string;
+  }[];
   flags: Flag[];
   overHoursThreshold: number;
   lang: ReportLang;
@@ -557,18 +570,41 @@ export function buildReport(
   // Pivot into a per-worker summary: each worker, one line per DAY they worked
   // (date · job · that day's hours), ordered earliest day first, with a weekly
   // total. A worker on a job across multiple days gets one line per day.
+  // Owner-flagged entries, keyed worker|date so a per-day line can pick its own
+  // flag up. Built from the raw rows because the pivot above loses them.
+  const flaggedByDay = new Map<string, string>();
+  const ownerFlags: NonNullable<ReportData["ownerFlags"]> = [];
+  for (const r of rows) {
+    if (!r.needsReview) continue;
+    flaggedByDay.set(`${nkey(r.worker)}|${r.dateISO}`, r.reviewNote || "");
+    ownerFlags.push({
+      worker: r.worker,
+      dateLabel: fmtDayLabel(r.dateISO, lang),
+      job: r.projectName.trim() || prettifyJob(r.jobText) || "—",
+      hours: r.hours,
+      note: r.reviewNote || "",
+    });
+  }
+  ownerFlags.sort(
+    (a, b) => a.worker.localeCompare(b.worker) || a.dateLabel.localeCompare(b.dateLabel)
+  );
+
   const wsMap = new Map<string, WorkerJobLine[]>();
   for (const sec of finalSections) {
     const label = sec.title;
     for (const p of sec.people) {
       p.perDay.forEach((v, idx) => {
         if (v == null) return; // didn't work that day on this job
+        const dISO = addDaysISO(weekStartISO, idx);
+        const fk = `${nkey(p.name)}|${dISO}`;
         const line: WorkerJobLine = {
           title: label,
           jobId: sec.jobId,
           hours: v,
           firstDayIdx: idx,
           firstDayLabel: finalDayLabels[idx] || "",
+          needsReview: flaggedByDay.has(fk),
+          reviewNote: flaggedByDay.get(fk) || "",
         };
         const arr = wsMap.get(p.name);
         if (arr) arr.push(line);
@@ -606,6 +642,9 @@ export function buildReport(
     foremanReport: !!ff,
     foremanName: foremanFilter ? foremanFilter.trim() : "",
     workerSummaries,
+    // Foreman-filtered reports go to the foreman; the owner's doubts about his
+    // numbers are not for him.
+    ownerFlags: foremanFilter ? [] : ownerFlags,
     grandTotal,
     crewNotes: crewNotes
       .sort((a, b) => a.dateISO.localeCompare(b.dateISO))

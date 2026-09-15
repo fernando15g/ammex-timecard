@@ -10273,6 +10273,9 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
   const [msg, setMsg] = useState("");
   const [busyId, setBusyId] = useState("");
   const [editing, setEditing] = useState<RosterPerson | null>(null);
+  // Merging a mis-typed roster row into the real person, and rewriting that
+  // name on recent timecards.
+  const [mergeFrom, setMergeFrom] = useState<RosterPerson | null>(null);
   const [adding, setAdding] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
   const [q, setQ] = useState("");
@@ -10369,7 +10372,8 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
             {active.map((p) => (
               <RosterRow key={p.id} p={p} busy={busyId === p.id}
                 onEdit={() => setEditing(p)} onToggle={() => setActive(p, false)}
-                onConfirm={() => setConfirmPerson(p)} />
+                onConfirm={() => setConfirmPerson(p)}
+                onMerge={() => setMergeFrom(p)} />
             ))}
             {active.length === 0 && (
               <div className="text-rebar text-sm px-1 py-2">No active workers.</div>
@@ -10401,6 +10405,18 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
+      {mergeFrom && (
+        <RosterMergeModal
+          from={mergeFrom}
+          people={people}
+          onClose={() => setMergeFrom(null)}
+          onDone={() => {
+            setMergeFrom(null);
+            load();
+          }}
+        />
+      )}
+
       {(adding || editing) && (
         <RosterEditModal
           person={editing}
@@ -10421,10 +10437,10 @@ function RosterPanel({ onClose }: { onClose: () => void }) {
 }
 
 function RosterRow({
-  p, busy, inactive, onEdit, onToggle, onConfirm,
+  p, busy, inactive, onEdit, onToggle, onConfirm, onMerge,
 }: {
   p: RosterPerson; busy: boolean; inactive?: boolean;
-  onEdit: () => void; onToggle: () => void; onConfirm?: () => void;
+  onEdit: () => void; onToggle: () => void; onConfirm?: () => void; onMerge?: () => void;
 }) {
   const unconfirmed = (p.status || "").trim().toLowerCase() === "unconfirmed";
   return (
@@ -10465,6 +10481,15 @@ function RosterRow({
       >
         Edit
       </button>
+      {onMerge && (
+        <button
+          onClick={onMerge}
+          className="text-xs font-bold rounded-full px-3 py-1.5 border"
+          style={{ color: "#8fbcff", borderColor: "rgba(143,188,255,.45)" }}
+        >
+          Merge
+        </button>
+      )}
       <button
         onClick={onToggle}
         className="text-xs font-bold rounded-full px-3 py-1.5 border"
@@ -11580,6 +11605,198 @@ function AddToCardModal({
             {busy ? "…" : "Add"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Merge a mis-typed roster row into the real person. Foremen who can't find
+// someone type a new name, which creates a second roster row and puts the wrong
+// name on their timecards. This fixes both in one action: the timecards in a
+// recent window are rewritten to the real name, and the stray row is
+// deactivated — never deleted, so the record survives.
+//
+// Scope is deliberately this week / last week. Rewriting months of history
+// would silently change reports already sent and paid from; anything older is
+// counted and reported, never touched.
+function RosterMergeModal({
+  from,
+  people,
+  onClose,
+  onDone,
+}: {
+  from: { id: string; name: string };
+  people: { id: string; name: string; active: boolean }[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  function weekStart(offset = 0): string {
+    const now = new Date();
+    const l = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = l.getDay();
+    const mon = new Date(l);
+    mon.setDate(l.getDate() + (dow === 0 ? -6 : 1 - dow) + offset * 7);
+    return `${mon.getFullYear()}-${String(mon.getMonth() + 1).padStart(2, "0")}-${String(mon.getDate()).padStart(2, "0")}`;
+  }
+  function addDays(iso: string, n: number): string {
+    const [y, m, d] = iso.split("-").map(Number);
+    const dt = new Date(y, m - 1, d + n);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  }
+
+  const [scope, setScope] = useState<"this" | "last" | "both">("both");
+  const [target, setTarget] = useState("");
+  const [q, setQ] = useState("");
+  const [preview, setPreview] = useState<any | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const startISO = scope === "this" ? weekStart(0) : weekStart(-1);
+  const endISO = scope === "last" ? addDays(weekStart(-1), 6) : addDays(weekStart(0), 6);
+
+  const needle = q.trim().toLowerCase();
+  const options = people
+    .filter((p) => p.id !== from.id && p.active)
+    .filter((p) => !needle || p.name.toLowerCase().includes(needle));
+
+  async function runPreview(name: string) {
+    setBusy(true);
+    setErr("");
+    const res = await fetch("/api/roster-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ownerPin: "5314",
+        op: "merge_preview",
+        fromName: from.name,
+        toName: name,
+        startISO,
+        endISO,
+      }),
+    }).then((r) => r.json()).catch(() => null);
+    setBusy(false);
+    if (res?.ok) setPreview(res);
+    else setErr(res?.error || "Couldn't check that merge.");
+  }
+
+  async function apply() {
+    setBusy(true);
+    setErr("");
+    const res = await fetch("/api/roster-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ownerPin: "5314",
+        op: "merge",
+        fromId: from.id,
+        fromName: from.name,
+        toName: target,
+        startISO,
+        endISO,
+        combineCollisions: true,
+      }),
+    }).then((r) => r.json()).catch(() => null);
+    setBusy(false);
+    if (res?.ok) onDone();
+    else setErr(res?.error || "The merge didn't complete.");
+  }
+
+  return (
+    <div className="fixed inset-0 z-[85] bg-black/70 flex items-start justify-center p-4 pt-6">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4 max-h-[80vh] flex flex-col">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold">Merge name</div>
+          <button onClick={onClose} className="text-rebar text-xs font-bold bg-steel px-3 py-1.5 rounded-full">
+            Cancel
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-3">
+          &quot;{from.name}&quot; is the wrong name — pick who it should be.
+        </div>
+
+        <div className="flex gap-2 mb-3">
+          {([["this", "This week"], ["last", "Last week"], ["both", "Both"]] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => { setScope(k); setPreview(null); }}
+              className={`flex-1 rounded-full h-9 text-xs font-bold ${
+                scope === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {target ? (
+          <div className="flex items-center justify-between bg-steel border border-line rounded-xl h-11 px-3 mb-3">
+            <span className="text-concrete truncate">→ {target}</span>
+            <button
+              onClick={() => { setTarget(""); setPreview(null); }}
+              className="text-rebar text-xs font-bold bg-graphite rounded-full px-3 py-1.5 shrink-0 ml-2"
+            >
+              Change
+            </button>
+          </div>
+        ) : (
+          <>
+            <input
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Type the real name…"
+              className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-2"
+            />
+            <div className="flex-1 overflow-y-auto overscroll-contain border border-line rounded-xl mb-3">
+              {options.length === 0 ? (
+                <div className="text-rebar text-sm px-3 py-3">No matches.</div>
+              ) : (
+                options.slice(0, 40).map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => { setTarget(p.name); setQ(""); runPreview(p.name); }}
+                    className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-0 truncate"
+                  >
+                    {p.name}
+                  </button>
+                ))
+              )}
+            </div>
+          </>
+        )}
+
+        {target && preview && (
+          <div className="bg-steel border border-line rounded-xl p-3 mb-3 text-xs">
+            <div className="text-concrete font-bold mb-1">
+              {preview.willRename} {preview.willRename === 1 ? "entry" : "entries"} will be renamed
+            </div>
+            {preview.collisions > 0 && (
+              <div style={{ color: "#e0a63b" }}>
+                {preview.collisions} already {preview.collisions === 1 ? "has" : "have"} {target} on
+                the same card — hours will be combined and the duplicate voided.
+              </div>
+            )}
+            {preview.outside > 0 && (
+              <div className="text-rebar mt-1">
+                {preview.outside} older {preview.outside === 1 ? "entry" : "entries"} outside this
+                range — left alone.
+              </div>
+            )}
+            <div className="text-rebar mt-1">
+              &quot;{from.name}&quot; will be deactivated, keeping its history.
+            </div>
+          </div>
+        )}
+
+        {err && <div className="text-xs font-bold mb-2" style={{ color: "#e5533c" }}>{err}</div>}
+
+        <button
+          onClick={apply}
+          disabled={busy || !target || !preview || preview.willRename === 0}
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+        >
+          {busy ? "…" : preview && preview.willRename === 0 ? "Nothing to merge" : "Merge"}
+        </button>
       </div>
     </div>
   );

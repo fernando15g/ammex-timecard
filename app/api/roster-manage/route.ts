@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Client } from "@notionhq/client";
-import { NOTION_TOKEN, CREW_ROSTER_DB_ID, ROSTER_PROPS } from "@/lib/notion";
+import { NOTION_TOKEN, CREW_ROSTER_DB_ID, ROSTER_PROPS, TIMECARDS_DB_ID, TIMECARD_PROPS } from "@/lib/notion";
 
 // Crew Roster management (owner-only). SERVER-SIDE gated: every request must
 // carry the owner PIN and is rejected without it. This endpoint is reachable on
@@ -193,6 +193,122 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
       await notion.pages.update({ page_id: id, properties: props });
       return NextResponse.json({ ok: true });
+    }
+
+    // Merge a mis-typed roster name into the real person: rewrite the worker
+    // name on that person's timecards inside a date window, then deactivate the
+    // stray roster row. Deactivate rather than delete so the record survives.
+    //
+    // Scope is deliberately a window (this week / last week) rather than all
+    // time — rewriting months of entries would silently change reports that
+    // have already been sent and paid from. Entries outside the window are
+    // counted and reported, never touched.
+    if (op === "merge_preview" || op === "merge") {
+      const fromName = (body.fromName || "").trim();
+      const toName = (body.toName || "").trim();
+      const startISO = body.startISO;
+      const endISO = body.endISO;
+      if (!fromName || !toName)
+        return NextResponse.json({ error: "fromName and toName required." }, { status: 400 });
+      if (fromName.toLowerCase() === toName.toLowerCase())
+        return NextResponse.json({ error: "Those are the same name." }, { status: 400 });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startISO || "") || !/^\d{4}-\d{2}-\d{2}$/.test(endISO || ""))
+        return NextResponse.json({ error: "Date range required." }, { status: 400 });
+
+      const key = (v: string) =>
+        (v || "").normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
+      const fromKey = key(fromName);
+      const toKey = key(toName);
+
+      // Every non-voided entry under the bad name, plus the target's entries,
+      // so same-card collisions can be spotted.
+      const inWindow: any[] = [];
+      const outsideCount = { n: 0 };
+      const targetByCardDate = new Map<string, { id: string; hours: number }>();
+      let cursor: string | undefined;
+      do {
+        const res: any = await notion.databases.query({
+          database_id: TIMECARDS_DB_ID,
+          filter: { property: TIMECARD_PROPS.voided, checkbox: { equals: false } },
+          start_cursor: cursor,
+          page_size: 100,
+        });
+        for (const pg of res.results) {
+          const p = pg.properties || {};
+          const w = key(readText(p[TIMECARD_PROPS.worker]));
+          if (w !== fromKey && w !== toKey) continue;
+          const d = p[TIMECARD_PROPS.date]?.date?.start?.slice(0, 10) || "";
+          const job = readText(p[TIMECARD_PROPS.job]).trim().toLowerCase();
+          const hours = typeof p[TIMECARD_PROPS.hours]?.number === "number" ? p[TIMECARD_PROPS.hours].number : 0;
+          if (w === toKey) {
+            if (d >= startISO && d <= endISO) targetByCardDate.set(`${job}|${d}`, { id: pg.id, hours });
+            continue;
+          }
+          if (d >= startISO && d <= endISO) inWindow.push({ id: pg.id, date: d, job, hours });
+          else outsideCount.n++;
+        }
+        cursor = res.has_more ? res.next_cursor : undefined;
+      } while (cursor);
+
+      const collisions = inWindow.filter((e) => targetByCardDate.has(`${e.job}|${e.date}`));
+
+      if (op === "merge_preview") {
+        return NextResponse.json({
+          ok: true,
+          willRename: inWindow.length,
+          outside: outsideCount.n,
+          collisions: collisions.length,
+        });
+      }
+
+      // Apply. Collisions fold their hours into the existing entry and void the
+      // duplicate, so one man never ends up on a card twice.
+      let renamed = 0;
+      let merged = 0;
+      for (const e of inWindow) {
+        const hit = targetByCardDate.get(`${e.job}|${e.date}`);
+        if (hit && body.combineCollisions) {
+          const total = Math.round((hit.hours + e.hours) * 100) / 100;
+          await notion.pages.update({
+            page_id: hit.id,
+            properties: { [TIMECARD_PROPS.hours]: { number: total } },
+          });
+          await notion.pages.update({
+            page_id: e.id,
+            properties: {
+              [TIMECARD_PROPS.voided]: { checkbox: true },
+              [TIMECARD_PROPS.voidNote]: {
+                rich_text: [{ text: { content: `Merged into ${toName}` } }],
+              },
+            },
+          });
+          hit.hours = total;
+          merged++;
+          continue;
+        }
+        await notion.pages.update({
+          page_id: e.id,
+          properties: { [TIMECARD_PROPS.worker]: { title: [{ text: { content: toName } }] } },
+        });
+        renamed++;
+      }
+
+      // Deactivate the stray roster row — never delete it.
+      if (body.fromId) {
+        try {
+          await notion.pages.update({
+            page_id: body.fromId,
+            properties: {
+              [ROSTER_PROPS.active]: { checkbox: false },
+              [ROSTER_PROPS.status]: {
+                rich_text: [{ text: { content: `Merged into ${toName}` } }],
+              },
+            },
+          });
+        } catch { /* the rename is what matters */ }
+      }
+
+      return NextResponse.json({ ok: true, renamed, merged, outside: outsideCount.n });
     }
 
     if (op === "set_active") {

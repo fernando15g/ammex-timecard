@@ -322,7 +322,11 @@ export async function loadRowsAndRoster(
     const foreman = readText(props[TIMECARD_PROPS.foreman]);
     const projectPageId = relationIds(props[TIMECARD_PROPS.projectHelper])[0] || "";
     if (!worker || !dateISO) continue;
-    rows.push({ worker, dateISO, hours, jobText, projectName, jobId, foreman, projectPageId });
+    rows.push({
+      worker, dateISO, hours, jobText, projectName, jobId, foreman, projectPageId,
+      needsReview: !!props[TIMECARD_PROPS.needsReview]?.checkbox,
+      reviewNote: readText(props[TIMECARD_PROPS.reviewNote]),
+    });
   }
 
   const activeRoster: string[] = [];

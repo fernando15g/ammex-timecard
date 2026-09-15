@@ -21,6 +21,8 @@ export interface RawRow {
   jobId: string; // clean "Job ID Helper" (may be empty)
   foreman: string; // who logged this card
   projectPageId?: string; // Notion page id of the linked project (for schedule matching)
+  needsReview?: boolean; // owner flagged it as looking odd, passed through as submitted
+  reviewNote?: string;
 }
 
 export interface PersonRow {

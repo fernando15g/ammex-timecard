@@ -7,6 +7,10 @@ import { ReportLang } from "./report-i18n";
 export interface DailyCrewLine {
   name: string;
   hours: number;
+  // Owner flagged this entry as looking off but passed it through as
+  // submitted. Annotation only — the hours are unchanged.
+  needsReview?: boolean;
+  reviewNote?: string;
 }
 
 export interface DailyForemanGroup {
@@ -111,7 +115,12 @@ export function buildDailyReport(
       crew = [];
       jrec.foremen.set(fKey, crew);
     }
-    crew.push({ name: r.worker, hours: r.hours });
+    crew.push({
+      name: r.worker,
+      hours: r.hours,
+      needsReview: !!r.needsReview,
+      reviewNote: r.reviewNote || "",
+    });
   }
 
   // Assemble, sorted chronologically; within a day, jobs alphabetical;

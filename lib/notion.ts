@@ -63,7 +63,12 @@ export const TIMECARD_PROPS = {
   voidNote: "Void note", // Text (rich_text) — why it was voided
   underReview: "Under Review", // Checkbox — held pending owner review; excluded from counts
   shortPay: "Short Pay", // Checkbox — owner-entered correction for hours missed on the original card
-  payWeek: "Pay Week", // Date — Monday of the week this correction gets PAID (not when worked)
+  payWeek: "Pay Week",
+  // Owner has looked at this entry, thinks it looks off, and is passing it
+  // through AS SUBMITTED. Purely annotative — the hours still count and are
+  // still paid. Distinct from "Under Review", which HOLDS hours out of counts.
+  needsReview: "Needs Review", // Checkbox
+  reviewNote: "Review Note", // Text // Date — Monday of the week this correction gets PAID (not when worked)
   uncategorized: "Uncategorized", // Checkbox — intentionally no project (change order / paid training); stops the needs-project nag, bucketed as Uncategorized on reports
 };
 

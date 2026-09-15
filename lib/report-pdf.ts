@@ -550,6 +550,15 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
             });
           }
           y -= 13;
+          // Owner flagged this entry — the hours above stand as submitted, this
+          // line says the owner looked and wasn't sure.
+          if (c.needsReview) {
+            const label = c.reviewNote ? `Needs review — ${c.reviewNote}` : "Needs review";
+            page.drawText(clip(label, font, 8.5, PW - MARGIN * 2 - 90), {
+              x: MARGIN + 18, y: y + 2, size: 8.5, font, color: rgb(0.9, 0.24, 0.18),
+            });
+            y -= 11;
+          }
         }
       }
       // One job total across all foremen on this job. Formatted to match the
@@ -589,6 +598,63 @@ export async function buildDailyPdf(rd: DailyReport): Promise<Uint8Array> {
 
 // Payroll Grid PDF: every worker (with hours) × day, daily totals (or splits
 // like "5 | 3"), alphabetical; no-hours roster listed below. Landscape grid.
+// A deliberately irregular ring of bumps — the look of something circled by
+// hand on a printout, which is exactly what this annotation means. A clean
+// ellipse would read as machine output.
+function drawCloud(page: any, x: number, y: number, w: number, h: number) {
+  const H = page.getHeight();
+  const ty = (pdfY: number) => H - pdfY;
+
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const rx = w / 2;
+  const ry = h / 2;
+
+  // Cloud, not starburst: each puff is a rounded lobe and the dips between them
+  // are shallow. Deep valleys with high peaks read as an explosion, so the
+  // difference between the two stays small and the joins are rounded by giving
+  // each valley a pair of tangential control points (cubic, not quadratic).
+  const puffs = 7;
+  const valley = 0.9;
+  const peak = 1.2;
+
+  const P = (i: number, r: number): [number, number] => {
+    const a = (i / puffs) * Math.PI * 2;
+    return [cx + Math.cos(a) * rx * r, cy + Math.sin(a) * ry * r];
+  };
+
+  let d = "";
+  for (let i = 0; i < puffs; i++) {
+    const a0 = (i / puffs) * Math.PI * 2;
+    const a1 = ((i + 1) / puffs) * Math.PI * 2;
+    const mid = (a0 + a1) / 2;
+    const jitter = 0.95 + ((i * 41) % 11) / 100;
+
+    const [x0, y0] = P(i, valley);
+    const [x1, y1] = P(i + 1, valley);
+    // Control points sit either side of the puff's crest, pushed out and
+    // rotated slightly apart so the lobe is round rather than pointed.
+    const spread = (a1 - a0) * 0.34;
+    const c1a = mid - spread;
+    const c2a = mid + spread;
+    const c1x = cx + Math.cos(c1a) * rx * peak * jitter;
+    const c1y = cy + Math.sin(c1a) * ry * peak * jitter;
+    const c2x = cx + Math.cos(c2a) * rx * peak * jitter;
+    const c2y = cy + Math.sin(c2a) * ry * peak * jitter;
+
+    if (i === 0) d += `M ${x0.toFixed(2)} ${ty(y0).toFixed(2)}`;
+    d += ` C ${c1x.toFixed(2)} ${ty(c1y).toFixed(2)} ${c2x.toFixed(2)} ${ty(c2y).toFixed(2)} ${x1.toFixed(2)} ${ty(y1).toFixed(2)}`;
+  }
+  d += " Z";
+
+  page.drawSvgPath(d, {
+    x: 0,
+    y: H,
+    borderColor: rgb(0.9, 0.24, 0.18),
+    borderWidth: 1.1,
+  });
+}
+
 export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
@@ -673,6 +739,13 @@ export async function buildPayrollGridPdf(pg: PayrollGrid): Promise<Uint8Array> 
     r.cells.forEach((c, i) => {
       if (c.text) {
         const t = clip(c.text, bold, 9.5, colW - 4);
+        // Owner-flagged day: a hand-drawn cloud around the number, so it reads
+        // as "I looked at this, it's odd, and it's what the foreman turned in"
+        // rather than a system error. The hours are untouched.
+        if (c.flagged) {
+          const w = bold.widthOfTextAtSize(t, 9.5);
+          drawCloud(page, colX(i) + 1, yTop - rowH + 3, Math.max(w + 8, 18), 15);
+        }
         page.drawText(t, { x: colX(i) + 3, y: yTop - rowH + 6, size: 9.5, font: bold, color: steel });
       }
     });

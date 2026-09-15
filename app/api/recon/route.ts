@@ -37,6 +37,8 @@ type TCEntry = {
   voidNote: string;
   underReview: boolean;
   uncategorized: boolean;
+  needsReview: boolean; // owner flagged it; annotation only, hours still count
+  reviewNote: string;
 };
 
 function mapRow(page: any): TCEntry {
@@ -54,6 +56,8 @@ function mapRow(page: any): TCEntry {
     voided: !!p[TIMECARD_PROPS.voided]?.checkbox,
     voidNote: rt(p[TIMECARD_PROPS.voidNote]),
     underReview: !!p[TIMECARD_PROPS.underReview]?.checkbox,
+    needsReview: !!p[TIMECARD_PROPS.needsReview]?.checkbox,
+    reviewNote: rt(p[TIMECARD_PROPS.reviewNote]),
     uncategorized: !!p[TIMECARD_PROPS.uncategorized]?.checkbox,
   };
 }
@@ -1378,6 +1382,55 @@ export async function POST(req: Request) {
         } catch { /* audit update shouldn't block the release */ }
       }
       return NextResponse.json({ ok: true, done });
+    }
+
+    // Owner has looked at an entry, thinks it's off, and is passing it through
+    // AS SUBMITTED. Purely annotative: the hours still count and are still
+    // paid. Distinct from "hold", which pulls hours OUT of the counts.
+    if (op === "needs_review") {
+      const { id, flagged, note, logWorker, logDate } = body;
+      if (!id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+      // Additive — self-provisions so nothing has to be created by hand.
+      try {
+        const db: any = await notion.databases.retrieve({ database_id: TIMECARDS_DB_ID });
+        const add: any = {};
+        if (!db.properties?.[TIMECARD_PROPS.needsReview])
+          add[TIMECARD_PROPS.needsReview] = { checkbox: {} };
+        if (!db.properties?.[TIMECARD_PROPS.reviewNote])
+          add[TIMECARD_PROPS.reviewNote] = { rich_text: {} };
+        if (Object.keys(add).length)
+          await notion.databases.update({ database_id: TIMECARDS_DB_ID, properties: add as any });
+      } catch { /* the write below will simply not stick until it exists */ }
+
+      const props: any = { [TIMECARD_PROPS.needsReview]: { checkbox: !!flagged } };
+      props[TIMECARD_PROPS.reviewNote] = {
+        rich_text: flagged && (note || "").trim() ? [{ text: { content: note.trim() } }] : [],
+      };
+      await notion.pages.update({ page_id: id, properties: props });
+
+      if (logWorker) {
+        try {
+          await notion.pages.create({
+            parent: { database_id: RECON_LOG_DB_ID },
+            properties: {
+              [RECON_PROPS.worker]: { title: [{ text: { content: logWorker } }] },
+              [RECON_PROPS.status]: { select: { name: "Fixed" } },
+              [RECON_PROPS.note]: {
+                rich_text: [{
+                  text: {
+                    content: flagged
+                      ? `Flagged for review${note ? ` — ${note}` : ""} (passed through as submitted)`
+                      : "Review flag cleared",
+                  },
+                }],
+              },
+              [RECON_PROPS.refs]: { rich_text: [{ text: { content: id } }] },
+              ...(logDate ? { [RECON_PROPS.date]: { date: { start: logDate } } } : {}),
+            },
+          });
+        } catch { /* logging shouldn't block the flag */ }
+      }
+      return NextResponse.json({ ok: true });
     }
 
     if (op === "void") {

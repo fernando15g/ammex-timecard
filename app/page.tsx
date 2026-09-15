@@ -3630,6 +3630,7 @@ function ReconPanel({
 
   // ---- edit / void / note modals ----
   const [editEntry, setEditEntry] = useState<ReconEntry | null>(null);
+  const [reviewEntry, setReviewEntry] = useState<any | null>(null);
   const [voidEntry, setVoidEntry] = useState<ReconEntry | null>(null);
   const [splitEntry, setSplitEntry] = useState<ReconEntry | null>(null);
   const [recentSplits, setRecentSplits] = useState<
@@ -4107,6 +4108,7 @@ function ReconPanel({
                       >
                         Edit
                       </button>
+
                       <button
                         onClick={() => setSplitEntry(e)}
                         className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
@@ -4118,6 +4120,29 @@ function ReconPanel({
                         className="text-rebar border border-line rounded-lg px-4 py-2 text-sm font-bold active:text-safety"
                       >
                         Void
+                      </button>
+                      {/* Flag toggle, right-aligned so it sits under the hours.
+                          Filled = flagged. Annotation only — the hours are
+                          unchanged and still paid. */}
+                      <button
+                        onClick={() => setReviewEntry(e)}
+                        aria-label={(e as any).needsReview ? "Flagged for review" : "Flag for review"}
+                        className="ml-auto rounded-lg px-3 py-2 border flex items-center justify-center"
+                        style={
+                          (e as any).needsReview
+                            ? { borderColor: "rgba(229,83,60,.55)", background: "rgba(229,83,60,.12)" }
+                            : { borderColor: "rgba(154,163,175,.35)" }
+                        }
+                      >
+                        <svg
+                          width="16" height="16" viewBox="0 0 24 24"
+                          fill={(e as any).needsReview ? "#e5533c" : "none"}
+                          stroke={(e as any).needsReview ? "#e5533c" : "#9aa3af"}
+                          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                        >
+                          <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+                          <line x1="4" y1="22" x2="4" y2="15" />
+                        </svg>
                       </button>
                     </div>
                   </div>
@@ -4301,6 +4326,17 @@ function ReconPanel({
           entries={openCard.entries}
           onClose={() => setCardBulk("")}
           onDone={() => { setCardBulk(""); void refreshOpenCard(); }}
+        />
+      )}
+
+      {reviewEntry && (
+        <NeedsReviewModal
+          entry={reviewEntry}
+          onClose={() => setReviewEntry(null)}
+          onDone={() => {
+            setReviewEntry(null);
+            refreshAfterWrite();
+          }}
         />
       )}
 
@@ -11812,6 +11848,97 @@ function RosterMergeModal({
         >
           {busy ? "…" : preview && preview.willRename === 0 ? "Nothing to merge" : "Merge"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+
+// Flagging an entry for review. The owner has looked at it, thinks it's off,
+// and is passing it through exactly as the foreman submitted it — the hours
+// are unchanged and still paid. On the payroll grid that day's cell gets a
+// hand-drawn circle; on the Owner Review the worker gets a "needs review" line.
+function NeedsReviewModal({
+  entry,
+  onClose,
+  onDone,
+}: {
+  entry: any;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const on = !!entry.needsReview;
+  const [note, setNote] = useState(entry.reviewNote || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function apply(flagged: boolean) {
+    setBusy(true);
+    setErr("");
+    const res = await fetch("/api/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "needs_review",
+        id: entry.id,
+        flagged,
+        note: flagged ? note : "",
+        logWorker: entry.worker,
+        logDate: entry.date,
+      }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) onDone();
+    else setErr("That didn't save — try again.");
+  }
+
+  return (
+    <div className="fixed inset-0 z-[85] bg-black/70 flex items-center justify-center p-4">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-5">
+        <div className="text-concrete font-bold mb-0.5">
+          {on ? "Flagged for review" : "Flag for review"}
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          {entry.worker} · {entry.hours}h
+        </div>
+        <div className="text-rebar text-xs mb-3 leading-relaxed">
+          Marks this entry as looking off while leaving it exactly as submitted.
+          The hours still count and are still paid.
+        </div>
+
+        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+          Note <span className="font-normal normal-case">(optional)</span>
+        </label>
+        <input
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="9 hrs but crew left at 3"
+          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+        />
+
+        {err && <div className="text-xs font-bold mb-2" style={{ color: "#e5533c" }}>{err}</div>}
+
+        <div className="flex gap-2">
+          <button onClick={onClose} className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold">
+            Cancel
+          </button>
+          {on ? (
+            <button
+              onClick={() => apply(false)}
+              disabled={busy}
+              className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold disabled:opacity-40"
+            >
+              {busy ? "…" : "Clear flag"}
+            </button>
+          ) : null}
+          <button
+            onClick={() => apply(true)}
+            disabled={busy}
+            className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+          >
+            {busy ? "…" : on ? "Update" : "Flag"}
+          </button>
+        </div>
       </div>
     </div>
   );

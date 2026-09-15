@@ -8,6 +8,9 @@ import { ReportLang, DAY_NAMES } from "./report-i18n";
 
 export interface PayrollGridCell {
   text: string; // "" if no work, "8", or "5 | 3" for a split day
+  // Owner flagged one of this day's entries as looking off but passed it
+  // through as submitted. Annotation only — the hours are unchanged.
+  flagged?: boolean;
 }
 
 export interface PayrollGridRow {
@@ -46,7 +49,7 @@ export function buildPayrollGrid(
   // Build a 7-slot week (Sun..Sat) keyed by day offset from weekStartISO.
   const nDays = 7;
   // worker -> dayIdx -> array of {hours, job, firstSeq} to support splits
-  type DayJobs = Map<string, { hours: number; order: number }>; // job -> hours + first-seen order
+  type DayJobs = Map<string, { hours: number; order: number; flagged?: boolean }>; // job -> hours + first-seen order
   const byWorker = new Map<string, Map<number, DayJobs>>();
   // Group case-insensitively (a card typed "luis grijalva" and one typed
   // "Luis Grijalva" are the same person). Keep the best-cased display name so
@@ -83,8 +86,12 @@ export function buildPayrollGrid(
       days.set(idx, dj);
     }
     const ex = dj.get(job);
-    if (ex) ex.hours = r2(ex.hours + r.hours);
-    else dj.set(job, { hours: r.hours, order: seq++ });
+    if (ex) {
+      ex.hours = r2(ex.hours + r.hours);
+      if (r.needsReview) ex.flagged = true;
+    } else {
+      dj.set(job, { hours: r.hours, order: seq++, flagged: !!r.needsReview });
+    }
   }
 
   // Week runs Monday(idx0)..Sunday(idx6). Hide the trailing Sunday unless
@@ -123,7 +130,7 @@ export function buildPayrollGrid(
         jobs.length === 1
           ? String(r2(jobs[0].hours))
           : jobs.map((j) => r2(j.hours)).join(" / ");
-      cells.push({ text });
+      cells.push({ text, flagged: jobs.some((j: any) => j.flagged) });
     }
     gridRows.push({ name: displayName.get(name) || name, cells, total: r2(total) });
   }

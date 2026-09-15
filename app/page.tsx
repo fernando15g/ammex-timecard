@@ -936,6 +936,20 @@ export default function Page() {
                 className="w-full text-left px-4 py-3 active:bg-steel text-concrete border-b border-line/30 last:border-0"
               >
                 {n}
+                {/* Show the matched nickname ONLY when the name itself didn't
+                    match — that's the moment a foreman needs to know why this
+                    person came up for what he typed. When the name matches too,
+                    the alias is noise. */}
+                {(() => {
+                  const q = query.trim().toLowerCase();
+                  if (!q || n.toLowerCase().includes(q)) return null;
+                  const hit = (aliases[n] || []).find((a) =>
+                    a.toLowerCase().includes(q)
+                  );
+                  return hit ? (
+                    <span className="text-rebar text-sm ml-2">&quot;{hit}&quot;</span>
+                  ) : null;
+                })()}
               </button>
             ))}
 

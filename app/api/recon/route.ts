@@ -1000,9 +1000,12 @@ export async function POST(req: Request) {
     const { op } = body;
 
     if (op === "edit") {
-      const { id, hours, job, foreman, projectId, date } = body;
+      const { id, hours, job, foreman, projectId, date, worker } = body;
       const props: any = {};
       if (typeof hours === "number") props[TIMECARD_PROPS.hours] = { number: hours };
+      // Correcting a misspelled or nickname-typed name on a submitted card.
+      if (typeof worker === "string" && worker.trim())
+        props[TIMECARD_PROPS.worker] = { title: [{ text: { content: worker.trim() } }] };
       if (typeof job === "string") props[TIMECARD_PROPS.job] = { rich_text: [{ text: { content: job } }] };
       if (typeof foreman === "string") props[TIMECARD_PROPS.foreman] = { rich_text: [{ text: { content: foreman } }] };
       if (typeof projectId === "string")

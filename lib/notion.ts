@@ -42,6 +42,10 @@ export const ROSTER_PROPS = {
   active: "Active", // Checkbox
   status: "Status", // Text
   role: "Role", // Text/Select — used to identify foremen
+  // Comma-separated nicknames and known misspellings ("Chuy, Jesus, Jesue").
+  // The crew picker searches these so a foreman finds the right man without
+  // typing a new name — the card always stores the real roster name.
+  aliases: "Aliases", // Text
 };
 
 // Property names in the Timecards database.

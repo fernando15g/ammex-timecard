@@ -37,6 +37,10 @@ export async function GET() {
 
   try {
     const workers: string[] = [];
+    // name -> nicknames / known misspellings. Returned alongside the plain
+    // `workers` list rather than replacing it, so every existing caller is
+    // unaffected.
+    const aliases: Record<string, string[]> = {};
     const foremen: string[] = [];
     let cursor: string | undefined = undefined;
 
@@ -60,6 +64,15 @@ export async function GET() {
 
         workers.push(name);
 
+        const rawAliases = page.properties?.[ROSTER_PROPS.aliases];
+        const aliasText =
+          (rawAliases?.rich_text || []).map((t: any) => t.plain_text).join("") || "";
+        const list = aliasText
+          .split(/[,;\n]/)
+          .map((a: string) => a.trim())
+          .filter(Boolean);
+        if (list.length) aliases[name] = list;
+
         const role = readRole(page.properties?.[ROSTER_PROPS.role]).toLowerCase();
         if (role.includes("foreman")) foremen.push(name);
       }
@@ -72,7 +85,7 @@ export async function GET() {
     workers.sort(sorter);
     foremen.sort(sorter);
 
-    return NextResponse.json({ workers, foremen });
+    return NextResponse.json({ workers, foremen, aliases });
   } catch (err: any) {
     console.error("Roster read failed:", err?.message || err);
     return NextResponse.json(

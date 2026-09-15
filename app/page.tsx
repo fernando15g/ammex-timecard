@@ -93,6 +93,11 @@ export default function Page() {
   const [roster, setRoster] = useState<string[]>([]);
   const [foremen, setForemen] = useState<string[]>([]);
   const [rosterLoaded, setRosterLoaded] = useState(false);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  // Roster name -> nicknames / known misspellings. Lets a foreman search
+  // "Chuy" and land on Jesús, so he picks the real man instead of typing a
+  // new name and creating a duplicate roster row.
+  const [aliases, setAliases] = useState<Record<string, string[]>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [justUpdated, setJustUpdated] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -207,6 +212,7 @@ export default function Page() {
       const d = await r.json();
       if (Array.isArray(d.workers)) setRoster(d.workers);
       if (Array.isArray(d.foremen)) setForemen(d.foremen);
+      if (d.aliases && typeof d.aliases === "object") setAliases(d.aliases);
     } catch {
       /* ignore */
     } finally {
@@ -303,7 +309,10 @@ export default function Page() {
     // Rank: names that start with the query come first, then the rest —
     // but every match is shown as an equal option (no single highlighted pick),
     // so common first names don't hide the person you actually want.
-    const matches = pool.filter((n) => n.toLowerCase().includes(q));
+    const hit = (n: string) =>
+      n.toLowerCase().includes(q) ||
+      (aliases[n] || []).some((a) => a.toLowerCase().includes(q));
+    const matches = pool.filter(hit);
     matches.sort((a, b) => {
       const aStarts = a.toLowerCase().startsWith(q) ? 0 : 1;
       const bStarts = b.toLowerCase().startsWith(q) ? 0 : 1;
@@ -311,13 +320,16 @@ export default function Page() {
       return a.localeCompare(b, undefined, { sensitivity: "base" });
     });
     return matches.slice(0, 200);
-  }, [query, roster, selectedNames]);
+  }, [query, roster, selectedNames, aliases]);
 
   const exactExists = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return true;
     return (
       roster.some((n) => n.toLowerCase() === q) ||
+      Object.values(aliases).some((list) =>
+        list.some((a) => a.toLowerCase() === q)
+      ) ||
       workers.some((w) => w.name.toLowerCase() === q)
     );
   }, [query, roster, workers]);
@@ -896,6 +908,7 @@ export default function Page() {
             crew quickly: type to filter, tap names from the list below. */}
         <div ref={addBoxRef} className="bg-graphite rounded-2xl border border-line overflow-hidden scroll-mt-3">
           <input
+            ref={searchRef}
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -912,7 +925,14 @@ export default function Page() {
             {suggestions.map((n) => (
               <button
                 key={n}
-                onClick={() => addWorker(n)}
+                // Keep the keyboard up: preventing the default mousedown stops
+                // the input from blurring, so the next name can be typed
+                // straight away instead of tapping back into the box.
+                onMouseDown={(ev) => ev.preventDefault()}
+                onClick={() => {
+                  addWorker(n);
+                  searchRef.current?.focus();
+                }}
                 className="w-full text-left px-4 py-3 active:bg-steel text-concrete border-b border-line/30 last:border-0"
               >
                 {n}
@@ -930,7 +950,11 @@ export default function Page() {
             {/* Create-new option LAST, so it's never an accidental tap */}
             {!exactExists && query.trim() && (
               <button
-                onClick={() => addWorker(query, true)}
+                onMouseDown={(ev) => ev.preventDefault()}
+                onClick={() => {
+                  addWorker(query, true);
+                  searchRef.current?.focus();
+                }}
                 className="w-full text-left px-4 py-3 bg-safety/15 text-safety font-semibold"
               >
                 + {tr.addNew} “{query.trim()}”
@@ -4312,11 +4336,15 @@ function ReconEditModal({
   lang,
   onClose,
   onSaved,
+  cardEntries,
 }: {
   entry: ReconEntry;
   lang: Lang;
   onClose: () => void;
   onSaved: () => void;
+  // The other entries on this card, when the caller has them. Enables the
+  // name correction below — and the duplicate check it depends on.
+  cardEntries?: { id: string; worker: string; hours: number }[];
 }) {
   const [hours, setHours] = useState(String(entry.hours));
   const [job, setJob] = useState(entry.job);
@@ -4327,6 +4355,66 @@ function ReconEditModal({
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirm, setConfirm] = useState(false);
+
+  // --- Name correction. Foremen who can't find someone type a new name, so a
+  // card can carry a misspelling or a nickname. Renaming to the real roster
+  // name is only half the job: if that person is ALREADY on this card the
+  // rename would double his hours, so that case merges instead.
+  const [roster, setRoster] = useState<string[]>([]);
+  const [namePickerOpen, setNamePickerOpen] = useState(false);
+  const [nameQuery, setNameQuery] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  useEffect(() => {
+    if (!namePickerOpen || roster.length) return;
+    fetch("/api/roster")
+      .then((r) => r.json())
+      .then((d) => setRoster(Array.isArray(d?.workers) ? d.workers : []))
+      .catch(() => {});
+  }, [namePickerOpen, roster.length]);
+
+  async function applyRename(target: string) {
+    const clean = target.trim();
+    if (!clean || clean === entry.worker) { setNamePickerOpen(false); return; }
+    const dup = (cardEntries || []).find(
+      (e) => e.id !== entry.id && e.worker.toLowerCase() === clean.toLowerCase()
+    );
+    setRenaming(true);
+    if (dup) {
+      // Merge: fold this entry's hours into the existing one and void this.
+      const merged = Math.round((dup.hours + entry.hours) * 100) / 100;
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "edit", id: dup.id, hours: merged,
+          logWorker: clean, logDate: entry.date,
+          changeDesc: `Merged ${entry.hours}h from "${entry.worker}" (${dup.hours}h + ${entry.hours}h)`,
+        }),
+      }).catch(() => null);
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "void", id: entry.id, voided: true,
+          note: `Merged into ${clean}`,
+          logWorker: entry.worker, logDate: entry.date,
+        }),
+      }).catch(() => null);
+    } else {
+      await fetch("/api/recon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "edit", id: entry.id, worker: clean,
+          logWorker: clean, logDate: entry.date,
+          changeDesc: `Name corrected from "${entry.worker}"`,
+        }),
+      }).catch(() => null);
+    }
+    setRenaming(false);
+    setNamePickerOpen(false);
+    onSaved();
+  }
 
   // project picker
   const [projects, setProjects] = useState<{ id: string; name: string; jobId: string }[]>([]);
@@ -4443,6 +4531,75 @@ function ReconEditModal({
           </button>
         )}
         <div className="mb-3" />
+
+        {namePickerOpen && (
+          <div className="fixed inset-0 z-[95] bg-black/70 flex items-start justify-center p-4 pt-6">
+            <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4 max-h-[70vh] flex flex-col">
+              <div className="flex items-center justify-between mb-1">
+                <div className="text-concrete font-bold">Correct the name</div>
+                <button onClick={() => setNamePickerOpen(false)} className="text-rebar text-xs font-bold bg-steel px-3 py-1.5 rounded-full">
+                  Cancel
+                </button>
+              </div>
+              <div className="text-rebar text-xs mb-3 truncate">Currently &quot;{entry.worker}&quot;</div>
+              <input
+                autoFocus
+                value={nameQuery}
+                onChange={(e) => setNameQuery(e.target.value)}
+                placeholder="Type the real name…"
+                className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-2"
+              />
+              <div className="flex-1 overflow-y-auto overscroll-contain border border-line rounded-xl">
+                {roster
+                  .filter((n) => !nameQuery.trim() || n.toLowerCase().includes(nameQuery.trim().toLowerCase()))
+                  .slice(0, 40)
+                  .map((n) => {
+                    const dup = (cardEntries || []).some(
+                      (e) => e.id !== entry.id && e.worker.toLowerCase() === n.toLowerCase()
+                    );
+                    return (
+                      <button
+                        key={n}
+                        disabled={renaming}
+                        onClick={() => applyRename(n)}
+                        className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-0 flex items-center justify-between gap-2 disabled:opacity-50"
+                      >
+                        <span className="truncate">{n}</span>
+                        {dup && (
+                          <span className="shrink-0 text-[10px] font-bold px-2 py-0.5 rounded-full" style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}>
+                            MERGE
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+              </div>
+              <div className="text-rebar text-[11px] mt-2">
+                MERGE means that person is already on this card — his hours will be
+                combined and this entry voided.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Name correction — only when the caller passed the card's entries,
+            since the duplicate check depends on knowing who else is on it. */}
+        {cardEntries && (
+          <>
+            <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+              Worker
+            </label>
+            <div className="flex items-center justify-between bg-steel border border-line rounded-xl h-11 px-3 mb-4">
+              <span className="text-concrete truncate">{entry.worker}</span>
+              <button
+                onClick={() => setNamePickerOpen(true)}
+                className="shrink-0 ml-2 text-rebar text-xs font-bold bg-graphite rounded-full px-3 py-1.5"
+              >
+                Change name
+              </button>
+            </div>
+          </>
+        )}
 
         <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">Date</label>
         <input
@@ -6305,6 +6462,10 @@ function ReconReviewView({
 
       {editEntry && (
         <ReconEditModal
+          cardEntries={
+            (groups.find((g) => g.items.some((i: any) => i.id === (editEntry as any).id))?.items ||
+              []) as any
+          }
           entry={editEntry as any}
           lang={lang}
           onClose={() => setEditEntry(null)}
@@ -10104,7 +10265,7 @@ function ForemanPinChangeModal({
 // deactivate only — no schema changes. Deactivating removes a worker from the
 // timesheet crew picker (Active=false); it's a reversible checkbox, never a
 // delete, so history stays intact.
-type RosterPerson = { id: string; name: string; role: string; active: boolean; status: string; pin: string };
+type RosterPerson = { id: string; name: string; role: string; active: boolean; status: string; pin: string; aliases: string };
 
 function RosterPanel({ onClose }: { onClose: () => void }) {
   const [people, setPeople] = useState<RosterPerson[]>([]);
@@ -10330,6 +10491,7 @@ function RosterEditModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   // Access PIN (foreman self-service). Owner-set; validated server-side.
+  const [aliasInput, setAliasInput] = useState(person?.aliases || "");
   const [pinInput, setPinInput] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
   const [pinMsg, setPinMsg] = useState("");
@@ -10373,7 +10535,7 @@ function RosterEditModal({
     if (!name.trim()) { setErr("Name is required."); return; }
     setBusy(true); setErr("");
     const payload = isEdit
-      ? { ownerPin: "5314", op: "edit", id: person!.id, name: name.trim(), role: role.trim() }
+      ? { ownerPin: "5314", op: "edit", id: person!.id, name: name.trim(), role: role.trim(), aliases: aliasInput }
       : { ownerPin: "5314", op: "add", name: name.trim(), role: role.trim(), active: true };
     const res = await fetch("/api/roster-manage", {
       method: "POST",
@@ -10429,6 +10591,19 @@ function RosterEditModal({
 
         {isEdit && (
           <div className="mb-4 pt-3" style={{ borderTop: "1px solid #39414c" }}>
+            <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+              Nicknames{" "}
+              <span className="text-rebar font-normal normal-case">
+                (comma separated — what foremen might type instead)
+              </span>
+            </label>
+            <input
+              value={aliasInput}
+              onChange={(e) => setAliasInput(e.target.value)}
+              placeholder="Chuy, Jesus, Jesue"
+              className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-4"
+            />
+
             <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
               Access PIN{" "}
               <span className="text-rebar font-normal normal-case">

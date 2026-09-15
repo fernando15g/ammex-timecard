@@ -20,6 +20,23 @@ const notion = new Client({ auth: NOTION_TOKEN });
 const OWNER_PIN = "5314";
 const PIN_PROP = "PIN"; // rich_text on Crew Roster — foreman self-service PIN
 
+// Additive only — never renames or removes anything, so the owner platform
+// that reads this database is unaffected.
+let aliasEnsured = false;
+async function ensureAliasProperty(): Promise<void> {
+  if (aliasEnsured) return;
+  try {
+    const db: any = await notion.databases.retrieve({ database_id: CREW_ROSTER_DB_ID });
+    if (!db.properties?.[ROSTER_PROPS.aliases]) {
+      await notion.databases.update({
+        database_id: CREW_ROSTER_DB_ID,
+        properties: { [ROSTER_PROPS.aliases]: { rich_text: {} } } as any,
+      });
+    }
+    aliasEnsured = true;
+  } catch { /* leave it — writes below simply won't stick until it exists */ }
+}
+
 function ownerOk(pin: string | null | undefined): boolean {
   return (pin || "").trim() === OWNER_PIN;
 }
@@ -81,6 +98,7 @@ export async function GET(req: NextRequest) {
       active: boolean;
       status: string;
       pin: string;
+      aliases: string;
     }[] = [];
     let cursor: string | undefined;
     do {
@@ -102,6 +120,7 @@ export async function GET(req: NextRequest) {
           // Access PIN, if one has been issued. Only ever leaves the server on
           // an owner-authenticated request.
           pin: readText(p[PIN_PROP]).trim(),
+          aliases: readText(p[ROSTER_PROPS.aliases]).trim(),
         });
       }
       cursor = res.has_more ? res.next_cursor : undefined;
@@ -164,6 +183,12 @@ export async function POST(req: NextRequest) {
       }
       if (typeof body.active === "boolean")
         props[ROSTER_PROPS.active] = { checkbox: body.active };
+      if (typeof body.aliases === "string") {
+        await ensureAliasProperty();
+        props[ROSTER_PROPS.aliases] = {
+          rich_text: body.aliases.trim() ? [{ text: { content: body.aliases.trim() } }] : [],
+        };
+      }
       if (Object.keys(props).length === 0)
         return NextResponse.json({ error: "Nothing to update." }, { status: 400 });
       await notion.pages.update({ page_id: id, properties: props });

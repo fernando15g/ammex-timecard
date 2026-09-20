@@ -12416,8 +12416,11 @@ function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
           )
         ) : (
           <>
+            {/* The two most recent weeks stay one tap — that's nearly every
+                check. Anything older lives in the dropdown, dated rather than
+                relative so it can be matched against a paper record. */}
             <div className="flex gap-2 mb-3">
-              {[0, -1, -2].map((o) => {
+              {[0, -1].map((o) => {
                 const k = mondayOfLocal(o);
                 return (
                   <button
@@ -12427,10 +12430,35 @@ function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
                       week === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
                     }`}
                   >
-                    {o === 0 ? "This week" : o === -1 ? "Last week" : "2 weeks ago"}
+                    {o === 0 ? "This week" : "Last week"}
                   </button>
                 );
               })}
+              <select
+                value={
+                  week === mondayOfLocal(0) || week === mondayOfLocal(-1) ? "" : week
+                }
+                onChange={(e) => {
+                  if (e.target.value) setWeek(e.target.value);
+                }}
+                className={`flex-1 min-w-0 rounded-full h-9 px-3 text-xs font-bold appearance-none text-center ${
+                  week !== mondayOfLocal(0) && week !== mondayOfLocal(-1)
+                    ? "bg-safety text-steel"
+                    : "bg-steel text-rebar border border-line"
+                }`}
+              >
+                <option value="">Earlier…</option>
+                {Array.from({ length: 12 }, (_, i) => -(i + 2)).map((o) => {
+                  const k = mondayOfLocal(o);
+                  const [, m, d] = k.split("-").map(Number);
+                  const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+                  return (
+                    <option key={o} value={k}>
+                      {MO[m - 1]} {d}
+                    </option>
+                  );
+                })}
+              </select>
             </div>
             <div className="text-rebar text-xs mb-3">Week of {pretty(week)}</div>
             {foremen.map((n) => {

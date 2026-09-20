@@ -12300,6 +12300,37 @@ function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
   const [week, setWeek] = useState(() => mondayOfLocal(0));
   const [busy, setBusy] = useState(false);
   const [uploadFor, setUploadFor] = useState<{ foreman: string; date: string } | null>(null);
+  // Deleting is the one destructive action here, so it goes through a confirm
+  // that SHOWS the photo — you should be looking at what you're removing.
+  const [deleteFor, setDeleteFor] = useState<Form | null>(null);
+  const [deleteUrl, setDeleteUrl] = useState("");
+
+  async function askDelete(f: Form) {
+    setDeleteFor(f);
+    setDeleteUrl("");
+    const d = await fetch(
+      `/api/safety?action=view&ownerPin=5314&path=${encodeURIComponent(f.path)}`
+    ).then((r) => r.json()).catch(() => ({ ok: false }));
+    if (d?.ok) setDeleteUrl(d.url);
+  }
+
+  async function doDelete() {
+    if (!deleteFor) return;
+    setBusy(true);
+    await fetch("/api/safety", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "delete",
+        ownerPin: "5314",
+        id: deleteFor.id,
+        path: deleteFor.path,
+      }),
+    }).catch(() => null);
+    setBusy(false);
+    setDeleteFor(null);
+    load();
+  }
 
   function load() {
     setLoading(true);
@@ -12394,6 +12425,14 @@ function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
                         className="text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
                       >
                         Download
+                      </button>
+                      <button
+                        onClick={() => askDelete(f)}
+                        disabled={busy}
+                        className="ml-auto text-xs font-bold rounded-full px-3 py-1.5 border disabled:opacity-40"
+                        style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                      >
+                        Delete
                       </button>
                     </div>
                   </div>
@@ -12494,6 +12533,14 @@ function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
                         >
                           Download
                         </button>
+                        <button
+                          onClick={() => askDelete(hit)}
+                          disabled={busy}
+                          className="ml-auto text-xs font-bold rounded-full px-3 py-1.5 border disabled:opacity-40"
+                          style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+                        >
+                          Delete
+                        </button>
                       </>
                     ) : (
                       // Foremen often text the photo instead — upload it for him.
@@ -12511,6 +12558,41 @@ function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
           </>
         )}
       </div>
+
+      {deleteFor && (
+        <div className="fixed inset-0 z-[90] bg-black/75 flex items-center justify-center p-4">
+          <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4 max-h-[85vh] overflow-y-auto">
+            <div className="text-concrete font-bold mb-0.5">Delete this form?</div>
+            <div className="text-rebar text-xs mb-3">
+              {deleteFor.foreman} · {pretty(deleteFor.date)}
+            </div>
+            {deleteUrl ? (
+              <img src={deleteUrl} alt="" className="w-full rounded-xl border border-line mb-3" />
+            ) : (
+              <div className="text-rebar text-sm mb-3">Loading photo…</div>
+            )}
+            <div className="text-rebar text-xs mb-4">
+              The photo and the record are both removed. This can&apos;t be undone.
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setDeleteFor(null)}
+                className="flex-1 bg-steel border border-line text-concrete rounded-xl py-3 font-bold"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={doDelete}
+                disabled={busy}
+                className="flex-1 rounded-xl py-3 font-bold text-steel disabled:opacity-40"
+                style={{ background: "#e5533c" }}
+              >
+                {busy ? "…" : "Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {uploadFor && (
         <OwnerSafetyUpload

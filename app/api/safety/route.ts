@@ -267,13 +267,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (body.op === "void") {
+    // Owner-only, and a real delete rather than a void: an accidental photo —
+    // somebody's boot, or worse — is worth removing outright, and there's
+    // nothing about it worth keeping for the record.
+    if (body.op === "delete") {
       if (body.ownerPin !== OWNER_PIN)
         return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-      await notion.pages.update({
-        page_id: body.id,
-        properties: { [FORM_PROPS.voided]: { checkbox: true } },
-      });
+      if (!body.id) return NextResponse.json({ ok: false, error: "id required" }, { status: 400 });
+      if (body.path) {
+        try {
+          await fetch(`${SB_URL}/storage/v1/object/${BUCKET}/${body.path}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${SB_SECRET}`, apikey: SB_SECRET },
+          });
+        } catch { /* remove the row regardless — a stranded file is the lesser problem */ }
+      }
+      await notion.pages.update({ page_id: body.id, archived: true });
       return NextResponse.json({ ok: true });
     }
 
@@ -315,6 +324,37 @@ export async function POST(req: NextRequest) {
     await uploadToBucket(path, bytes, "image/jpeg");
 
     const db = await formsDbId();
+
+    // A second upload for the same foreman and week is a REPLACEMENT — the
+    // storage path is identical so the image overwrites, and without this the
+    // old row would linger pointing at the new photo. Almost always means the
+    // first one was blurry or wrong.
+    try {
+      let dupCursor: string | undefined;
+      do {
+        const dupes: any = await notion.databases.query({
+          database_id: db,
+          filter: {
+            and: [
+              { property: FORM_PROPS.date, date: { equals: monday } },
+              { property: FORM_PROPS.voided, checkbox: { equals: false } },
+            ],
+          },
+          start_cursor: dupCursor,
+          page_size: 100,
+        });
+        for (const pg of dupes.results) {
+          const fm = rt(pg.properties?.[FORM_PROPS.foreman]).trim().toLowerCase();
+          if (fm !== foreman.toLowerCase()) continue;
+          await notion.pages.update({
+            page_id: pg.id,
+            properties: { [FORM_PROPS.voided]: { checkbox: true } },
+          });
+        }
+        dupCursor = dupes.has_more ? dupes.next_cursor : undefined;
+      } while (dupCursor);
+    } catch { /* a duplicate row is better than a failed upload */ }
+
     const created: any = await notion.pages.create({
       parent: { database_id: db },
       properties: {

@@ -108,6 +108,8 @@ export default function Page() {
   const [showRoster, setShowRoster] = useState(false);
   const [showShortPay, setShowShortPay] = useState(false);
   const [showWages, setShowWages] = useState(false);
+  const [showSafety, setShowSafety] = useState(false); // foreman upload
+  const [showSafetyAdmin, setShowSafetyAdmin] = useState(false); // owner folders
   // Owner sign-in. `ownerEmail` non-empty means a live Supabase session exists.
   // `ownerBypass` means the owner chose the PIN fallback because sign-in was
   // unreachable — it lasts for this session only and is never persisted.
@@ -1100,7 +1102,20 @@ export default function Page() {
             onClick={(e) => e.stopPropagation()}
           >
             {foremanUnlocked && !adminUnlocked ? (
-              // Foreman menu — their PIN opens ONLY this.
+              // Foreman menu — their PIN opens ONLY these two.
+              <>
+              <button
+                onClick={() => {
+                  setShowMenu(false);
+                  setShowSafety(true);
+                }}
+                className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-b border-line"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                </svg>
+                {lang === "es" ? "Forma de seguridad" : "Safety form"}
+              </button>
               <button
                 onClick={() => {
                   setShowMenu(false);
@@ -1115,6 +1130,7 @@ export default function Page() {
                 </svg>
                 {lang === "es" ? "Mis tarjetas" : "My submissions"}
               </button>
+              </>
             ) : !adminUnlocked ? (
               // PIN entry — gates the whole admin area.
               <div className="p-5">
@@ -1253,6 +1269,18 @@ export default function Page() {
                 <button
                   onClick={() => {
                     setShowMenu(false);
+                    setShowSafetyAdmin(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  Safety forms
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
                     setShowWages(true);
                   }}
                   className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
@@ -1360,6 +1388,16 @@ export default function Page() {
 
       {/* Wages (owner-only, behind Supabase auth) */}
       {showWages && <WagesPanel onClose={() => setShowWages(false)} />}
+
+      {/* Safety form upload (foreman) and the owner's folder view */}
+      {showSafety && (
+        <SafetyUploadPanel
+          foreman={foreman}
+          lang={lang}
+          onClose={() => setShowSafety(false)}
+        />
+      )}
+      {showSafetyAdmin && <SafetyAdminPanel onClose={() => setShowSafetyAdmin(false)} />}
       {showMySubs && foremanUnlocked && (
         <MySubmissionsPanel
           foreman={foreman}
@@ -11939,6 +11977,581 @@ function NeedsReviewModal({
             {busy ? "…" : on ? "Update" : "Flag"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Shrink a camera photo before upload. A phone shoots ~4000px and 2-5 MB; a
+// sheet of paper is perfectly legible at 1600px, which lands around 300 KB.
+// That's the difference between ~2 years and ~12 years of free storage, and it
+// makes uploads work on bad jobsite signal.
+async function compressPhoto(file: File, maxEdge = 1600, quality = 0.72): Promise<string> {
+  const dataUrl: string = await new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(String(r.result));
+    r.onerror = () => rej(new Error("read failed"));
+    r.readAsDataURL(file);
+  });
+  const img: HTMLImageElement = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error("decode failed"));
+    i.src = dataUrl;
+  });
+  const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+  const w = Math.round(img.width * scale);
+  const h = Math.round(img.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return dataUrl;
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+// Foreman-facing. The week's topic is shown BEFORE the camera opens, because
+// the blank on the printed sheet is the thing that actually needs filling in —
+// stamping the digital copy would leave the paper in the file cabinet blank.
+function SafetyUploadPanel({
+  foreman,
+  lang,
+  onClose,
+}: {
+  foreman: string;
+  lang: Lang;
+  onClose: () => void;
+}) {
+  useLockBodyScroll();
+  const es = lang === "es";
+  const [topic, setTopic] = useState<{ week: number; en: string; es: string } | null>(null);
+  const [monday, setMonday] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [preview, setPreview] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [err, setErr] = useState("");
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  // Crews sometimes cover something other than the scheduled talk. The week's
+  // topic stays the default; this is the exception, typed freely rather than
+  // picked from the 52 — an off-schedule talk isn't on the list by definition.
+  const [otherOn, setOtherOn] = useState(false);
+  const [otherText, setOtherText] = useState("");
+
+  useEffect(() => {
+    fetch("/api/safety?action=topic")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d?.ok) {
+          setTopic(d.topic);
+          setMonday(d.monday || "");
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function pick(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setErr("");
+    try {
+      setPreview(await compressPhoto(f));
+    } catch {
+      setErr(es ? "No se pudo leer la foto." : "Couldn't read that photo.");
+    }
+  }
+
+  async function submit() {
+    if (!preview) return;
+    setBusy(true);
+    setErr("");
+    const res = await fetch("/api/safety", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "upload",
+        foreman,
+        foremanPin: true,
+        imageBase64: preview,
+        customTopic: otherOn ? otherText.trim() : "",
+      }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) setDone(true);
+    else setErr(res?.error || (es ? "No se pudo enviar." : "Upload failed."));
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-4">
+          <div className="font-bold text-concrete text-lg">
+            {es ? "Forma de seguridad" : "Safety form"}
+          </div>
+          <button onClick={onClose} className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full">
+            {es ? "Cerrar" : "Close"}
+          </button>
+        </div>
+
+        {done ? (
+          <div className="text-center py-16">
+            <div className="text-safety text-5xl mb-4">✓</div>
+            <div className="text-concrete font-bold text-lg mb-1">
+              {es ? "Enviado" : "Sent"}
+            </div>
+            <div className="text-rebar text-sm mb-6">
+              {es ? "Gracias." : "Thanks."}
+            </div>
+            <button onClick={onClose} className="bg-safety text-steel rounded-xl px-6 py-3 font-bold">
+              {es ? "Listo" : "Done"}
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* The topic, big and first. This is the number printed on the
+                sheet, so it can be matched without reading closely. */}
+            <div className="bg-graphite border border-line rounded-2xl p-4 mb-4">
+              <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2">
+                {es ? "Tema de esta semana" : "This week's topic"}
+              </div>
+              {loading ? (
+                <div className="text-rebar text-sm">…</div>
+              ) : topic ? (
+                <>
+                  <div className="text-concrete font-bold text-xl leading-tight">
+                    {topic.week} · {es ? topic.es : topic.en}
+                  </div>
+                  {monday && (
+                    <div className="text-rebar text-xs mt-2">
+                      {es ? "Semana del" : "Week of"} {monday}
+                    </div>
+                  )}
+                  <div className="text-safety text-sm font-bold mt-3">
+                    {es
+                      ? "Escribe este tema en la hoja antes de tomar la foto."
+                      : "Write this topic on the sheet before taking the photo."}
+                  </div>
+
+                  <div className="mt-4 pt-3 border-t border-white/10">
+                    {otherOn ? (
+                      <>
+                        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
+                          {es ? "¿Cuál tema dieron?" : "Which topic did you cover?"}
+                        </label>
+                        <input
+                          value={otherText}
+                          onChange={(e) => setOtherText(e.target.value)}
+                          placeholder={es ? "Escribe el tema" : "Type the topic"}
+                          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-2"
+                        />
+                        <button
+                          onClick={() => { setOtherOn(false); setOtherText(""); }}
+                          className="text-rebar text-xs font-bold"
+                        >
+                          {es ? "Usar el tema de la semana" : "Use this week's topic"}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setOtherOn(true)}
+                        className="text-rebar text-sm font-bold underline"
+                      >
+                        {es ? "Otro tema" : "Other topic"}
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="text-rebar text-sm">
+                  {es ? "No hay tema para esta semana." : "No topic set for this week."}
+                </div>
+              )}
+            </div>
+
+            {preview ? (
+              <>
+                <img
+                  src={preview}
+                  alt=""
+                  className="w-full rounded-2xl border border-line mb-3"
+                />
+                <button
+                  onClick={() => { setPreview(""); if (fileRef.current) fileRef.current.value = ""; }}
+                  className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold mb-2"
+                >
+                  {es ? "Tomar otra" : "Retake"}
+                </button>
+                <button
+                  onClick={submit}
+                  disabled={busy}
+                  className="w-full bg-safety text-steel rounded-xl py-4 font-bold text-lg disabled:opacity-40"
+                >
+                  {busy ? "…" : es ? "Enviar" : "Submit"}
+                </button>
+              </>
+            ) : (
+              <>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={pick}
+                  className="hidden"
+                  id="safety-photo"
+                />
+                <label
+                  htmlFor="safety-photo"
+                  className="block w-full bg-safety text-steel rounded-xl py-4 font-bold text-lg text-center"
+                >
+                  {es ? "Tomar foto" : "Take photo"}
+                </label>
+                <div className="text-rebar text-xs text-center mt-3">
+                  {es
+                    ? "Toma la foto de la hoja firmada."
+                    : "Photograph the signed sheet."}
+                </div>
+              </>
+            )}
+
+            {err && (
+              <div className="text-xs font-bold mt-3 text-center" style={{ color: "#e5533c" }}>
+                {err}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Owner-facing. Drive-style: a folder per foreman from the roster, so a new
+// foreman appears with "0 forms" and nothing has to be provisioned. Plus a
+// by-week lens, which is the view that answers "who's missing this Monday" —
+// the folder view answers "show me Ramon's year" and answers that badly.
+function SafetyAdminPanel({ onClose }: { onClose: () => void }) {
+  useLockBodyScroll();
+  type Form = {
+    id: string;
+    date: string;
+    foreman: string;
+    topic: string;
+    week: number;
+    path: string;
+    uploadedBy: string;
+  };
+
+  function mondayOfLocal(offsetWeeks = 0): string {
+    const now = new Date();
+    const l = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = l.getDay();
+    const m = new Date(l);
+    m.setDate(l.getDate() + (dow === 0 ? -6 : 1 - dow) + offsetWeeks * 7);
+    return `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, "0")}-${String(m.getDate()).padStart(2, "0")}`;
+  }
+  function pretty(iso: string): string {
+    if (!iso) return "";
+    const [y, m, d] = iso.split("-").map(Number);
+    const MO = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    return `${MO[m - 1]} ${d}, ${y}`;
+  }
+
+  const [mode, setMode] = useState<"folders" | "week">("folders");
+  const [foremen, setForemen] = useState<string[]>([]);
+  const [forms, setForms] = useState<Form[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [openFolder, setOpenFolder] = useState("");
+  const [week, setWeek] = useState(() => mondayOfLocal(0));
+  const [busy, setBusy] = useState(false);
+  const [uploadFor, setUploadFor] = useState<{ foreman: string; date: string } | null>(null);
+
+  function load() {
+    setLoading(true);
+    Promise.all([
+      fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/safety?action=forms&ownerPin=5314").then((r) => r.json()).catch(() => ({ ok: false })),
+    ]).then(([rd, fd]) => {
+      if (Array.isArray(rd?.foremen)) setForemen(rd.foremen);
+      if (fd?.ok) setForms(fd.forms || []);
+      setLoading(false);
+    });
+  }
+  useEffect(() => { load(); }, []);
+
+  async function open(path: string, download = false) {
+    setBusy(true);
+    const d = await fetch(
+      `/api/safety?action=view&ownerPin=5314&path=${encodeURIComponent(path)}${download ? "&download=1" : ""}`
+    ).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (d?.ok && d.url) window.open(d.url, "_blank");
+  }
+
+  const byForeman = (n: string) => forms.filter((f) => f.foreman.toLowerCase() === n.toLowerCase());
+  const weekForms = forms.filter((f) => f.date === week);
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-24">
+        <div className="flex items-center justify-between mb-1">
+          <div className="font-bold text-concrete text-lg">Safety forms</div>
+          <button onClick={onClose} className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full">
+            Close
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">
+          Signed toolbox talks, by foreman or by week.
+        </div>
+
+        <div className="flex gap-2 mb-4">
+          {([["folders", "By foreman"], ["week", "By week"]] as const).map(([k, label]) => (
+            <button
+              key={k}
+              onClick={() => { setMode(k); setOpenFolder(""); }}
+              className={`flex-1 rounded-full h-10 text-sm font-bold ${
+                mode === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {loading ? (
+          <div className="text-rebar text-sm">Loading…</div>
+        ) : mode === "folders" ? (
+          openFolder ? (
+            <>
+              <button
+                onClick={() => setOpenFolder("")}
+                className="text-rebar text-sm font-bold mb-3"
+              >
+                ← All foremen
+              </button>
+              <div className="text-concrete font-bold text-[15px] mb-2">{openFolder}</div>
+              {byForeman(openFolder).length === 0 ? (
+                <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">
+                  No forms yet.
+                </div>
+              ) : (
+                byForeman(openFolder).map((f) => (
+                  <div key={f.id} className="bg-graphite border border-line rounded-2xl p-4 mb-2">
+                    <div className="flex items-center justify-between pb-2 mb-2 border-b border-white/10">
+                      <div className="text-concrete font-bold text-[15px]">{pretty(f.date)}</div>
+                      <div className="text-rebar text-xs shrink-0 ml-2">Week {f.week}</div>
+                    </div>
+                    <div className="text-rebar text-xs">{f.topic}</div>
+                    {f.uploadedBy === "Owner" && (
+                      <div className="text-rebar text-[11px] mt-1 italic">Uploaded by owner</div>
+                    )}
+                    <div className="flex gap-2 mt-3">
+                      <button
+                        onClick={() => open(f.path)}
+                        disabled={busy}
+                        className="text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => open(f.path, true)}
+                        disabled={busy}
+                        className="text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
+                      >
+                        Download
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </>
+          ) : (
+            foremen.map((n) => (
+              <button
+                key={n}
+                onClick={() => setOpenFolder(n)}
+                className="w-full text-left bg-graphite border border-line rounded-2xl p-4 mb-2 flex items-center justify-between active:bg-steel"
+              >
+                <span className="text-concrete font-semibold truncate">{n}</span>
+                <span className="text-rebar text-xs shrink-0 ml-2">
+                  {byForeman(n).length} {byForeman(n).length === 1 ? "form" : "forms"}
+                </span>
+              </button>
+            ))
+          )
+        ) : (
+          <>
+            <div className="flex gap-2 mb-3">
+              {[0, -1, -2].map((o) => {
+                const k = mondayOfLocal(o);
+                return (
+                  <button
+                    key={o}
+                    onClick={() => setWeek(k)}
+                    className={`flex-1 rounded-full h-9 text-xs font-bold ${
+                      week === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+                    }`}
+                  >
+                    {o === 0 ? "This week" : o === -1 ? "Last week" : "2 weeks ago"}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-rebar text-xs mb-3">Week of {pretty(week)}</div>
+            {foremen.map((n) => {
+              const hit = weekForms.find((f) => f.foreman.toLowerCase() === n.toLowerCase());
+              return (
+                <div key={n} className="bg-graphite border border-line rounded-2xl p-4 mb-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-concrete font-semibold truncate">{n}</span>
+                    {hit ? (
+                      <span className="text-xs font-bold shrink-0 ml-2" style={{ color: "#4a9e63" }}>
+                        ✓ Submitted
+                      </span>
+                    ) : (
+                      <span className="text-xs font-bold shrink-0 ml-2" style={{ color: "#e0a63b" }}>
+                        Missing
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    {hit ? (
+                      <>
+                        <button
+                          onClick={() => open(hit.path)}
+                          disabled={busy}
+                          className="text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
+                        >
+                          View
+                        </button>
+                        <button
+                          onClick={() => open(hit.path, true)}
+                          disabled={busy}
+                          className="text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete disabled:opacity-40"
+                        >
+                          Download
+                        </button>
+                      </>
+                    ) : (
+                      // Foremen often text the photo instead — upload it for him.
+                      <button
+                        onClick={() => setUploadFor({ foreman: n, date: week })}
+                        className="text-xs font-bold rounded-full px-3 py-1.5 bg-steel border border-line text-concrete"
+                      >
+                        Upload for him
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        )}
+      </div>
+
+      {uploadFor && (
+        <OwnerSafetyUpload
+          foreman={uploadFor.foreman}
+          dateISO={uploadFor.date}
+          onClose={() => setUploadFor(null)}
+          onDone={() => { setUploadFor(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Owner uploading on a foreman's behalf — same storage, same naming, marked so
+// it's clear later who actually submitted it.
+function OwnerSafetyUpload({
+  foreman,
+  dateISO,
+  onClose,
+  onDone,
+}: {
+  foreman: string;
+  dateISO: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [preview, setPreview] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function pick(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setErr("");
+    try {
+      setPreview(await compressPhoto(f));
+    } catch {
+      setErr("Couldn't read that photo.");
+    }
+  }
+
+  async function submit() {
+    if (!preview) return;
+    setBusy(true);
+    setErr("");
+    const res = await fetch("/api/safety", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "upload",
+        ownerPin: "5314",
+        foreman,
+        dateISO,
+        imageBase64: preview,
+      }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (res?.ok) onDone();
+    else setErr(res?.error || "Upload failed.");
+  }
+
+  return (
+    <div className="fixed inset-0 z-[85] bg-black/70 flex items-center justify-center p-4">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4 max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-1">
+          <div className="text-concrete font-bold">Upload for {foreman}</div>
+          <button onClick={onClose} className="text-rebar text-xs font-bold bg-steel px-3 py-1.5 rounded-full">
+            Cancel
+          </button>
+        </div>
+        <div className="text-rebar text-xs mb-4">Week of {dateISO}</div>
+
+        {preview ? (
+          <>
+            <img src={preview} alt="" className="w-full rounded-xl border border-line mb-3" />
+            <button
+              onClick={() => setPreview("")}
+              className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold mb-2"
+            >
+              Choose another
+            </button>
+            <button
+              onClick={submit}
+              disabled={busy}
+              className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+            >
+              {busy ? "…" : "Upload"}
+            </button>
+          </>
+        ) : (
+          <>
+            <input type="file" accept="image/*" onChange={pick} className="hidden" id="owner-safety-photo" />
+            <label
+              htmlFor="owner-safety-photo"
+              className="block w-full bg-safety text-steel rounded-xl py-3 font-bold text-center"
+            >
+              Choose photo
+            </label>
+          </>
+        )}
+
+        {err && <div className="text-xs font-bold mt-3" style={{ color: "#e5533c" }}>{err}</div>}
       </div>
     </div>
   );

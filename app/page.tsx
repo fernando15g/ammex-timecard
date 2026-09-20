@@ -12038,6 +12038,8 @@ function SafetyUploadPanel({
   // picked from the 52 — an off-schedule talk isn't on the list by definition.
   const [otherOn, setOtherOn] = useState(false);
   const [otherText, setOtherText] = useState("");
+  const [topicOpen, setTopicOpen] = useState(true);
+  const [zoom, setZoom] = useState(false);
 
   useEffect(() => {
     fetch("/api/safety?action=topic")
@@ -12058,6 +12060,9 @@ function SafetyUploadPanel({
     setErr("");
     try {
       setPreview(await compressPhoto(f));
+      // Fold the topic away so the photo, Retake and Submit all fit without
+      // scrolling — the next step should never be below the fold.
+      setTopicOpen(false);
     } catch {
       setErr(es ? "No se pudo leer la foto." : "Couldn't read that photo.");
     }
@@ -12123,6 +12128,36 @@ function SafetyUploadPanel({
               {loading ? (
                 <div className="text-rebar text-sm">…</div>
               ) : topic ? (
+                // Once a photo is in, this card is only taking the room the
+                // Submit button needs — a foreman scrolling past a tall image
+                // may not realise anything is below it. Collapses to the topic
+                // plus the Otro tema button; tap the topic to expand.
+                preview && !topicOpen ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setTopicOpen(true)}
+                      className="min-w-0 flex-1 text-left text-concrete font-bold truncate"
+                    >
+                      {otherOn
+                        ? otherText || (es ? "Escribe el tema" : "Type the topic")
+                        : `${topic.week} · ${es ? topic.es : topic.en}`}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (otherOn) setOtherText("");
+                        setOtherOn(!otherOn);
+                        if (!otherOn) setTopicOpen(true); // typing needs the box
+                      }}
+                      className={`shrink-0 rounded-full px-3 h-8 text-xs font-bold border ${
+                        otherOn
+                          ? "bg-safety text-steel border-transparent"
+                          : "bg-steel text-rebar border-line"
+                      }`}
+                    >
+                      {es ? "Otro tema" : "Other topic"}
+                    </button>
+                  </div>
+                ) : (
                 <>
                   {/* With a custom topic chosen, the scheduled one is no longer
                       relevant — showing both would only invite writing the
@@ -12172,8 +12207,17 @@ function SafetyUploadPanel({
                     >
                       {es ? "Otro tema" : "Other topic"}
                     </button>
+                    {preview && (
+                      <button
+                        onClick={() => setTopicOpen(false)}
+                        className="ml-3 text-rebar text-xs font-bold"
+                      >
+                        {es ? "Ocultar" : "Hide"}
+                      </button>
+                    )}
                   </div>
                 </>
+                )
               ) : (
                 <div className="text-rebar text-sm">
                   {es ? "No hay tema para esta semana." : "No topic set for this week."}
@@ -12183,11 +12227,16 @@ function SafetyUploadPanel({
 
             {preview ? (
               <>
-                <img
-                  src={preview}
-                  alt=""
-                  className="w-full rounded-2xl border border-line mb-3"
-                />
+                <button onClick={() => setZoom(true)} className="block w-full">
+                  <img
+                    src={preview}
+                    alt=""
+                    className="w-full h-44 object-cover rounded-2xl border border-line mb-1"
+                  />
+                </button>
+                <div className="text-rebar text-[11px] text-center mb-3">
+                  {es ? "Toca la foto para verla completa" : "Tap the photo to see it full size"}
+                </div>
                 <button
                   onClick={() => { setPreview(""); if (fileRef.current) fileRef.current.value = ""; }}
                   className="w-full bg-steel border border-line text-concrete rounded-xl py-3 font-bold mb-2"
@@ -12252,6 +12301,15 @@ function SafetyUploadPanel({
             {err && (
               <div className="text-xs font-bold mt-3 text-center" style={{ color: "#e5533c" }}>
                 {err}
+              </div>
+            )}
+
+            {zoom && preview && (
+              <div
+                className="fixed inset-0 z-[95] bg-black/90 flex items-center justify-center p-3"
+                onClick={() => setZoom(false)}
+              >
+                <img src={preview} alt="" className="max-w-full max-h-full rounded-xl" />
               </div>
             )}
           </>

@@ -12063,8 +12063,12 @@ function SafetyUploadPanel({
     }
   }
 
+  // A custom topic with nothing typed would file a form with no topic at all,
+  // which is worse than the blank we're trying to fix.
+  const topicMissing = otherOn && !otherText.trim();
+
   async function submit() {
-    if (!preview) return;
+    if (!preview || topicMissing) return;
     setBusy(true);
     setErr("");
     const res = await fetch("/api/safety", {
@@ -12120,14 +12124,32 @@ function SafetyUploadPanel({
                 <div className="text-rebar text-sm">…</div>
               ) : topic ? (
                 <>
-                  <div className="text-concrete font-bold text-xl leading-tight">
-                    {topic.week} · {es ? topic.es : topic.en}
-                  </div>
-                  {monday && (
-                    <div className="text-rebar text-xs mt-2">
-                      {es ? "Semana del" : "Week of"} {monday}
-                    </div>
+                  {/* With a custom topic chosen, the scheduled one is no longer
+                      relevant — showing both would only invite writing the
+                      wrong one on the sheet. */}
+                  {otherOn ? (
+                    <input
+                      autoFocus
+                      value={otherText}
+                      onChange={(e) => setOtherText(e.target.value)}
+                      placeholder={es ? "Escribe el tema" : "Type the topic"}
+                      className="w-full bg-steel border border-line rounded-xl h-12 px-3 text-concrete text-lg font-bold"
+                    />
+                  ) : (
+                    <>
+                      <div className="text-concrete font-bold text-xl leading-tight">
+                        {topic.week} · {es ? topic.es : topic.en}
+                      </div>
+                      {monday && (
+                        <div className="text-rebar text-xs mt-2">
+                          {es ? "Semana del" : "Week of"} {monday}
+                        </div>
+                      )}
+                    </>
                   )}
+
+                  {/* Kept in both states — that blank on the paper is the whole
+                      reason this screen exists. */}
                   <div className="text-safety text-sm font-bold mt-3">
                     {es
                       ? "Escribe este tema en la hoja antes de tomar la foto."
@@ -12135,32 +12157,21 @@ function SafetyUploadPanel({
                   </div>
 
                   <div className="mt-4 pt-3 border-t border-white/10">
-                    {otherOn ? (
-                      <>
-                        <label className="block text-rebar text-xs font-bold uppercase tracking-wide mb-1">
-                          {es ? "¿Cuál tema dieron?" : "Which topic did you cover?"}
-                        </label>
-                        <input
-                          value={otherText}
-                          onChange={(e) => setOtherText(e.target.value)}
-                          placeholder={es ? "Escribe el tema" : "Type the topic"}
-                          className="w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-2"
-                        />
-                        <button
-                          onClick={() => { setOtherOn(false); setOtherText(""); }}
-                          className="text-rebar text-xs font-bold"
-                        >
-                          {es ? "Usar el tema de la semana" : "Use this week's topic"}
-                        </button>
-                      </>
-                    ) : (
-                      <button
-                        onClick={() => setOtherOn(true)}
-                        className="text-rebar text-sm font-bold underline"
-                      >
-                        {es ? "Otro tema" : "Other topic"}
-                      </button>
-                    )}
+                    <button
+                      onClick={() => {
+                        // Turning it off restores the week's topic and clears
+                        // whatever was typed, so a stray tap leaves nothing behind.
+                        if (otherOn) setOtherText("");
+                        setOtherOn(!otherOn);
+                      }}
+                      className={`rounded-full px-4 h-10 text-sm font-bold border ${
+                        otherOn
+                          ? "bg-safety text-steel border-transparent"
+                          : "bg-steel text-rebar border-line"
+                      }`}
+                    >
+                      {es ? "Otro tema" : "Other topic"}
+                    </button>
                   </div>
                 </>
               ) : (
@@ -12185,11 +12196,16 @@ function SafetyUploadPanel({
                 </button>
                 <button
                   onClick={submit}
-                  disabled={busy}
+                  disabled={busy || topicMissing}
                   className="w-full bg-safety text-steel rounded-xl py-4 font-bold text-lg disabled:opacity-40"
                 >
                   {busy ? "…" : es ? "Enviar" : "Submit"}
                 </button>
+                {topicMissing && (
+                  <div className="text-xs font-bold mt-2 text-center" style={{ color: "#e0a63b" }}>
+                    {es ? "Escribe el tema arriba." : "Type the topic above."}
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -12204,10 +12220,27 @@ function SafetyUploadPanel({
                 />
                 <label
                   htmlFor="safety-photo"
-                  className="block w-full bg-safety text-steel rounded-xl py-4 font-bold text-lg text-center"
+                  className="block w-full bg-safety text-steel rounded-xl py-4 font-bold text-lg text-center mb-2"
                 >
                   {es ? "Tomar foto" : "Take photo"}
                 </label>
+
+                {/* For a sheet photographed earlier in the day — no reason to
+                    make them retake it. */}
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={pick}
+                  className="hidden"
+                  id="safety-photo-lib"
+                />
+                <label
+                  htmlFor="safety-photo-lib"
+                  className="block w-full bg-steel border border-line text-concrete rounded-xl py-4 font-bold text-lg text-center"
+                >
+                  {es ? "Subir foto" : "Upload photo"}
+                </label>
+
                 <div className="text-rebar text-xs text-center mt-3">
                   {es
                     ? "Toma la foto de la hoja firmada."

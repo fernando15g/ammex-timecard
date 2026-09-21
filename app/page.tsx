@@ -12806,7 +12806,19 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
     | { kind: "addTool" }
     | { kind: "tool"; t: Tool }
     | { kind: "holder"; name: string }
+    | { kind: "batchGive" }
   >(null);
+  // Picking several stored tools to hand out together.
+  const [selMode, setSelMode] = useState(false);
+  const [selIds, setSelIds] = useState<Set<string>>(new Set());
+  const toggleSel = (id: string) =>
+    setSelIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const endSelect = () => { setSelMode(false); setSelIds(new Set()); };
 
   async function load(quiet = false) {
     if (!quiet) setLoading(true);
@@ -12864,14 +12876,17 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
   const toolRow = (t: Tool) => (
     <button
       key={t.id}
-      onClick={() => setSheet({ kind: "tool", t })}
+      onClick={() => (selMode ? toggleSel(t.id) : setSheet({ kind: "tool", t }))}
       className="w-full text-left flex items-center justify-between px-4 py-3 border-b border-line/40 last:border-0 active:bg-steel"
     >
-      <span className="text-concrete text-sm font-semibold truncate">
-        {t.tool}
-        {t.size ? <span className="text-rebar font-normal"> · {t.size}</span> : null}
+      <span className="text-concrete text-sm font-semibold truncate flex items-center gap-2 min-w-0">
+        {selMode && <InvCheck on={selIds.has(t.id)} />}
+        <span className="truncate">
+          {t.tool}
+          {t.size ? <span className="text-rebar font-normal"> · {t.size}</span> : null}
+        </span>
       </span>
-      <span className="text-rebar text-[11px] shrink-0 ml-2">›</span>
+      {!selMode && <span className="text-rebar text-[11px] shrink-0 ml-2">›</span>}
     </button>
   );
 
@@ -12886,7 +12901,7 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex gap-2 mb-4">
-          <button onClick={() => setTab("materials")} className={pill(tab === "materials")}>Materials</button>
+          <button onClick={() => { setTab("materials"); endSelect(); }} className={pill(tab === "materials")}>Materials</button>
           <button onClick={() => setTab("tools")} className={pill(tab === "tools")}>Tools</button>
         </div>
 
@@ -12928,9 +12943,26 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
           </>
         ) : (
           <>
-            <button onClick={() => setSheet({ kind: "addTool" })} className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-4">
-              + Add tool
-            </button>
+            <div className="flex gap-2 mb-4">
+              <button onClick={() => setSheet({ kind: "addTool" })} className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold">
+                + Add tool
+              </button>
+              {stored.length > 0 && (
+                <button
+                  onClick={() => (selMode ? endSelect() : setSelMode(true))}
+                  className={`shrink-0 rounded-xl px-4 py-3 font-bold border ${
+                    selMode ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
+                  }`}
+                >
+                  {selMode ? "Done" : "Select"}
+                </button>
+              )}
+            </div>
+            {selMode && (
+              <div className="text-rebar text-xs mb-3">
+                Tap tools in storage to give them out together.
+              </div>
+            )}
 
             {/* Who has what — a count per person; tap in for the tools. */}
             <div className={section}>Out with crew</div>
@@ -12995,6 +13027,34 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
         )}
       </div>
 
+      {tab === "tools" && selMode && selIds.size > 0 && (
+        <div className="fixed bottom-0 inset-x-0 z-[70] bg-steel border-t border-line p-4">
+          <div className="max-w-2xl mx-auto flex items-center gap-3">
+            <span className="text-concrete font-bold text-sm shrink-0">{selIds.size} selected</span>
+            <button
+              onClick={() => setSheet({ kind: "batchGive" })}
+              className="flex-1 bg-safety text-steel rounded-xl py-3 font-bold"
+            >
+              Give to…
+            </button>
+          </div>
+        </div>
+      )}
+
+      {sheet?.kind === "batchGive" && (
+        <BatchGiveSheet
+          count={selIds.size}
+          crew={crew}
+          busy={busy}
+          onClose={() => setSheet(null)}
+          onSave={async (person, dateISO) => {
+            const r = await post({ op: "bulk_action", ids: Array.from(selIds), action: "Issued", person, dateISO });
+            if (r?.ok) { setSheet(null); endSelect(); load(true); }
+            return r;
+          }}
+        />
+      )}
+
       {sheet?.kind === "addMat" && (
         <AddMaterialSheet
           materials={materialNames}
@@ -13039,23 +13099,19 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
         />
       )}
       {sheet?.kind === "holder" && (
-        <InvSheet title={sheet.name} onClose={() => setSheet(null)} closeLabel="Close">
-          <div className="bg-steel border border-line rounded-xl overflow-hidden">
-            {issued.filter((t) => t.holder === sheet.name).map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setSheet({ kind: "tool", t })}
-                className="w-full text-left flex items-center justify-between px-3 py-3 border-b border-line/40 last:border-0 active:bg-graphite"
-              >
-                <span className="text-concrete text-sm font-semibold truncate">
-                  {t.tool}
-                  {t.size ? <span className="text-rebar font-normal"> · {t.size}</span> : null}
-                </span>
-                <span className="text-rebar text-[11px] shrink-0 ml-2">since {t.issued}</span>
-              </button>
-            ))}
-          </div>
-        </InvSheet>
+        <HolderSheet
+          name={sheet.name}
+          tools={issued.filter((t) => t.holder === sheet.name)}
+          locations={toolLocations}
+          busy={busy}
+          onClose={() => setSheet(null)}
+          onOpen={(t) => setSheet({ kind: "tool", t })}
+          onReturn={async (ids, location, dateISO) => {
+            const r = await post({ op: "bulk_action", ids, action: "Returned", location, dateISO });
+            if (r?.ok) { setSheet(null); load(true); }
+            return r;
+          }}
+        />
       )}
       {sheet?.kind === "tool" && (
         <ToolSheet
@@ -13638,6 +13694,164 @@ function ToolSheet({
         </>
       )}
       {err && <div className="text-xs font-bold mt-2" style={{ color: "#e5533c" }}>{err}</div>}
+    </InvSheet>
+  );
+}
+
+// Checkbox for inventory select mode — same look as the timecard card select.
+function InvCheck({ on }: { on: boolean }) {
+  return (
+    <span
+      className="shrink-0 w-4 h-4 rounded border flex items-center justify-center text-[10px] font-bold"
+      style={
+        on
+          ? { background: "#e8801a", borderColor: "#e8801a", color: "#1c2127" }
+          : { borderColor: "rgba(154,163,175,.6)", color: "transparent" }
+      }
+    >
+      ✓
+    </span>
+  );
+}
+
+// Give several stored tools to one person on one date.
+function BatchGiveSheet({
+  count, crew, busy, onClose, onSave,
+}: {
+  count: number;
+  crew: string[];
+  busy: boolean;
+  onClose: () => void;
+  onSave: (person: string, dateISO: string) => Promise<any>;
+}) {
+  const [person, setPerson] = useState("");
+  const [dateISO, setDateISO] = useState(() => todayLocalISO());
+  const [err, setErr] = useState("");
+  return (
+    <InvSheet title={`Give ${count} ${count === 1 ? "tool" : "tools"}`} onClose={onClose}>
+      <label className={invLabel}>Who&apos;s taking them</label>
+      <CrewPicker crew={crew} value={person} onPick={setPerson} />
+      <label className={invLabel}>Given on</label>
+      <input type="date" value={dateISO} onChange={(e) => setDateISO(e.target.value)} className={invField} />
+      {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
+      <button
+        disabled={!person || busy}
+        onClick={async () => {
+          setErr("");
+          const r = await onSave(person, dateISO);
+          if (!r?.ok || r?.error) setErr(r?.error || "That didn't save.");
+        }}
+        className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+      >
+        {busy ? "…" : `Give ${count}`}
+      </button>
+    </InvSheet>
+  );
+}
+
+// A foreman's tools. Tap one to open it, or Select to hand several back at
+// once — All covers the end-of-job case where everything comes back.
+function HolderSheet({
+  name, tools, locations, busy, onClose, onOpen, onReturn,
+}: {
+  name: string;
+  tools: { id: string; tool: string; size: string; issued: string }[];
+  locations: string[];
+  busy: boolean;
+  onClose: () => void;
+  onOpen: (t: any) => void;
+  onReturn: (ids: string[], location: string, dateISO: string) => Promise<any>;
+}) {
+  const [selMode, setSelMode] = useState(false);
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [returning, setReturning] = useState(false);
+  const [location, setLocation] = useState(locations[0] || "");
+  const [dateISO, setDateISO] = useState(() => todayLocalISO());
+  const [err, setErr] = useState("");
+
+  const toggle = (id: string) =>
+    setSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allOn = sel.size === tools.length && tools.length > 0;
+
+  if (returning) {
+    return (
+      <InvSheet title={`Return ${sel.size} ${sel.size === 1 ? "tool" : "tools"}`} onClose={() => setReturning(false)} closeLabel="Back">
+        <div className="text-rebar text-xs mb-3">From {name}</div>
+        <label className={invLabel}>Where are they going</label>
+        <Chips options={locations} value={location} onPick={setLocation} />
+        <label className={invLabel}>Date</label>
+        <input type="date" value={dateISO} onChange={(e) => setDateISO(e.target.value)} className={invField} />
+        {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
+        <button
+          disabled={!location || busy}
+          onClick={async () => {
+            setErr("");
+            const r = await onReturn(Array.from(sel), location, dateISO);
+            if (!r?.ok || r?.error) setErr(r?.error || "That didn't save.");
+          }}
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+        >
+          {busy ? "…" : `Return ${sel.size}`}
+        </button>
+      </InvSheet>
+    );
+  }
+
+  return (
+    <InvSheet title={name} onClose={onClose} closeLabel="Close">
+      {tools.length > 0 && (
+        <div className="flex items-center gap-2 mb-3">
+          <button
+            onClick={() => { setSelMode(!selMode); setSel(new Set()); }}
+            className={`text-xs font-bold rounded-full px-3 py-1.5 border ${
+              selMode ? "bg-safety text-steel border-transparent" : "text-rebar border-line"
+            }`}
+          >
+            {selMode ? "Done" : "Select"}
+          </button>
+          {selMode && (
+            <button
+              onClick={() => setSel(allOn ? new Set() : new Set(tools.map((t) => t.id)))}
+              className="text-xs font-bold rounded-full px-3 py-1.5 border text-rebar border-line"
+            >
+              {allOn ? "None" : "All"}
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="bg-steel border border-line rounded-xl overflow-hidden">
+        {tools.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => (selMode ? toggle(t.id) : onOpen(t))}
+            className="w-full text-left flex items-center justify-between px-3 py-3 border-b border-line/40 last:border-0 active:bg-graphite"
+          >
+            <span className="text-concrete text-sm font-semibold truncate flex items-center gap-2 min-w-0">
+              {selMode && <InvCheck on={sel.has(t.id)} />}
+              <span className="truncate">
+                {t.tool}
+                {t.size ? <span className="text-rebar font-normal"> · {t.size}</span> : null}
+              </span>
+            </span>
+            <span className="text-rebar text-[11px] shrink-0 ml-2">since {t.issued}</span>
+          </button>
+        ))}
+      </div>
+
+      {selMode && sel.size > 0 && (
+        <button
+          onClick={() => setReturning(true)}
+          className="w-full bg-safety text-steel rounded-xl py-3 font-bold mt-4"
+        >
+          Return {sel.size}
+        </button>
+      )}
     </InvSheet>
   );
 }

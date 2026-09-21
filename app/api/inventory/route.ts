@@ -371,46 +371,70 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true });
     }
 
-    if (op === "tool_action") {
-      const { id, action } = body;
+    // One tool, or a batch. A batch is the same action applied tool by tool,
+    // so every tool still gets its own history entry — batching the tap does
+    // not blur who had which tool.
+    if (op === "tool_action" || op === "bulk_action") {
+      const action = body.action;
       const person = (body.person || "").trim();
       const valid = ["Issued", "Returned", "Broken", "Lost", "Found"];
-      if (!id || !valid.includes(action))
+      const ids: string[] =
+        op === "bulk_action" ? (Array.isArray(body.ids) ? body.ids : []) : body.id ? [body.id] : [];
+      if (!ids.length || !valid.includes(action))
         return NextResponse.json({ ok: false, error: "Unknown action." }, { status: 400 });
       if (action === "Issued" && !person)
         return NextResponse.json({ ok: false, error: "Pick who it's going to." }, { status: 400 });
 
-      const pg: any = await notion.pages.retrieve({ page_id: id });
-      const t = mapTool(pg);
       const dateISO = isISO(body.dateISO) ? body.dateISO : todayPhoenix();
       const location = (body.location || "").trim();
       await ensureToolLocation();
-      // Record who had it when it broke or went missing — that's the whole
-      // reason for keeping history.
-      await logEvent(
-        id,
-        t.tool,
-        action,
-        action === "Issued" ? person : t.holder,
-        location ? `To ${location}` : (body.note || "").trim(),
-        dateISO
-      );
 
-      const props: any = {};
-      if (action === "Issued") {
-        props[TOOL_PROPS.status] = { select: { name: "Issued" } };
-        props[TOOL_PROPS.holder] = text(person);
-        props[TOOL_PROPS.issued] = { date: { start: dateISO } };
-      } else if (action === "Returned" || action === "Found") {
-        props[TOOL_PROPS.status] = { select: { name: "In Yard" } };
-        props[TOOL_PROPS.holder] = text("");
-        props[TOOL_PROPS.issued] = { date: null };
-        if (location) props[TOOL_PROPS.location] = { select: { name: location } };
-      } else {
-        props[TOOL_PROPS.status] = { select: { name: action } };
+      let done = 0;
+      const failed: string[] = [];
+      for (const id of ids) {
+        try {
+          const pg: any = await notion.pages.retrieve({ page_id: id });
+          const t = mapTool(pg);
+          // Record who had it when it broke or went missing — that's the
+          // whole reason for keeping history.
+          await logEvent(
+            id,
+            t.tool,
+            action,
+            action === "Issued" ? person : t.holder,
+            location ? `To ${location}` : (body.note || "").trim(),
+            dateISO
+          );
+
+          const props: any = {};
+          if (action === "Issued") {
+            props[TOOL_PROPS.status] = { select: { name: "Issued" } };
+            props[TOOL_PROPS.holder] = text(person);
+            props[TOOL_PROPS.issued] = { date: { start: dateISO } };
+          } else if (action === "Returned" || action === "Found") {
+            props[TOOL_PROPS.status] = { select: { name: "In Yard" } };
+            props[TOOL_PROPS.holder] = text("");
+            props[TOOL_PROPS.issued] = { date: null };
+            if (location) props[TOOL_PROPS.location] = { select: { name: location } };
+          } else {
+            props[TOOL_PROPS.status] = { select: { name: action } };
+          }
+          await notion.pages.update({ page_id: id, properties: props });
+          done++;
+        } catch {
+          failed.push(id);
+        }
       }
-      await notion.pages.update({ page_id: id, properties: props });
-      return NextResponse.json({ ok: true });
+
+      if (failed.length && !done)
+        return NextResponse.json({ ok: false, error: "That didn't save." }, { status: 502 });
+      return NextResponse.json({
+        ok: true,
+        done,
+        // A partial batch says so rather than reporting success.
+        error: failed.length ? `${failed.length} of ${ids.length} didn't save — check and retry.` : undefined,
+        failed,
+      });
     }
 
     return NextResponse.json({ ok: false, error: "Unknown op." }, { status: 400 });

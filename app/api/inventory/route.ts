@@ -12,6 +12,9 @@ import {
   CAT_PROPS,
   SEED_CATALOG,
   YARDS,
+  TOOL_LOCATIONS,
+  ensureToolLocation,
+  normalizePlace,
 } from "@/lib/inventory";
 
 // Owner-only. Crew should never adjust counts or reassign tools, so every
@@ -34,6 +37,10 @@ function rt(prop: any): string {
 }
 const text = (v: string) => ({ rich_text: v ? [{ text: { content: v } }] : [] });
 const title = (v: string) => ({ title: [{ text: { content: v } }] });
+
+function isISO(s: any): boolean {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
 
 function todayPhoenix(): string {
   // Vercel runs in UTC; Arizona is a fixed UTC-7 with no DST.
@@ -91,7 +98,7 @@ function mapMaterial(pg: any) {
     id: pg.id,
     material: rt(p[MAT_PROPS.material]),
     size: rt(p[MAT_PROPS.size]),
-    yard: rt(p[MAT_PROPS.yard]),
+    yard: normalizePlace(rt(p[MAT_PROPS.yard])),
     quantity: typeof p[MAT_PROPS.quantity]?.number === "number" ? p[MAT_PROPS.quantity].number : 0,
   };
 }
@@ -107,13 +114,21 @@ function mapTool(pg: any) {
     status: rt(p[TOOL_PROPS.status]) || "In Yard",
     holder: rt(p[TOOL_PROPS.holder]),
     issued: p[TOOL_PROPS.issued]?.date?.start?.slice(0, 10) || "",
+    location: normalizePlace(rt(p[TOOL_PROPS.location])),
   };
 }
 
 // Every custody change is written as an event FIRST, then the tool's current
 // state is updated. The events are the history; the tool row is just the
 // latest snapshot, for fast lookups.
-async function logEvent(toolId: string, toolName: string, action: string, person: string, note = "") {
+async function logEvent(
+  toolId: string,
+  toolName: string,
+  action: string,
+  person: string,
+  note = "",
+  dateISO?: string
+) {
   const db = await eventsDb();
   await notion.pages.create({
     parent: { database_id: db },
@@ -122,7 +137,7 @@ async function logEvent(toolId: string, toolName: string, action: string, person
       [EVENT_PROPS.tool]: { relation: [{ id: toolId }] },
       [EVENT_PROPS.action]: { select: { name: action } },
       [EVENT_PROPS.person]: text(person),
-      [EVENT_PROPS.date]: { date: { start: todayPhoenix() } },
+      [EVENT_PROPS.date]: { date: { start: isISO(dateISO) ? dateISO! : todayPhoenix() } },
       [EVENT_PROPS.note]: text(note),
     },
   });
@@ -139,6 +154,7 @@ export async function GET(req: NextRequest) {
     const action = sp.get("action");
 
     if (action === "all") {
+      await ensureToolLocation();
       const [catalog, mats, tools] = await Promise.all([
         loadCatalog(),
         materialsDb().then((db) => queryAll(db)),
@@ -148,6 +164,7 @@ export async function GET(req: NextRequest) {
         ok: true,
         catalog,
         yards: YARDS,
+        toolLocations: TOOL_LOCATIONS,
         materials: mats.map(mapMaterial),
         tools: tools.map(mapTool),
       });
@@ -292,18 +309,26 @@ export async function POST(req: NextRequest) {
       const all = (await queryAll(db, { property: TOOL_PROPS.type, rich_text: { equals: type } })).map(mapTool);
       const next = all.reduce((m, t) => Math.max(m, t.number), 0) + 1;
       const name = `${type} #${next}`;
-      const created: any = await notion.pages.create({
-        parent: { database_id: db },
-        properties: {
-          [TOOL_PROPS.tool]: title(name),
-          [TOOL_PROPS.type]: text(type),
-          [TOOL_PROPS.number]: { number: next },
-          [TOOL_PROPS.size]: text(size),
-          [TOOL_PROPS.status]: { select: { name: "In Yard" } },
-          [TOOL_PROPS.holder]: text(""),
-        },
-      });
-      await logEvent(created.id, name, "Added", "", size ? `Size ${size}` : "");
+      // One step for the common backfill case: "Ramon has had Hickey Bar #2
+      // since Sept 1". Either it goes to someone on a date, or it's stored
+      // somewhere — never neither.
+      const person = (body.person || "").trim();
+      const dateISO = isISO(body.dateISO) ? body.dateISO : todayPhoenix();
+      const location = (body.location || "").trim();
+      await ensureToolLocation();
+      const props: any = {
+        [TOOL_PROPS.tool]: title(name),
+        [TOOL_PROPS.type]: text(type),
+        [TOOL_PROPS.number]: { number: next },
+        [TOOL_PROPS.size]: text(size),
+        [TOOL_PROPS.status]: { select: { name: person ? "Issued" : "In Yard" } },
+        [TOOL_PROPS.holder]: text(person),
+      };
+      if (person) props[TOOL_PROPS.issued] = { date: { start: dateISO } };
+      if (!person && location) props[TOOL_PROPS.location] = { select: { name: location } };
+      const created: any = await notion.pages.create({ parent: { database_id: db }, properties: props });
+      await logEvent(created.id, name, "Added", "", size ? `Size ${size}` : "", dateISO);
+      if (person) await logEvent(created.id, name, "Issued", person, "", dateISO);
       return NextResponse.json({ ok: true, id: created.id, name, number: next });
     }
 
@@ -318,19 +343,30 @@ export async function POST(req: NextRequest) {
 
       const pg: any = await notion.pages.retrieve({ page_id: id });
       const t = mapTool(pg);
+      const dateISO = isISO(body.dateISO) ? body.dateISO : todayPhoenix();
+      const location = (body.location || "").trim();
+      await ensureToolLocation();
       // Record who had it when it broke or went missing — that's the whole
       // reason for keeping history.
-      await logEvent(id, t.tool, action, action === "Issued" ? person : t.holder, (body.note || "").trim());
+      await logEvent(
+        id,
+        t.tool,
+        action,
+        action === "Issued" ? person : t.holder,
+        location ? `To ${location}` : (body.note || "").trim(),
+        dateISO
+      );
 
       const props: any = {};
       if (action === "Issued") {
         props[TOOL_PROPS.status] = { select: { name: "Issued" } };
         props[TOOL_PROPS.holder] = text(person);
-        props[TOOL_PROPS.issued] = { date: { start: todayPhoenix() } };
+        props[TOOL_PROPS.issued] = { date: { start: dateISO } };
       } else if (action === "Returned" || action === "Found") {
         props[TOOL_PROPS.status] = { select: { name: "In Yard" } };
         props[TOOL_PROPS.holder] = text("");
         props[TOOL_PROPS.issued] = { date: null };
+        if (location) props[TOOL_PROPS.location] = { select: { name: location } };
       } else {
         props[TOOL_PROPS.status] = { select: { name: action } };
       }

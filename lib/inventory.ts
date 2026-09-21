@@ -19,11 +19,22 @@ import { NOTION_TOKEN } from "./notion";
 
 export const INVENTORY_PARENT_PAGE_ID = "3e29aeba538380f7a745ee3f5f2d7021";
 
-export const YARDS = ["Office Yard", "20th St Yard"] as const;
+export const YARDS = ["Office", "20th St Yard"] as const;
+// Tools can sit in more places than material can — the office itself, or
+// someone's house — so they get their own list rather than borrowing YARDS.
+export const TOOL_LOCATIONS = ["Office", "20th St Yard", "House"] as const;
+
+// "Office Yard" and "Office" were the same place listed twice. Anything
+// written under the old name reads as Office, so nothing drops out of a list.
+export function normalizePlace(v: string): string {
+  return v.trim().toLowerCase() === "office yard" ? "Office" : v;
+}
+// "In Yard" is kept as the stored value for compatibility with rows already
+// written; it means "not issued", and Location says where it actually is.
 export const TOOL_STATUSES = ["In Yard", "Issued", "Broken", "Lost"] as const;
 
 export const MAT_PROPS = {
-  item: "Item", // Title — "PC Chair 3\" · Office Yard"
+  item: "Item", // Title — "PC Chair 3\" · Office"
   material: "Material", // Text
   size: "Size", // Text
   yard: "Yard", // Select
@@ -38,6 +49,7 @@ export const TOOL_PROPS = {
   status: "Status", // Select
   holder: "Holder", // Text — roster name, or empty
   issued: "Issued", // Date
+  location: "Location", // Select — where it sits when nobody has it
 };
 
 export const EVENT_PROPS = {
@@ -110,7 +122,28 @@ export async function toolsDb() {
     [TOOL_PROPS.status]: select(TOOL_STATUSES),
     [TOOL_PROPS.holder]: { rich_text: {} },
     [TOOL_PROPS.issued]: { date: {} },
+    [TOOL_PROPS.location]: select(TOOL_LOCATIONS),
   }));
+}
+
+// Tools created before Location existed need the property added. Additive
+// only, and checked once per server instance.
+let toolLocEnsured = false;
+export async function ensureToolLocation(): Promise<void> {
+  if (toolLocEnsured) return;
+  const id = await toolsDb();
+  try {
+    const db: any = await notion.databases.retrieve({ database_id: id });
+    if (!db.properties?.[TOOL_PROPS.location]) {
+      await notion.databases.update({
+        database_id: id,
+        properties: { [TOOL_PROPS.location]: select(TOOL_LOCATIONS) } as any,
+      });
+    }
+    toolLocEnsured = true;
+  } catch {
+    /* writes below just won't carry a location until it exists */
+  }
 }
 
 export async function eventsDb() {

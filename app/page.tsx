@@ -13329,38 +13329,54 @@ function fmtBoxes(q: number): string {
   return `${whole}${sym}`;
 }
 
-// Whole boxes plus a quarter chip — no decimal typing on a phone.
+// Whole boxes with − / + (it's nearly always 1), and quarters tucked behind a
+// link for the rare partial box. If the value already carries a fraction —
+// correcting a 4½ pile — the quarters open on their own so it's visible.
 function BoxQty({
   value,
   onChange,
   perBox,
+  note,
 }: {
   value: number;
   onChange: (v: number) => void;
   perBox: number | null;
+  note?: string; // replaces the default summary line when set
 }) {
   const whole = Math.floor(value + 1e-9);
   const frac = Math.round((value - whole) * 4) / 4;
+  const [showFrac, setShowFrac] = useState(frac > 0);
   const setWhole = (w: number) => onChange(Math.max(0, w) + frac);
   const setFrac = (f: number) => onChange(whole + f);
+  const stepBtn =
+    "shrink-0 w-12 h-12 rounded-xl bg-steel border border-line text-concrete text-2xl font-bold leading-none";
+
   return (
     <>
-      <div className="flex gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-2">
+        <button onClick={() => setWhole(whole - 1)} disabled={whole <= 0} className={`${stepBtn} disabled:opacity-30`}>
+          −
+        </button>
         <input
           type="number"
           inputMode="numeric"
           min="0"
-          value={whole === 0 && frac === 0 ? "" : String(whole)}
-          placeholder="0"
+          value={String(whole)}
           onChange={(e) => setWhole(parseInt(e.target.value || "0", 10) || 0)}
-          className="w-24 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-lg font-bold"
+          className="flex-1 min-w-0 bg-steel border border-line rounded-xl h-12 px-3 text-concrete text-xl font-bold text-center"
         />
-        <div className="flex gap-1.5 flex-1">
+        <button onClick={() => setWhole(whole + 1)} className={stepBtn}>
+          +
+        </button>
+      </div>
+
+      {showFrac ? (
+        <div className="flex gap-1.5 mb-2">
           {[0, 0.25, 0.5, 0.75].map((f) => (
             <button
               key={f}
               onClick={() => setFrac(f)}
-              className={`flex-1 rounded-xl h-11 text-sm font-bold border ${
+              className={`flex-1 rounded-xl h-10 text-sm font-bold border ${
                 frac === f ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
               }`}
             >
@@ -13368,10 +13384,17 @@ function BoxQty({
             </button>
           ))}
         </div>
-      </div>
+      ) : (
+        <button onClick={() => setShowFrac(true)} className="text-rebar text-xs font-bold mb-2">
+          ＋ Part of a box
+        </button>
+      )}
+
       <div className="text-rebar text-[11px] mb-4">
-        {value > 0 ? `${fmtBoxes(value)} ${value === 1 ? "box" : "boxes"}` : "Boxes"}
-        {perBox && value > 0 ? ` · ~${Math.round(value * perBox).toLocaleString()} pcs` : ""}
+        {note ??
+          `${value > 0 ? `${fmtBoxes(value)} ${value === 1 ? "box" : "boxes"}` : "Boxes"}${
+            perBox && value > 0 ? ` · ~${Math.round(value * perBox).toLocaleString()} pcs` : ""
+          }`}
       </div>
     </>
   );
@@ -13399,7 +13422,7 @@ function AddMaterialSheet({
   const [material, setMaterial] = useState(materials[0] || "");
   const [size, setSize] = useState("");
   const [yard, setYard] = useState(yards[0] || "");
-  const [boxes, setBoxes] = useState(0);
+  const [boxes, setBoxes] = useState(1);
   const [pieces, setPieces] = useState("");
   const [adding, setAdding] = useState<"" | "material" | "size">("");
   const [err, setErr] = useState("");
@@ -13424,7 +13447,7 @@ function AddMaterialSheet({
         <Chips
           options={materials}
           value={material}
-          onPick={(v) => { setMaterial(v); setSize(""); setBoxes(0); setPieces(""); }}
+          onPick={(v) => { setMaterial(v); setSize(""); setBoxes(1); setPieces(""); }}
           addLabel="New material"
           onAdd={() => setAdding("material")}
         />
@@ -13481,7 +13504,7 @@ function AddMaterialSheet({
           onCancel={() => setAdding("")}
           onSave={async (name, isBox) => {
             const r = await onCreate("Material", name, undefined, false, { boxed: isBox });
-            if (r?.ok) { setMaterial(name); setSize(""); setBoxes(0); setPieces(""); setAdding(""); }
+            if (r?.ok) { setMaterial(name); setSize(""); setBoxes(1); setPieces(""); setAdding(""); }
             return r;
           }}
         />
@@ -13504,6 +13527,8 @@ function AddMaterialSheet({
   );
 }
 
+// Tapping a pile opens on USED — that's what happens after setup: some of it
+// went out on a job. Correct count is the second mode, for a recount.
 function EditCountSheet({
   m, boxed, perBox, busy, onClose, onSave,
 }: {
@@ -13514,26 +13539,102 @@ function EditCountSheet({
   onClose: () => void;
   onSave: (q: number) => Promise<any>;
 }) {
-  const [boxes, setBoxes] = useState(m.quantity);
-  const [pieces, setPieces] = useState(String(m.quantity));
+  const [mode, setMode] = useState<"used" | "set">("used");
+  const [usedBoxes, setUsedBoxes] = useState(Math.min(1, m.quantity));
+  const [usedPieces, setUsedPieces] = useState("");
+  const [setBoxesV, setSetBoxesV] = useState(m.quantity);
+  const [setPiecesV, setSetPiecesV] = useState(String(m.quantity));
   const [err, setErr] = useState("");
-  const q = boxed ? boxes : parseInt(pieces, 10);
+
+  const used = boxed ? usedBoxes : parseInt(usedPieces || "0", 10) || 0;
+  const left = Math.round((m.quantity - used) * 100) / 100;
+  const tooMuch = mode === "used" && used > m.quantity;
+  const target =
+    mode === "used" ? left : boxed ? setBoxesV : parseInt(setPiecesV, 10);
+  const canSave =
+    !busy &&
+    !tooMuch &&
+    (mode === "used" ? used > 0 : target >= 0 && Number.isFinite(target));
+
+  const unit = (q: number) => (boxed ? `${fmtBoxes(q)} ${q === 1 ? "box" : "boxes"}` : `${q}`);
+  const est = (q: number) => (boxed && perBox && q > 0 ? ` · ~${Math.round(q * perBox).toLocaleString()} pcs` : "");
+
   return (
     <InvSheet title={`${m.material} ${m.size}`} onClose={onClose}>
-      <div className="text-rebar text-xs mb-3">{m.yard}</div>
-      <label className={invLabel}>{boxed ? "Boxes on hand" : "Count on hand"}</label>
-      {boxed ? (
-        <BoxQty value={boxes} onChange={setBoxes} perBox={perBox} />
+      <div className="text-rebar text-xs mb-3">
+        {m.yard} · {unit(m.quantity)} on hand{est(m.quantity)}
+      </div>
+
+      <div className="flex gap-2 mb-4">
+        {([["used", "Used"], ["set", "Correct count"]] as const).map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => { setMode(k); setErr(""); }}
+            className={`flex-1 rounded-full h-10 text-sm font-bold ${
+              mode === k ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mode === "used" ? (
+        <>
+          <label className={invLabel}>{boxed ? "How many boxes used" : "How many used"}</label>
+          {boxed ? (
+            <BoxQty
+              value={usedBoxes}
+              onChange={setUsedBoxes}
+              perBox={perBox}
+              note={
+                tooMuch
+                  ? `Only ${unit(m.quantity)} on hand.`
+                  : `${unit(left)} left${est(left)}${left === 0 ? " — drops off the list" : ""}`
+              }
+            />
+          ) : (
+            <>
+              <input
+                type="number"
+                inputMode="numeric"
+                min="0"
+                value={usedPieces}
+                autoFocus
+                onChange={(e) => setUsedPieces(e.target.value)}
+                className={invField}
+              />
+              <div className="text-rebar text-[11px] -mt-2 mb-4">
+                {tooMuch ? `Only ${m.quantity} on hand.` : `${left} left${left === 0 ? " — drops off the list" : ""}`}
+              </div>
+            </>
+          )}
+        </>
       ) : (
-        <input type="number" inputMode="numeric" min="0" value={pieces} autoFocus onChange={(e) => setPieces(e.target.value)} className={invField} />
+        <>
+          <label className={invLabel}>{boxed ? "Boxes on hand" : "Count on hand"}</label>
+          {boxed ? (
+            <BoxQty value={setBoxesV} onChange={setSetBoxesV} perBox={perBox} />
+          ) : (
+            <input
+              type="number"
+              inputMode="numeric"
+              min="0"
+              value={setPiecesV}
+              onChange={(e) => setSetPiecesV(e.target.value)}
+              className={invField}
+            />
+          )}
+          <div className="text-rebar text-[11px] -mt-2 mb-4">Set it to 0 once it&apos;s gone and it drops off the list.</div>
+        </>
       )}
-      <div className="text-rebar text-[11px] -mt-2 mb-4">Set it to 0 once it&apos;s gone and it drops off the list.</div>
+
       {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
       <button
-        disabled={!(q >= 0) || busy}
+        disabled={!canSave}
         onClick={async () => {
           setErr("");
-          const r = await onSave(q);
+          const r = await onSave(target);
           if (!r?.ok) setErr(r?.error || "That didn't save.");
         }}
         className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"

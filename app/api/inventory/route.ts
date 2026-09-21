@@ -301,6 +301,56 @@ export async function POST(req: NextRequest) {
     // --- Tools ----------------------------------------------------------------
     // Numbered automatically per type: the next Hickey Bar is one more than the
     // highest Hickey Bar number, so numbers are never reused after a loss.
+    // Several different tools in one entry — "Ramon has a hickey bar, a
+    // cordless saw and a gas cut-off saw since Sept 1". Each becomes its own
+    // numbered tool with its own history; they just share the where/who/when.
+    if (op === "add_tools") {
+      const items: { type: string; size?: string }[] = Array.isArray(body.items) ? body.items : [];
+      if (!items.length)
+        return NextResponse.json({ ok: false, error: "Pick at least one tool." }, { status: 400 });
+      const person = (body.person || "").trim();
+      const dateISO = isISO(body.dateISO) ? body.dateISO : todayPhoenix();
+      const location = (body.location || "").trim();
+      const db = await toolsDb();
+      await ensureToolLocation();
+
+      const made: string[] = [];
+      const failed: string[] = [];
+      for (const it of items) {
+        const type = (it.type || "").trim();
+        const size = (it.size || "").trim();
+        if (!type) continue;
+        try {
+          const all = (await queryAll(db, { property: TOOL_PROPS.type, rich_text: { equals: type } })).map(mapTool);
+          const next = all.reduce((m, t) => Math.max(m, t.number), 0) + 1;
+          const name = `${type} #${next}`;
+          const props: any = {
+            [TOOL_PROPS.tool]: title(name),
+            [TOOL_PROPS.type]: text(type),
+            [TOOL_PROPS.number]: { number: next },
+            [TOOL_PROPS.size]: text(size),
+            [TOOL_PROPS.status]: { select: { name: person ? "Issued" : "In Yard" } },
+            [TOOL_PROPS.holder]: text(person),
+          };
+          if (person) props[TOOL_PROPS.issued] = { date: { start: dateISO } };
+          if (!person && location) props[TOOL_PROPS.location] = { select: { name: location } };
+          const created: any = await notion.pages.create({ parent: { database_id: db }, properties: props });
+          await logEvent(created.id, name, "Added", "", size ? `Size ${size}` : "", dateISO);
+          if (person) await logEvent(created.id, name, "Issued", person, "", dateISO);
+          made.push(name);
+        } catch {
+          failed.push(type);
+        }
+      }
+      if (!made.length)
+        return NextResponse.json({ ok: false, error: "That didn't save." }, { status: 502 });
+      return NextResponse.json({
+        ok: true,
+        made,
+        error: failed.length ? `Couldn't add: ${failed.join(", ")} — try those again.` : undefined,
+      });
+    }
+
     if (op === "add_tool") {
       const type = (body.type || "").trim();
       const size = (body.size || "").trim();

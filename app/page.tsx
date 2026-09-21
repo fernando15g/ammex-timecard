@@ -13092,8 +13092,11 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
           onCreate={createCatalog}
           onClose={() => setSheet(null)}
           onSave={async (v) => {
-            const r = await post({ op: "add_tool", ...v });
-            if (r?.ok) { setSheet(null); load(true); }
+            const r = await post({ op: "add_tools", ...v });
+            // Close only on a clean save — a partial one stays open so the
+            // message about what didn't make it is actually seen.
+            if (r?.ok && !r?.error) { setSheet(null); load(true); }
+            else if (r?.ok) load(true);
             return r;
           }}
         />
@@ -13429,49 +13432,85 @@ function AddToolSheet({
   busy: boolean;
   onCreate: (kind: string, name: string, parent?: string, sized?: boolean) => Promise<any>;
   onClose: () => void;
-  onSave: (v: { type: string; size: string; person: string; dateISO: string; location: string }) => Promise<any>;
+  onSave: (v: {
+    items: { type: string; size: string }[];
+    person: string;
+    dateISO: string;
+    location: string;
+  }) => Promise<any>;
 }) {
-  const [type, setType] = useState("");
-  const [size, setSize] = useState("");
+  // Several TYPES at once — a hickey bar, a cordless saw and a gas saw handed
+  // to one foreman on one date is one entry. Two of the SAME type are still
+  // entered separately, which is how Fern said he'd do it anyway.
+  const [picked, setPicked] = useState<string[]>([]);
+  const [sizes, setSizes] = useState<Record<string, string>>({});
   const [giveTo, setGiveTo] = useState<"store" | "person">("store");
   const [person, setPerson] = useState("");
   const [dateISO, setDateISO] = useState(() => todayLocalISO());
   const [location, setLocation] = useState(locations[0] || "");
-  const [adding, setAdding] = useState<"" | "type" | "size">("");
+  const [adding, setAdding] = useState<"" | "type" | { size: string }>("");
   const [err, setErr] = useState("");
 
-  const t = types.find((x) => x.name === type);
-  const sizes = t?.sized ? sizesFor(type) : [];
-  const why = !type
-    ? "Pick a tool type."
-    : t?.sized && !size
-    ? "Pick a size."
+  const toggleType = (name: string) =>
+    setPicked((prev) => (prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]));
+
+  const sizedPicked = picked.filter((n) => types.find((x) => x.name === n)?.sized);
+  const missingSize = sizedPicked.find((n) => !sizes[n]);
+  const why = !picked.length
+    ? "Pick at least one tool."
+    : missingSize
+    ? `Pick a size for ${missingSize}.`
     : giveTo === "person" && !person
-    ? "Pick who has it."
+    ? "Pick who has them."
     : giveTo === "store" && !location
-    ? "Pick where it's kept."
+    ? "Pick where they're kept."
     : "";
 
   return (
     <>
-      <InvSheet title="Add tool" onClose={onClose}>
-        <label className={invLabel}>Type</label>
-        <Chips
-          options={types.map((x) => x.name)}
-          value={type}
-          onPick={(v) => { setType(v); setSize(""); }}
-          addLabel="New type"
-          onAdd={() => setAdding("type")}
-        />
+      <InvSheet title="Add tools" onClose={onClose}>
+        <label className={invLabel}>
+          Type <span className="font-normal normal-case">(pick all that apply)</span>
+        </label>
+        <div className="flex flex-wrap gap-2 mb-4">
+          {types.map((x) => {
+            const on = picked.includes(x.name);
+            return (
+              <button
+                key={x.name}
+                onClick={() => toggleType(x.name)}
+                className={`rounded-full px-3 h-9 text-sm font-bold border ${
+                  on ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
+                }`}
+              >
+                {on ? "✓ " : ""}{x.name}
+              </button>
+            );
+          })}
+          <button
+            onClick={() => setAdding("type")}
+            className="rounded-full px-3 h-9 text-sm font-bold border border-dashed"
+            style={{ color: "#e8801a", borderColor: "rgba(232,128,26,.7)" }}
+          >
+            ＋ New type
+          </button>
+        </div>
 
-        {t?.sized && (
-          <>
-            <label className={invLabel}>Size</label>
-            <Chips options={sizes} value={size} onPick={setSize} addLabel="New size" onAdd={() => setAdding("size")} />
-          </>
-        )}
+        {/* One size row per selected type that takes a size. */}
+        {sizedPicked.map((n) => (
+          <div key={n}>
+            <label className={invLabel}>{n} — size</label>
+            <Chips
+              options={sizesFor(n)}
+              value={sizes[n] || ""}
+              onPick={(v) => setSizes((prev) => ({ ...prev, [n]: v }))}
+              addLabel="New size"
+              onAdd={() => setAdding({ size: n })}
+            />
+          </div>
+        ))}
 
-        <label className={invLabel}>Where is it</label>
+        <label className={invLabel}>Where {picked.length > 1 ? "are they" : "is it"}</label>
         <div className="flex gap-2 mb-4">
           {([["store", "Kept at…"], ["person", "Someone has it"]] as const).map(([k, label]) => (
             <button
@@ -13497,24 +13536,25 @@ function AddToolSheet({
           </>
         )}
 
-        <div className="text-rebar text-[11px] mb-4">It gets the next number automatically — mark it on the tool.</div>
+        <div className="text-rebar text-[11px] mb-4">
+          Each gets the next number for its type automatically — mark them on the tools.
+        </div>
         {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
         <button
           disabled={!!why || busy}
           onClick={async () => {
             setErr("");
             const r = await onSave({
-              type,
-              size,
+              items: picked.map((n) => ({ type: n, size: sizes[n] || "" })),
               person: giveTo === "person" ? person : "",
               dateISO,
               location: giveTo === "store" ? location : "",
             });
-            if (!r?.ok) setErr(r?.error || "That didn't save.");
+            if (!r?.ok || r?.error) setErr(r?.error || "That didn't save.");
           }}
           className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
         >
-          {busy ? "…" : "Add"}
+          {busy ? "…" : picked.length > 1 ? `Add ${picked.length} tools` : "Add"}
         </button>
         {why && <div className="text-rebar text-[11px] text-center mt-2">{why}</div>}
       </InvSheet>
@@ -13528,20 +13568,27 @@ function AddToolSheet({
           onCancel={() => setAdding("")}
           onSave={async (name, sized) => {
             const r = await onCreate("Tool Type", name, undefined, sized);
-            if (r?.ok) { setType(name); setSize(""); setAdding(""); }
+            if (r?.ok) {
+              setPicked((prev) => (prev.includes(name) ? prev : [...prev, name]));
+              setAdding("");
+            }
             return r;
           }}
         />
       )}
-      {adding === "size" && (
+      {typeof adding === "object" && (
         <NewEntryBox
-          title={`New size — ${type}`}
+          title={`New size — ${adding.size}`}
           placeholder={`e.g. 5/8"`}
           busy={busy}
           onCancel={() => setAdding("")}
           onSave={async (name) => {
-            const r = await onCreate("Size", name, type);
-            if (r?.ok) { setSize(name); setAdding(""); }
+            const t = adding.size;
+            const r = await onCreate("Size", name, t);
+            if (r?.ok) {
+              setSizes((prev) => ({ ...prev, [t]: name }));
+              setAdding("");
+            }
             return r;
           }}
         />

@@ -19,10 +19,13 @@ import { NOTION_TOKEN } from "./notion";
 
 export const INVENTORY_PARENT_PAGE_ID = "3e29aeba538380f7a745ee3f5f2d7021";
 
-export const YARDS = ["Office", "20th St Yard"] as const;
+// One list of places for both materials and tools. Material gained House, which
+// made the two lists identical, so they're kept as one rather than two that
+// happen to say the same thing.
+export const YARDS = ["Office", "20th St Yard", "House"] as const;
 // Tools can sit in more places than material can — the office itself, or
 // someone's house — so they get their own list rather than borrowing YARDS.
-export const TOOL_LOCATIONS = ["Office", "20th St Yard", "House"] as const;
+export const TOOL_LOCATIONS = YARDS;
 
 // "Office Yard" and "Office" were the same place listed twice. Anything
 // written under the old name reads as Office, so nothing drops out of a list.
@@ -68,6 +71,12 @@ export const CAT_PROPS = {
   kind: "Kind", // Select — Material | Size | Tool Type
   parent: "Parent", // Text — for a Size: which material or tool type it belongs to
   sized: "Sized", // Checkbox — for a Tool Type: does it carry a size
+  // Material counted in BOXES (bar chairs, PC chairs, Lok Wheels) rather than
+  // pieces (slab bolsters). Decides how its count is entered and shown.
+  boxed: "Boxed", // Checkbox — for a Material
+  // Pieces in one box, on the SIZE — a 1" bar chair box holds 700, a 1.5" 500.
+  // Optional: without it the row shows boxes with no piece estimate.
+  perBox: "Per box", // Number — for a Size
 };
 
 const notion = new Client({ auth: NOTION_TOKEN });
@@ -167,14 +176,54 @@ export async function catalogDb() {
     [CAT_PROPS.kind]: select(["Material", "Size", "Tool Type"]),
     [CAT_PROPS.parent]: { rich_text: {} },
     [CAT_PROPS.sized]: { checkbox: {} },
+    [CAT_PROPS.boxed]: { checkbox: {} },
+    [CAT_PROPS.perBox]: { number: {} },
   }));
+}
+
+// An existing catalog predates the box columns. Additive only.
+// Returns true only on the call that actually adds the Boxed column — that's
+// the one moment it's safe to mark existing materials as boxed without ever
+// overriding a choice made afterward.
+let catColsEnsured = false;
+export async function ensureCatalogColumns(): Promise<boolean> {
+  if (catColsEnsured) return false;
+  const id = await catalogDb();
+  try {
+    const db: any = await notion.databases.retrieve({ database_id: id });
+    const add: any = {};
+    const boxedNew = !db.properties?.[CAT_PROPS.boxed];
+    if (boxedNew) add[CAT_PROPS.boxed] = { checkbox: {} };
+    if (!db.properties?.[CAT_PROPS.perBox]) add[CAT_PROPS.perBox] = { number: {} };
+    if (Object.keys(add).length) await notion.databases.update({ database_id: id, properties: add });
+    catColsEnsured = true;
+    return boxedNew;
+  } catch {
+    /* reads still work; box info just won't stick until the columns exist */
+    return false;
+  }
 }
 
 // First-run picklists. Seeded only into an EMPTY catalog, so they can never
 // overwrite or duplicate anything added from the app later.
-export const SEED_CATALOG = [
-  { kind: "Material", name: "PC Chair" },
-  { kind: "Material", name: "Slab Bolster" },
+export const SEED_CATALOG: {
+  kind: string;
+  name: string;
+  parent?: string;
+  sized?: boolean;
+  boxed?: boolean;
+  perBox?: number;
+}[] = [
+  { kind: "Material", name: "PC Chair", boxed: true },
+  // Bar chairs and PC chairs are different items — kept separate on purpose.
+  { kind: "Material", name: "Bar Chair", boxed: true },
+  { kind: "Material", name: "Lok Wheel", boxed: true },
+  { kind: "Material", name: "Slab Bolster", boxed: false },
+  // Box counts as printed on the boxes.
+  { kind: "Size", name: '1"', parent: "Bar Chair", perBox: 700 },
+  { kind: "Size", name: '1.25"', parent: "Bar Chair", perBox: 600 },
+  { kind: "Size", name: '1.5"', parent: "Bar Chair", perBox: 500 },
+  { kind: "Size", name: '2"', parent: "Lok Wheel", perBox: 120 },
   { kind: "Tool Type", name: "Hickey Bar", sized: true },
   { kind: "Tool Type", name: "Rebar Cutting Edge Saw (Cordless)", sized: false },
   { kind: "Tool Type", name: "Gas Cut-Off Saw", sized: false },

@@ -12782,7 +12782,10 @@ function OwnerSafetyUpload({
 // item already selected — nothing restarts.
 function InventoryPanel({ onClose }: { onClose: () => void }) {
   useLockBodyScroll();
-  type Cat = { id: string; name: string; kind: string; parent: string; sized: boolean };
+  type Cat = {
+    id: string; name: string; kind: string; parent: string; sized: boolean;
+    boxed: boolean; perBox: number | null;
+  };
   type Mat = { id: string; material: string; size: string; yard: string; quantity: number };
   type Tool = {
     id: string; tool: string; type: string; number: number; size: string;
@@ -12853,13 +12856,25 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
 
   // Adding a catalog entry from inside a sheet: save it, then refresh the lists
   // quietly so the sheet stays open and keeps its selections.
-  async function createCatalog(kind: string, name: string, parent?: string, sized?: boolean) {
-    const r = await post({ op: "add_catalog", kind, name, parent, sized });
+  async function createCatalog(
+    kind: string,
+    name: string,
+    parent?: string,
+    sized?: boolean,
+    extra?: { boxed?: boolean; perBox?: number }
+  ) {
+    const r = await post({ op: "add_catalog", kind, name, parent, sized, ...(extra || {}) });
     if (r?.ok) await load(true);
     return r;
   }
 
   const materialNames = catalog.filter((c) => c.kind === "Material").map((c) => c.name);
+  // Boxed materials are counted and shown in boxes; the piece count is an
+  // estimate from the size's per-box number, never typed.
+  const isBoxed = (material: string) =>
+    !!catalog.find((c) => c.kind === "Material" && c.name === material)?.boxed;
+  const perBoxFor = (material: string, size: string) =>
+    catalog.find((c) => c.kind === "Size" && c.parent === material && c.name === size)?.perBox || null;
   const toolTypes = catalog.filter((c) => c.kind === "Tool Type");
   const sizesFor = (parent: string) =>
     catalog.filter((c) => c.kind === "Size" && c.parent === parent).map((c) => c.name);
@@ -12932,7 +12947,20 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
                           <span className="text-concrete font-semibold truncate">
                             {m.material} <span className="text-rebar font-normal">{m.size}</span>
                           </span>
-                          <span className="text-concrete font-extrabold shrink-0 ml-2">{m.quantity}</span>
+                          {isBoxed(m.material) ? (
+                            <span className="shrink-0 ml-2 text-right">
+                              <span className="text-concrete font-extrabold">
+                                {fmtBoxes(m.quantity)} {m.quantity === 1 ? "box" : "boxes"}
+                              </span>
+                              {perBoxFor(m.material, m.size) ? (
+                                <span className="block text-rebar text-[11px]">
+                                  ~{Math.round(m.quantity * (perBoxFor(m.material, m.size) || 0)).toLocaleString()} pcs
+                                </span>
+                              ) : null}
+                            </span>
+                          ) : (
+                            <span className="text-concrete font-extrabold shrink-0 ml-2">{m.quantity}</span>
+                          )}
                         </button>
                       ))}
                     </div>
@@ -13058,6 +13086,8 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
       {sheet?.kind === "addMat" && (
         <AddMaterialSheet
           materials={materialNames}
+          isBoxed={isBoxed}
+          perBoxFor={perBoxFor}
           sizesFor={sizesFor}
           yards={yards}
           busy={busy}
@@ -13073,6 +13103,8 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
       {sheet?.kind === "editMat" && (
         <EditCountSheet
           m={sheet.m}
+          boxed={isBoxed(sheet.m.material)}
+          perBox={perBoxFor(sheet.m.material, sheet.m.size)}
           busy={busy}
           onClose={() => setSheet(null)}
           onSave={async (q) => {
@@ -13221,6 +13253,8 @@ function NewEntryBox({
   title: heading,
   placeholder,
   askSized,
+  toggleLabel = "Comes in sizes",
+  askPerBox,
   busy,
   onCancel,
   onSave,
@@ -13228,16 +13262,37 @@ function NewEntryBox({
   title: string;
   placeholder: string;
   askSized?: boolean;
+  toggleLabel?: string;
+  // For a new size of a boxed material: how many come in a box. Optional —
+  // left blank, the row just shows boxes with no piece estimate.
+  askPerBox?: boolean;
   busy: boolean;
   onCancel: () => void;
-  onSave: (name: string, sized: boolean) => Promise<any>;
+  onSave: (name: string, flag: boolean, perBox?: number) => Promise<any>;
 }) {
   const [name, setName] = useState("");
   const [sized, setSized] = useState(false);
+  const [perBox, setPerBox] = useState("");
   const [err, setErr] = useState("");
   return (
     <InvSheet title={heading} onClose={onCancel} z={95}>
       <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={placeholder} className={invField} />
+      {askPerBox && (
+        <>
+          <label className={invLabel}>
+            How many per box <span className="font-normal normal-case">(optional)</span>
+          </label>
+          <input
+            type="number"
+            inputMode="numeric"
+            min="0"
+            value={perBox}
+            onChange={(e) => setPerBox(e.target.value)}
+            placeholder="e.g. 700"
+            className={invField}
+          />
+        </>
+      )}
       {askSized && (
         <button
           onClick={() => setSized(!sized)}
@@ -13245,7 +13300,7 @@ function NewEntryBox({
             sized ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
           }`}
         >
-          Comes in sizes
+          {toggleLabel}
         </button>
       )}
       {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
@@ -13253,7 +13308,8 @@ function NewEntryBox({
         disabled={!name.trim() || busy}
         onClick={async () => {
           setErr("");
-          const r = await onSave(name.trim(), sized);
+          const pb = parseInt(perBox, 10);
+          const r = await onSave(name.trim(), sized, pb > 0 ? pb : undefined);
           if (!r?.ok) setErr(r?.error || "That didn't save.");
         }}
         className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
@@ -13264,26 +13320,102 @@ function NewEntryBox({
   );
 }
 
+// 4.5 → "4½". Quarter boxes are the finest a pile is eyeballed to.
+function fmtBoxes(q: number): string {
+  const whole = Math.floor(q + 1e-9);
+  const frac = Math.round((q - whole) * 4) / 4;
+  const sym = frac === 0.25 ? "¼" : frac === 0.5 ? "½" : frac === 0.75 ? "¾" : "";
+  if (!whole && sym) return sym;
+  return `${whole}${sym}`;
+}
+
+// Whole boxes plus a quarter chip — no decimal typing on a phone.
+function BoxQty({
+  value,
+  onChange,
+  perBox,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  perBox: number | null;
+}) {
+  const whole = Math.floor(value + 1e-9);
+  const frac = Math.round((value - whole) * 4) / 4;
+  const setWhole = (w: number) => onChange(Math.max(0, w) + frac);
+  const setFrac = (f: number) => onChange(whole + f);
+  return (
+    <>
+      <div className="flex gap-2 mb-2">
+        <input
+          type="number"
+          inputMode="numeric"
+          min="0"
+          value={whole === 0 && frac === 0 ? "" : String(whole)}
+          placeholder="0"
+          onChange={(e) => setWhole(parseInt(e.target.value || "0", 10) || 0)}
+          className="w-24 bg-steel border border-line rounded-xl h-11 px-3 text-concrete text-lg font-bold"
+        />
+        <div className="flex gap-1.5 flex-1">
+          {[0, 0.25, 0.5, 0.75].map((f) => (
+            <button
+              key={f}
+              onClick={() => setFrac(f)}
+              className={`flex-1 rounded-xl h-11 text-sm font-bold border ${
+                frac === f ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
+              }`}
+            >
+              {f === 0 ? "0" : f === 0.25 ? "¼" : f === 0.5 ? "½" : "¾"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="text-rebar text-[11px] mb-4">
+        {value > 0 ? `${fmtBoxes(value)} ${value === 1 ? "box" : "boxes"}` : "Boxes"}
+        {perBox && value > 0 ? ` · ~${Math.round(value * perBox).toLocaleString()} pcs` : ""}
+      </div>
+    </>
+  );
+}
+
 function AddMaterialSheet({
-  materials, sizesFor, yards, busy, onCreate, onClose, onSave,
+  materials, isBoxed, perBoxFor, sizesFor, yards, busy, onCreate, onClose, onSave,
 }: {
   materials: string[];
+  isBoxed: (m: string) => boolean;
+  perBoxFor: (m: string, s: string) => number | null;
   sizesFor: (p: string) => string[];
   yards: string[];
   busy: boolean;
-  onCreate: (kind: string, name: string, parent?: string, sized?: boolean) => Promise<any>;
+  onCreate: (
+    kind: string,
+    name: string,
+    parent?: string,
+    sized?: boolean,
+    extra?: { boxed?: boolean; perBox?: number }
+  ) => Promise<any>;
   onClose: () => void;
   onSave: (v: { material: string; size: string; yard: string; quantity: number }) => Promise<any>;
 }) {
   const [material, setMaterial] = useState(materials[0] || "");
   const [size, setSize] = useState("");
   const [yard, setYard] = useState(yards[0] || "");
-  const [qty, setQty] = useState("");
+  const [boxes, setBoxes] = useState(0);
+  const [pieces, setPieces] = useState("");
   const [adding, setAdding] = useState<"" | "material" | "size">("");
   const [err, setErr] = useState("");
+
+  const boxed = isBoxed(material);
   const sizes = material ? sizesFor(material) : [];
-  const q = parseInt(qty, 10);
-  const why = !material ? "Pick a material." : !size ? "Pick a size." : !yard ? "Pick a yard." : !(q > 0) ? "Enter how many." : "";
+  const qty = boxed ? boxes : parseInt(pieces, 10);
+  const why = !material
+    ? "Pick a material."
+    : !size
+    ? "Pick a size."
+    : !yard
+    ? "Pick a yard."
+    : !(qty > 0)
+    ? boxed ? "Enter how many boxes." : "Enter how many."
+    : "";
 
   return (
     <>
@@ -13292,7 +13424,7 @@ function AddMaterialSheet({
         <Chips
           options={materials}
           value={material}
-          onPick={(v) => { setMaterial(v); setSize(""); }}
+          onPick={(v) => { setMaterial(v); setSize(""); setBoxes(0); setPieces(""); }}
           addLabel="New material"
           onAdd={() => setAdding("material")}
         />
@@ -13304,19 +13436,32 @@ function AddMaterialSheet({
           </>
         )}
 
-        <label className={invLabel}>Yard</label>
+        <label className={invLabel}>Where</label>
         <Chips options={yards} value={yard} onPick={setYard} />
 
-        <label className={invLabel}>How many</label>
-        <input type="number" inputMode="numeric" min="0" value={qty} onChange={(e) => setQty(e.target.value)} className={invField} />
-        <div className="text-rebar text-[11px] -mt-2 mb-4">If this size is already in that yard, it adds to the count.</div>
+        <label className={invLabel}>{boxed ? "How many boxes" : "How many"}</label>
+        {boxed ? (
+          <BoxQty value={boxes} onChange={setBoxes} perBox={size ? perBoxFor(material, size) : null} />
+        ) : (
+          <input
+            type="number"
+            inputMode="numeric"
+            min="0"
+            value={pieces}
+            onChange={(e) => setPieces(e.target.value)}
+            className={invField}
+          />
+        )}
+        <div className="text-rebar text-[11px] -mt-2 mb-4">
+          If this size is already there, it adds to the count.
+        </div>
 
         {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
         <button
           disabled={!!why || busy}
           onClick={async () => {
             setErr("");
-            const r = await onSave({ material, size, yard, quantity: q });
+            const r = await onSave({ material, size, yard, quantity: qty });
             if (!r?.ok) setErr(r?.error || "That didn't save.");
           }}
           className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
@@ -13330,11 +13475,13 @@ function AddMaterialSheet({
         <NewEntryBox
           title="New material"
           placeholder="e.g. Tie Wire"
+          askSized
+          toggleLabel="Comes in boxes"
           busy={busy}
           onCancel={() => setAdding("")}
-          onSave={async (name) => {
-            const r = await onCreate("Material", name);
-            if (r?.ok) { setMaterial(name); setSize(""); setAdding(""); }
+          onSave={async (name, isBox) => {
+            const r = await onCreate("Material", name, undefined, false, { boxed: isBox });
+            if (r?.ok) { setMaterial(name); setSize(""); setBoxes(0); setPieces(""); setAdding(""); }
             return r;
           }}
         />
@@ -13343,10 +13490,11 @@ function AddMaterialSheet({
         <NewEntryBox
           title={`New size — ${material}`}
           placeholder={`e.g. 3"`}
+          askPerBox={boxed}
           busy={busy}
           onCancel={() => setAdding("")}
-          onSave={async (name) => {
-            const r = await onCreate("Size", name, material);
+          onSave={async (name, _f, perBox) => {
+            const r = await onCreate("Size", name, material, false, { perBox });
             if (r?.ok) { setSize(name); setAdding(""); }
             return r;
           }}
@@ -13357,22 +13505,29 @@ function AddMaterialSheet({
 }
 
 function EditCountSheet({
-  m, busy, onClose, onSave,
+  m, boxed, perBox, busy, onClose, onSave,
 }: {
   m: { material: string; size: string; yard: string; quantity: number };
+  boxed: boolean;
+  perBox: number | null;
   busy: boolean;
   onClose: () => void;
   onSave: (q: number) => Promise<any>;
 }) {
-  const [qty, setQty] = useState(String(m.quantity));
+  const [boxes, setBoxes] = useState(m.quantity);
+  const [pieces, setPieces] = useState(String(m.quantity));
   const [err, setErr] = useState("");
-  const q = parseInt(qty, 10);
+  const q = boxed ? boxes : parseInt(pieces, 10);
   return (
     <InvSheet title={`${m.material} ${m.size}`} onClose={onClose}>
       <div className="text-rebar text-xs mb-3">{m.yard}</div>
-      <label className={invLabel}>Count on hand</label>
-      <input type="number" inputMode="numeric" min="0" value={qty} autoFocus onChange={(e) => setQty(e.target.value)} className={invField} />
-      <div className="text-rebar text-[11px] -mt-2 mb-4">Set it to 0 once the pile is gone and it drops off the list.</div>
+      <label className={invLabel}>{boxed ? "Boxes on hand" : "Count on hand"}</label>
+      {boxed ? (
+        <BoxQty value={boxes} onChange={setBoxes} perBox={perBox} />
+      ) : (
+        <input type="number" inputMode="numeric" min="0" value={pieces} autoFocus onChange={(e) => setPieces(e.target.value)} className={invField} />
+      )}
+      <div className="text-rebar text-[11px] -mt-2 mb-4">Set it to 0 once it&apos;s gone and it drops off the list.</div>
       {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
       <button
         disabled={!(q >= 0) || busy}

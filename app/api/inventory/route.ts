@@ -15,6 +15,7 @@ import {
   TOOL_LOCATIONS,
   ensureToolLocation,
   normalizePlace,
+  ensureCatalogColumns,
 } from "@/lib/inventory";
 
 // Owner-only. Crew should never adjust counts or reassign tools, so every
@@ -66,20 +67,57 @@ async function queryAll(database_id: string, filter?: any): Promise<any[]> {
 
 async function loadCatalog() {
   const db = await catalogDb();
+  const justAddedBoxed = await ensureCatalogColumns();
   let rows = await queryAll(db);
-  if (rows.length === 0) {
-    for (const c of SEED_CATALOG) {
-      await notion.pages.create({
-        parent: { database_id: db },
-        properties: {
-          [CAT_PROPS.name]: title(c.name),
-          [CAT_PROPS.kind]: { select: { name: c.kind } },
-          [CAT_PROPS.sized]: { checkbox: !!(c as any).sized },
-        },
-      });
-    }
-    rows = await queryAll(db);
+
+  const keyOf = (kind: string, name: string, parent = "") =>
+    `${kind}|${name.toLowerCase().replace(/\s+/g, "")}|${parent.toLowerCase()}`;
+  const have = new Set(
+    rows.map((pg) => {
+      const p = pg.properties || {};
+      return keyOf(rt(p[CAT_PROPS.kind]), rt(p[CAT_PROPS.name]), rt(p[CAT_PROPS.parent]));
+    })
+  );
+
+  // Top up anything from the starter list that's missing. Never overwrites a
+  // row that exists, so nothing added from the app is ever touched.
+  let added = false;
+  for (const c of SEED_CATALOG) {
+    if (have.has(keyOf(c.kind, c.name, c.parent || ""))) continue;
+    const props: any = {
+      [CAT_PROPS.name]: title(c.name),
+      [CAT_PROPS.kind]: { select: { name: c.kind } },
+      [CAT_PROPS.parent]: text(c.parent || ""),
+      [CAT_PROPS.sized]: { checkbox: !!c.sized },
+      [CAT_PROPS.boxed]: { checkbox: !!c.boxed },
+    };
+    if (typeof c.perBox === "number") props[CAT_PROPS.perBox] = { number: c.perBox };
+    try {
+      await notion.pages.create({ parent: { database_id: db }, properties: props });
+      added = true;
+    } catch { /* keep going — one bad row shouldn't block the rest */ }
   }
+
+  // Materials created before boxes existed (PC Chair) get their boxed flag
+  // exactly once — on the call that created the column — so a later change is
+  // never undone.
+  if (justAddedBoxed) {
+    for (const pg of rows) {
+      const p = pg.properties || {};
+      if (rt(p[CAT_PROPS.kind]) !== "Material") continue;
+      const seed = SEED_CATALOG.find(
+        (c) => c.kind === "Material" && c.name.toLowerCase() === rt(p[CAT_PROPS.name]).toLowerCase()
+      );
+      if (seed?.boxed) {
+        try {
+          await notion.pages.update({ page_id: pg.id, properties: { [CAT_PROPS.boxed]: { checkbox: true } } });
+          added = true;
+        } catch { /* non-fatal */ }
+      }
+    }
+  }
+
+  if (added) rows = await queryAll(db);
   return rows.map((pg) => {
     const p = pg.properties || {};
     return {
@@ -88,6 +126,8 @@ async function loadCatalog() {
       kind: rt(p[CAT_PROPS.kind]),
       parent: rt(p[CAT_PROPS.parent]),
       sized: !!p[CAT_PROPS.sized]?.checkbox,
+      boxed: !!p[CAT_PROPS.boxed]?.checkbox,
+      perBox: typeof p[CAT_PROPS.perBox]?.number === "number" ? p[CAT_PROPS.perBox].number : null,
     };
   });
 }
@@ -238,6 +278,10 @@ export async function POST(req: NextRequest) {
           [CAT_PROPS.kind]: { select: { name: kind } },
           [CAT_PROPS.parent]: text(kind === "Size" ? parent : ""),
           [CAT_PROPS.sized]: { checkbox: !!body.sized },
+          [CAT_PROPS.boxed]: { checkbox: kind === "Material" && !!body.boxed },
+          ...(kind === "Size" && Number(body.perBox) > 0
+            ? { [CAT_PROPS.perBox]: { number: Math.round(Number(body.perBox)) } }
+            : {}),
         },
       });
       return NextResponse.json({ ok: true });
@@ -264,9 +308,9 @@ export async function POST(req: NextRequest) {
       if (hit) {
         await notion.pages.update({
           page_id: hit.id,
-          properties: { [MAT_PROPS.quantity]: { number: hit.quantity + qty } },
+          properties: { [MAT_PROPS.quantity]: { number: Math.round((hit.quantity + qty) * 100) / 100 } },
         });
-        return NextResponse.json({ ok: true, merged: true, quantity: hit.quantity + qty });
+        return NextResponse.json({ ok: true, merged: true, quantity: Math.round((hit.quantity + qty) * 100) / 100 });
       }
       await notion.pages.create({
         parent: { database_id: db },

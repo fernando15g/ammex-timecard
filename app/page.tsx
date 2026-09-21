@@ -12793,6 +12793,7 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
   };
 
   const [tab, setTab] = useState<"materials" | "tools">("materials");
+  const [matView, setMatView] = useState<"loc" | "tot">("loc");
   const [catalog, setCatalog] = useState<Cat[]>([]);
   const [yards, setYards] = useState<string[]>([]);
   const [toolLocations, setToolLocations] = useState<string[]>([]);
@@ -12863,7 +12864,14 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
     sized?: boolean,
     extra?: { boxed?: boolean; perBox?: number }
   ) {
-    const r = await post({ op: "add_catalog", kind, name, parent, sized, ...(extra || {}) });
+    const r = await post({
+      op: "add_catalog",
+      kind,
+      name: kind === "Size" ? withInches(name) : name,
+      parent,
+      sized,
+      ...(extra || {}),
+    });
     if (r?.ok) await load(true);
     return r;
   }
@@ -12877,7 +12885,10 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
     catalog.find((c) => c.kind === "Size" && c.parent === material && c.name === size)?.perBox || null;
   const toolTypes = catalog.filter((c) => c.kind === "Tool Type");
   const sizesFor = (parent: string) =>
-    catalog.filter((c) => c.kind === "Size" && c.parent === parent).map((c) => c.name);
+    catalog
+      .filter((c) => c.kind === "Size" && c.parent === parent)
+      .map((c) => c.name)
+      .sort(bySize);
 
   const issued = tools.filter((t) => t.status === "Issued");
   const holders = Array.from(new Set(issued.map((t) => t.holder))).sort();
@@ -12927,47 +12938,113 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
             <button onClick={() => setSheet({ kind: "addMat" })} className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-4">
               + Add leftover
             </button>
-            {yards.map((y) => {
-              const here = mats
-                .filter((m) => m.yard === y)
-                .sort((a, b) => a.material.localeCompare(b.material) || a.size.localeCompare(b.size, undefined, { numeric: true }));
-              return (
-                <div key={y} className="mb-4">
-                  <div className={section}>{y}</div>
-                  {here.length === 0 ? (
-                    <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">Nothing here.</div>
-                  ) : (
-                    <div className="bg-graphite border border-line rounded-2xl overflow-hidden">
-                      {here.map((m) => (
-                        <button
-                          key={m.id}
-                          onClick={() => setSheet({ kind: "editMat", m })}
-                          className="w-full text-left flex items-center justify-between px-4 py-3 border-b border-line/40 last:border-0 active:bg-steel"
-                        >
-                          <span className="text-concrete font-semibold truncate">
-                            {m.material} <span className="text-rebar font-normal">{m.size}</span>
-                          </span>
-                          {isBoxed(m.material) ? (
-                            <span className="shrink-0 ml-2 text-right">
-                              <span className="text-concrete font-extrabold">
-                                {fmtBoxes(m.quantity)} {m.quantity === 1 ? "box" : "boxes"}
-                              </span>
-                              {perBoxFor(m.material, m.size) ? (
-                                <span className="block text-rebar text-[11px]">
-                                  ~{Math.round(m.quantity * (perBoxFor(m.material, m.size) || 0)).toLocaleString()} pcs
-                                </span>
-                              ) : null}
-                            </span>
-                          ) : (
-                            <span className="text-concrete font-extrabold shrink-0 ml-2">{m.quantity}</span>
-                          )}
-                        </button>
-                      ))}
+            {/* By location for standing in a yard; Totals for deciding whether
+                to order — "how much 1\" do I have anywhere?" */}
+            <div className="flex gap-2 mb-4">
+              {([["loc", "By location"], ["tot", "Totals"]] as const).map(([k, label]) => (
+                <button
+                  key={k}
+                  onClick={() => setMatView(k)}
+                  className={`flex-1 rounded-full h-9 text-xs font-bold ${
+                    matView === k ? "bg-steel text-concrete border border-line" : "text-rebar"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {matView === "loc" ? (
+              yards.map((y) => {
+                const here = mats.filter((m) => m.yard === y);
+                const matsHere = Array.from(new Set(here.map((m) => m.material))).sort();
+                return (
+                  <div key={y} className="mb-5">
+                    <div className={section}>{y}</div>
+                    {here.length === 0 ? (
+                      <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">Nothing here.</div>
+                    ) : (
+                      matsHere.map((mat) => (
+                        <div key={mat} className="bg-graphite border border-line rounded-2xl overflow-hidden mb-2">
+                          <div className="px-4 pt-3 pb-2 text-concrete font-bold text-[15px] border-b border-white/10">
+                            {mat}
+                          </div>
+                          {here
+                            .filter((m) => m.material === mat)
+                            .sort((a, b) => bySize(a.size, b.size))
+                            .map((m) => (
+                              <button
+                                key={m.id}
+                                onClick={() => setSheet({ kind: "editMat", m })}
+                                className="w-full text-left flex items-center justify-between px-4 py-3 border-b border-line/40 last:border-0 active:bg-steel"
+                              >
+                                <span className="text-concrete font-semibold">{m.size}</span>
+                                {isBoxed(m.material) ? (
+                                  <span className="shrink-0 ml-2 text-right">
+                                    <span className="text-concrete font-extrabold">
+                                      {fmtBoxes(m.quantity)} {m.quantity === 1 ? "box" : "boxes"}
+                                    </span>
+                                    {perBoxFor(m.material, m.size) ? (
+                                      <span className="block text-rebar text-[11px]">
+                                        ~{Math.round(m.quantity * (perBoxFor(m.material, m.size) || 0)).toLocaleString()} pcs
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                ) : (
+                                  <span className="text-concrete font-extrabold shrink-0 ml-2">{m.quantity}</span>
+                                )}
+                              </button>
+                            ))}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                );
+              })
+            ) : mats.length === 0 ? (
+              <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">Nothing on hand.</div>
+            ) : (
+              Array.from(new Set(mats.map((m) => m.material))).sort().map((mat) => {
+                const rows = mats.filter((m) => m.material === mat);
+                const sizes = Array.from(new Set(rows.map((m) => m.size))).sort(bySize);
+                return (
+                  <div key={mat} className="bg-graphite border border-line rounded-2xl overflow-hidden mb-2">
+                    <div className="px-4 pt-3 pb-2 text-concrete font-bold text-[15px] border-b border-white/10">
+                      {mat}
                     </div>
-                  )}
-                </div>
-              );
-            })}
+                    {sizes.map((sz) => {
+                      const piles = rows.filter((m) => m.size === sz);
+                      const total = Math.round(piles.reduce((t, m) => t + m.quantity, 0) * 100) / 100;
+                      const pb = perBoxFor(mat, sz);
+                      return (
+                        <div key={sz} className="px-4 py-3 border-b border-line/40 last:border-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-concrete font-semibold">{sz}</span>
+                            <span className="text-concrete font-extrabold shrink-0 ml-2">
+                              {isBoxed(mat) ? `${fmtBoxes(total)} ${total === 1 ? "box" : "boxes"}` : total}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-rebar text-[11px] mt-0.5">
+                            <span className="truncate">
+                              {yards
+                                .map((y) => {
+                                  const q = piles.filter((m) => m.yard === y).reduce((t, m) => t + m.quantity, 0);
+                                  return q > 0 ? `${y} ${isBoxed(mat) ? fmtBoxes(q) : q}` : "";
+                                })
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </span>
+                            {isBoxed(mat) && pb ? (
+                              <span className="shrink-0 ml-2">~{Math.round(total * pb).toLocaleString()} pcs</span>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })
+            )}
           </>
         ) : (
           <>
@@ -13105,6 +13182,12 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
           m={sheet.m}
           boxed={isBoxed(sheet.m.material)}
           perBox={perBoxFor(sheet.m.material, sheet.m.size)}
+          yards={yards}
+          onMove={async (toYard, quantity) => {
+            const r = await post({ op: "move_material", id: sheet.m.id, toYard, quantity });
+            if (r?.ok) { setSheet(null); load(true); }
+            return r;
+          }}
           busy={busy}
           onClose={() => setSheet(null)}
           onSave={async (q) => {
@@ -13163,6 +13246,8 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
             const r =
               action === "__redate"
                 ? await post({ op: "set_issue_date", id: sheet.t.id, ...extra })
+                : action === "__move"
+                ? await post({ op: "move_tool", id: sheet.t.id, ...extra })
                 : await post({ op: "tool_action", id: sheet.t.id, action, ...extra });
             if (r?.ok) { setSheet(null); load(true); }
             return r;
@@ -13318,6 +13403,28 @@ function NewEntryBox({
       </button>
     </InvSheet>
   );
+}
+
+// Numeric value of a size label so they sort by size, not by text: `1.25"`
+// before `1.5"`, `5/8"` before `3/4"`, `1 1/2"` read as 1.5. Text sorting
+// got decimals wrong because it compared "25" to "5" as whole numbers.
+function sizeValue(label: string): number {
+  const t = (label || "").replace(/["”″]|inch(es)?|in\b/gi, "").trim();
+  const mixed = t.match(/^(\d+)\s+(\d+)\/(\d+)$/);
+  if (mixed) return Number(mixed[1]) + Number(mixed[2]) / Number(mixed[3]);
+  const frac = t.match(/^(\d+)\/(\d+)$/);
+  if (frac) return Number(frac[1]) / Number(frac[2]);
+  const num = parseFloat(t);
+  return Number.isFinite(num) ? num : Number.POSITIVE_INFINITY;
+}
+function bySize(a: string, b: string): number {
+  return sizeValue(a) - sizeValue(b) || a.localeCompare(b);
+}
+// A bare number typed as a size gets its inch mark, so `3` and `3"` can never
+// become two different sizes.
+function withInches(label: string): string {
+  const t = label.trim();
+  return /^(\d+(\.\d+)?|\d+\/\d+|\d+\s+\d+\/\d+)$/.test(t) ? `${t}"` : t;
 }
 
 // 4.5 → "4½". Quarter boxes are the finest a pile is eyeballed to.
@@ -13518,7 +13625,7 @@ function AddMaterialSheet({
           onCancel={() => setAdding("")}
           onSave={async (name, _f, perBox) => {
             const r = await onCreate("Size", name, material, false, { perBox });
-            if (r?.ok) { setSize(name); setAdding(""); }
+            if (r?.ok) { setSize(withInches(name)); setAdding(""); }
             return r;
           }}
         />
@@ -13530,16 +13637,23 @@ function AddMaterialSheet({
 // Tapping a pile opens on USED — that's what happens after setup: some of it
 // went out on a job. Correct count is the second mode, for a recount.
 function EditCountSheet({
-  m, boxed, perBox, busy, onClose, onSave,
+  m, boxed, perBox, yards, busy, onClose, onSave, onMove,
 }: {
   m: { material: string; size: string; yard: string; quantity: number };
   boxed: boolean;
   perBox: number | null;
+  yards: string[];
   busy: boolean;
   onClose: () => void;
   onSave: (q: number) => Promise<any>;
+  onMove: (toYard: string, quantity: number) => Promise<any>;
 }) {
-  const [mode, setMode] = useState<"used" | "set">("used");
+  const [mode, setMode] = useState<"used" | "set" | "move">("used");
+  const otherYards = yards.filter((y) => y !== m.yard);
+  const [toYard, setToYard] = useState(otherYards[0] || "");
+  // Whole pile by default — that's what a move usually is.
+  const [moveBoxes, setMoveBoxes] = useState(m.quantity);
+  const [movePieces, setMovePieces] = useState(String(m.quantity));
   const [usedBoxes, setUsedBoxes] = useState(Math.min(1, m.quantity));
   const [usedPieces, setUsedPieces] = useState("");
   const [setBoxesV, setSetBoxesV] = useState(m.quantity);
@@ -13566,7 +13680,7 @@ function EditCountSheet({
       </div>
 
       <div className="flex gap-2 mb-4">
-        {([["used", "Used"], ["set", "Correct count"]] as const).map(([k, label]) => (
+        {([["used", "Used"], ["move", "Move"], ["set", "Correct"]] as const).map(([k, label]) => (
           <button
             key={k}
             onClick={() => { setMode(k); setErr(""); }}
@@ -13579,7 +13693,46 @@ function EditCountSheet({
         ))}
       </div>
 
-      {mode === "used" ? (
+      {mode === "move" ? (
+        <>
+          <label className={invLabel}>Moving to</label>
+          <Chips options={otherYards} value={toYard} onPick={setToYard} />
+          <label className={invLabel}>{boxed ? "How many boxes" : "How many"}</label>
+          {boxed ? (
+            <BoxQty
+              value={moveBoxes}
+              onChange={setMoveBoxes}
+              perBox={perBox}
+              note={
+                moveBoxes > m.quantity
+                  ? `Only ${fmtBoxes(m.quantity)} on hand.`
+                  : moveBoxes >= m.quantity
+                  ? "The whole pile moves."
+                  : `${fmtBoxes(Math.round((m.quantity - moveBoxes) * 100) / 100)} stays at ${m.yard}.`
+              }
+            />
+          ) : (
+            <>
+              <input
+                type="number"
+                inputMode="numeric"
+                min="0"
+                value={movePieces}
+                onChange={(e) => setMovePieces(e.target.value)}
+                className={invField}
+              />
+              <div className="text-rebar text-[11px] -mt-2 mb-4">
+                {(parseInt(movePieces, 10) || 0) >= m.quantity
+                  ? "The whole pile moves."
+                  : `${m.quantity - (parseInt(movePieces, 10) || 0)} stays at ${m.yard}.`}
+              </div>
+            </>
+          )}
+          <div className="text-rebar text-[11px] -mt-2 mb-4">
+            If there&apos;s already some at {toYard || "the new spot"}, it adds to that pile.
+          </div>
+        </>
+      ) : mode === "used" ? (
         <>
           <label className={invLabel}>{boxed ? "How many boxes used" : "How many used"}</label>
           {boxed ? (
@@ -13631,10 +13784,20 @@ function EditCountSheet({
 
       {err && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{err}</div>}
       <button
-        disabled={!canSave}
+        disabled={
+          mode === "move"
+            ? busy ||
+              !toYard ||
+              !((boxed ? moveBoxes : parseInt(movePieces, 10) || 0) > 0) ||
+              (boxed ? moveBoxes : parseInt(movePieces, 10) || 0) > m.quantity
+            : !canSave
+        }
         onClick={async () => {
           setErr("");
-          const r = await onSave(target);
+          const r =
+            mode === "move"
+              ? await onMove(toYard, boxed ? moveBoxes : parseInt(movePieces, 10) || 0)
+              : await onSave(target);
           if (!r?.ok) setErr(r?.error || "That didn't save.");
         }}
         className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
@@ -13905,7 +14068,7 @@ function AddToolSheet({
             const t = adding.size;
             const r = await onCreate("Size", name, t);
             if (r?.ok) {
-              setSizes((prev) => ({ ...prev, [t]: name }));
+              setSizes((prev) => ({ ...prev, [t]: withInches(name) }));
               setAdding("");
             }
             return r;
@@ -13926,7 +14089,7 @@ function ToolSheet({
   onClose: () => void;
   onAction: (action: string, extra?: any) => Promise<any>;
 }) {
-  const [mode, setMode] = useState<"" | "issue" | "return" | "redate">("");
+  const [mode, setMode] = useState<"" | "issue" | "return" | "redate" | "move">("");
   const [person, setPerson] = useState("");
   const [dateISO, setDateISO] = useState(() => todayLocalISO());
   const [location, setLocation] = useState(locations[0] || "");
@@ -13989,6 +14152,27 @@ function ToolSheet({
           </button>
           <button onClick={() => setMode("")} className="w-full text-rebar text-sm font-bold py-2">Back</button>
         </>
+      ) : mode === "move" ? (
+        <>
+          <label className={invLabel}>Moving to</label>
+          <Chips
+            options={locations.filter((l) => l !== t.location)}
+            value={location === t.location ? "" : location}
+            onPick={setLocation}
+          />
+          <button
+            disabled={!location || location === t.location || busy}
+            onClick={async () => {
+              setErr("");
+              const r = await onAction("__move", { location });
+              if (!r?.ok) setErr(r?.error || "That didn't save.");
+            }}
+            className={`${btn} bg-safety text-steel`}
+          >
+            {busy ? "…" : "Move"}
+          </button>
+          <button onClick={() => setMode("")} className="w-full text-rebar text-sm font-bold py-2">Back</button>
+        </>
       ) : mode === "issue" ? (
         <>
           <label className={invLabel}>Who&apos;s taking it</label>
@@ -14018,7 +14202,15 @@ function ToolSheet({
       ) : (
         <>
           {t.status === "In Yard" && (
-            <button onClick={() => setMode("issue")} className={`${btn} bg-safety text-steel`}>Give to someone</button>
+            <>
+              <button onClick={() => setMode("issue")} className={`${btn} bg-safety text-steel`}>Give to someone</button>
+              <button
+                onClick={() => { setLocation(""); setMode("move"); }}
+                className={`${btn} bg-steel border border-line text-concrete`}
+              >
+                Move
+              </button>
+            </>
           )}
           {t.status === "Issued" && (
             <button onClick={() => setMode("return")} className={`${btn} bg-safety text-steel`}>Returned</button>

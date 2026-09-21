@@ -163,7 +163,7 @@ export async function eventsDb() {
     [EVENT_PROPS.tool]: {
       relation: { database_id: tools, type: "single_property", single_property: {} },
     },
-    [EVENT_PROPS.action]: select(["Added", "Issued", "Returned", "Broken", "Lost", "Found"]),
+    [EVENT_PROPS.action]: select(["Added", "Issued", "Returned", "Broken", "Lost", "Found", "Moved"]),
     [EVENT_PROPS.person]: { rich_text: {} },
     [EVENT_PROPS.date]: { date: {} },
     [EVENT_PROPS.note]: { rich_text: {} },

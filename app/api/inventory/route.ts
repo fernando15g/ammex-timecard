@@ -325,6 +325,89 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, merged: false, quantity: qty });
     }
 
+    // Move some or all of a pile to another location. Whole pile by default.
+    // If that size is already at the destination it merges into that pile, so
+    // one location never ends up with two rows for the same thing.
+    if (op === "move_material") {
+      const toYard = (body.toYard || "").trim();
+      if (!body.id || !toYard)
+        return NextResponse.json({ ok: false, error: "Pick where it's going." }, { status: 400 });
+      const pg: any = await notion.pages.retrieve({ page_id: body.id });
+      const src = mapMaterial(pg);
+      if (src.yard === toYard)
+        return NextResponse.json({ ok: false, error: "It's already there." }, { status: 400 });
+      const want = Number(body.quantity);
+      const qty = Number.isFinite(want) && want > 0 ? Math.min(want, src.quantity) : src.quantity;
+      const r2 = (n: number) => Math.round(n * 100) / 100;
+
+      const db = await materialsDb();
+      const all = (await queryAll(db)).map(mapMaterial);
+      const dest = all.find(
+        (r) =>
+          r.id !== src.id &&
+          r.material.toLowerCase() === src.material.toLowerCase() &&
+          r.size.toLowerCase() === src.size.toLowerCase() &&
+          r.yard === toYard
+      );
+      const movingAll = qty >= src.quantity;
+
+      if (dest) {
+        await notion.pages.update({
+          page_id: dest.id,
+          properties: { [MAT_PROPS.quantity]: { number: r2(dest.quantity + qty) } },
+        });
+        if (movingAll) await notion.pages.update({ page_id: src.id, archived: true });
+        else
+          await notion.pages.update({
+            page_id: src.id,
+            properties: { [MAT_PROPS.quantity]: { number: r2(src.quantity - qty) } },
+          });
+      } else if (movingAll) {
+        // Nothing there yet — just relabel the pile.
+        await notion.pages.update({
+          page_id: src.id,
+          properties: {
+            [MAT_PROPS.yard]: { select: { name: toYard } },
+            [MAT_PROPS.item]: title(`${src.material} ${src.size} · ${toYard}`),
+          },
+        });
+      } else {
+        await notion.pages.update({
+          page_id: src.id,
+          properties: { [MAT_PROPS.quantity]: { number: r2(src.quantity - qty) } },
+        });
+        await notion.pages.create({
+          parent: { database_id: db },
+          properties: {
+            [MAT_PROPS.item]: title(`${src.material} ${src.size} · ${toYard}`),
+            [MAT_PROPS.material]: text(src.material),
+            [MAT_PROPS.size]: text(src.size),
+            [MAT_PROPS.yard]: { select: { name: toYard } },
+            [MAT_PROPS.quantity]: { number: r2(qty) },
+          },
+        });
+      }
+      return NextResponse.json({ ok: true });
+    }
+
+    // Relocate a stored tool without pretending it was issued and returned.
+    if (op === "move_tool") {
+      const location = (body.location || "").trim();
+      if (!body.id || !location)
+        return NextResponse.json({ ok: false, error: "Pick where it's going." }, { status: 400 });
+      const pg: any = await notion.pages.retrieve({ page_id: body.id });
+      const t = mapTool(pg);
+      if (t.status === "Issued")
+        return NextResponse.json({ ok: false, error: "That tool is out with someone." }, { status: 400 });
+      await ensureToolLocation();
+      await logEvent(body.id, t.tool, "Moved", "", `To ${location}`, isISO(body.dateISO) ? body.dateISO : undefined);
+      await notion.pages.update({
+        page_id: body.id,
+        properties: { [TOOL_PROPS.location]: { select: { name: location } } },
+      });
+      return NextResponse.json({ ok: true });
+    }
+
     // Eyeballed inventory: set the count directly. Zero archives the row, so an
     // empty pile doesn't sit in the list forever.
     if (op === "set_quantity") {

@@ -13065,7 +13065,10 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
           busy={busy}
           onClose={() => setSheet(null)}
           onAction={async (action, extra) => {
-            const r = await post({ op: "tool_action", id: sheet.t.id, action, ...extra });
+            const r =
+              action === "__redate"
+                ? await post({ op: "set_issue_date", id: sheet.t.id, ...extra })
+                : await post({ op: "tool_action", id: sheet.t.id, action, ...extra });
             if (r?.ok) { setSheet(null); load(true); }
             return r;
           }}
@@ -13501,7 +13504,7 @@ function ToolSheet({
   onClose: () => void;
   onAction: (action: string, extra?: any) => Promise<any>;
 }) {
-  const [mode, setMode] = useState<"" | "issue" | "return">("");
+  const [mode, setMode] = useState<"" | "issue" | "return" | "redate">("");
   const [person, setPerson] = useState("");
   const [dateISO, setDateISO] = useState(() => todayLocalISO());
   const [location, setLocation] = useState(locations[0] || "");
@@ -13531,11 +13534,40 @@ function ToolSheet({
 
   return (
     <InvSheet title={t.tool} onClose={onClose}>
-      <div className="text-rebar text-xs mb-4">
-        {t.size ? `${t.size} · ` : ""}{status}
+      <div className="text-rebar text-xs mb-4 flex items-center gap-2 flex-wrap">
+        <span>{t.size ? `${t.size} · ` : ""}{status}</span>
+        {t.status === "Issued" && mode === "" && (
+          <button
+            onClick={() => { setDateISO(t.issued || todayLocalISO()); setMode("redate"); }}
+            className="rounded-full px-2.5 h-7 text-[11px] font-bold border border-dashed"
+            style={{ color: "#e8801a", borderColor: "rgba(232,128,26,.7)" }}
+          >
+            Change date
+          </button>
+        )}
       </div>
 
-      {mode === "issue" ? (
+      {mode === "redate" ? (
+        <>
+          <label className={invLabel}>Given on</label>
+          <input type="date" value={dateISO} onChange={(e) => setDateISO(e.target.value)} className={invField} />
+          <div className="text-rebar text-[11px] -mt-2 mb-4">
+            Corrects the date on the tool and in its history.
+          </div>
+          <button
+            disabled={!dateISO || busy}
+            onClick={async () => {
+              setErr("");
+              const r = await onAction("__redate", { dateISO });
+              if (!r?.ok) setErr(r?.error || "That didn't save.");
+            }}
+            className={`${btn} bg-safety text-steel`}
+          >
+            {busy ? "…" : "Save date"}
+          </button>
+          <button onClick={() => setMode("")} className="w-full text-rebar text-sm font-bold py-2">Back</button>
+        </>
+      ) : mode === "issue" ? (
         <>
           <label className={invLabel}>Who&apos;s taking it</label>
           <CrewPicker crew={crew} value={person} onPick={setPerson} />

@@ -332,6 +332,45 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, id: created.id, name, number: next });
     }
 
+    // Correcting the date a tool was handed out. This fixes a mistake rather
+    // than recording a new event, so the tool's date AND the matching Issued
+    // entry in its history are both updated — history showing the wrong date
+    // is worse than history that was corrected.
+    if (op === "set_issue_date") {
+      const { id } = body;
+      if (!id || !isISO(body.dateISO))
+        return NextResponse.json({ ok: false, error: "Pick a date." }, { status: 400 });
+      const pg: any = await notion.pages.retrieve({ page_id: id });
+      const t = mapTool(pg);
+      if (t.status !== "Issued")
+        return NextResponse.json({ ok: false, error: "That tool isn't out with anyone." }, { status: 400 });
+
+      await notion.pages.update({
+        page_id: id,
+        properties: { [TOOL_PROPS.issued]: { date: { start: body.dateISO } } },
+      });
+
+      // The most recent Issued event for this tool is the one being corrected.
+      try {
+        const edb = await eventsDb();
+        const rows = await queryAll(edb, {
+          and: [
+            { property: EVENT_PROPS.tool, relation: { contains: id } },
+            { property: EVENT_PROPS.action, select: { equals: "Issued" } },
+          ],
+        });
+        rows.sort((a, b) => b.created_time.localeCompare(a.created_time));
+        if (rows[0]) {
+          await notion.pages.update({
+            page_id: rows[0].id,
+            properties: { [EVENT_PROPS.date]: { date: { start: body.dateISO } } },
+          });
+        }
+      } catch { /* the tool's own date is what shows; history is best-effort */ }
+
+      return NextResponse.json({ ok: true });
+    }
+
     if (op === "tool_action") {
       const { id, action } = body;
       const person = (body.person || "").trim();

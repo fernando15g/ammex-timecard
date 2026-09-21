@@ -13085,6 +13085,10 @@ function InventoryPanel({ onClose }: { onClose: () => void }) {
       {sheet?.kind === "addTool" && (
         <AddToolSheet
           types={toolTypes}
+          typeCounts={tools.reduce((m: Record<string, number>, t) => {
+            m[t.type] = (m[t.type] || 0) + 1;
+            return m;
+          }, {})}
           sizesFor={sizesFor}
           crew={crew}
           locations={toolLocations}
@@ -13423,9 +13427,10 @@ function CrewPicker({ crew, value, onPick }: { crew: string[]; value: string; on
 }
 
 function AddToolSheet({
-  types, sizesFor, crew, locations, busy, onCreate, onClose, onSave,
+  types, typeCounts, sizesFor, crew, locations, busy, onCreate, onClose, onSave,
 }: {
   types: { name: string; sized: boolean }[];
+  typeCounts: Record<string, number>;
   sizesFor: (p: string) => string[];
   crew: string[];
   locations: string[];
@@ -13450,6 +13455,22 @@ function AddToolSheet({
   const [location, setLocation] = useState(locations[0] || "");
   const [adding, setAdding] = useState<"" | "type" | { size: string }>("");
   const [err, setErr] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [query, setQuery] = useState("");
+
+  // The three types you own the most of. Worked out ONCE when the sheet opens
+  // and held there — if they re-ranked live, adding a tool could shuffle a pill
+  // out from under your thumb. Early on this is just the starter types.
+  const [top] = useState<string[]>(() =>
+    [...types]
+      .sort(
+        (a, b) =>
+          (typeCounts[b.name] || 0) - (typeCounts[a.name] || 0) ||
+          a.name.localeCompare(b.name)
+      )
+      .slice(0, 3)
+      .map((x) => x.name)
+  );
 
   const toggleType = (name: string) =>
     setPicked((prev) => (prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]));
@@ -13472,29 +13493,71 @@ function AddToolSheet({
         <label className={invLabel}>
           Type <span className="font-normal normal-case">(pick all that apply)</span>
         </label>
-        <div className="flex flex-wrap gap-2 mb-4">
-          {types.map((x) => {
-            const on = picked.includes(x.name);
+        {/* Your top three, plus anything already picked — a tool chosen through
+            search stays visible so it can be seen and unticked. */}
+        <div className="flex flex-wrap gap-2 mb-3">
+          {[...top, ...picked.filter((n) => !top.includes(n))].map((n) => {
+            const on = picked.includes(n);
             return (
               <button
-                key={x.name}
-                onClick={() => toggleType(x.name)}
+                key={n}
+                onClick={() => toggleType(n)}
                 className={`rounded-full px-3 h-9 text-sm font-bold border ${
                   on ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
                 }`}
               >
-                {on ? "✓ " : ""}{x.name}
+                {on ? "✓ " : ""}{n}
               </button>
             );
           })}
           <button
-            onClick={() => setAdding("type")}
-            className="rounded-full px-3 h-9 text-sm font-bold border border-dashed"
-            style={{ color: "#e8801a", borderColor: "rgba(232,128,26,.7)" }}
+            onClick={() => { setSearching(!searching); setQuery(""); }}
+            className={`rounded-full px-3 h-9 text-sm font-bold border ${
+              searching ? "bg-steel text-concrete border-line" : "border-dashed"
+            }`}
+            style={searching ? undefined : { color: "#e8801a", borderColor: "rgba(232,128,26,.7)" }}
           >
-            ＋ New type
+            {searching ? "Done" : "🔍 Search"}
           </button>
         </div>
+
+        {searching && (
+          <div className="bg-steel border border-line rounded-2xl p-3 mb-4">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search tools…"
+              className="w-full bg-graphite border border-line rounded-xl h-10 px-3 text-concrete mb-3"
+            />
+            <div className="flex flex-wrap gap-2 max-h-[180px] overflow-y-auto">
+              {types
+                .filter((x) => !query.trim() || x.name.toLowerCase().includes(query.trim().toLowerCase()))
+                .map((x) => {
+                  const on = picked.includes(x.name);
+                  return (
+                    <button
+                      key={x.name}
+                      onClick={() => toggleType(x.name)}
+                      className={`rounded-full px-3 h-9 text-sm font-bold border ${
+                        on ? "bg-safety text-steel border-transparent" : "bg-graphite text-concrete border-line"
+                      }`}
+                    >
+                      {on ? "✓ " : ""}{x.name}
+                    </button>
+                  );
+                })}
+              <button
+                onClick={() => setAdding("type")}
+                className="rounded-full px-3 h-9 text-sm font-bold border border-dashed"
+                style={{ color: "#e8801a", borderColor: "rgba(232,128,26,.7)" }}
+              >
+                ＋ New type
+              </button>
+            </div>
+          </div>
+        )}
+        {!searching && <div className="mb-1" />}
 
         {/* One size row per selected type that takes a size. */}
         {sizedPicked.map((n) => (

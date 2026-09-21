@@ -110,6 +110,7 @@ export default function Page() {
   const [showWages, setShowWages] = useState(false);
   const [showSafety, setShowSafety] = useState(false); // foreman upload
   const [showSafetyAdmin, setShowSafetyAdmin] = useState(false); // owner folders
+  const [showInventory, setShowInventory] = useState(false);
   // Owner sign-in. `ownerEmail` non-empty means a live Supabase session exists.
   // `ownerBypass` means the owner chose the PIN fallback because sign-in was
   // unreachable — it lasts for this session only and is never persisted.
@@ -1269,6 +1270,19 @@ export default function Page() {
                 <button
                   onClick={() => {
                     setShowMenu(false);
+                    setShowInventory(true);
+                  }}
+                  className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 8l-9-5-9 5 9 5 9-5z" />
+                    <path d="M3 8v8l9 5 9-5V8" />
+                  </svg>
+                  Inventory
+                </button>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
                     setShowSafetyAdmin(true);
                   }}
                   className="w-full text-left px-5 py-4 font-semibold text-concrete active:bg-steel flex items-center gap-3 border-t border-line"
@@ -1398,6 +1412,7 @@ export default function Page() {
         />
       )}
       {showSafetyAdmin && <SafetyAdminPanel onClose={() => setShowSafetyAdmin(false)} />}
+      {showInventory && <InventoryPanel onClose={() => setShowInventory(false)} />}
       {showMySubs && foremanUnlocked && (
         <MySubmissionsPanel
           foreman={foreman}
@@ -12755,5 +12770,583 @@ function OwnerSafetyUpload({
         {err && <div className="text-xs font-bold mt-3" style={{ color: "#e5533c" }}>{err}</div>}
       </div>
     </div>
+  );
+}
+
+// Inventory & tools — one tab, two views, because they're used in the same
+// place (standing in a yard) even though they're shaped differently.
+// Materials are counts; tools are individual objects with custody.
+function InventoryPanel({ onClose }: { onClose: () => void }) {
+  useLockBodyScroll();
+  type Cat = { id: string; name: string; kind: string; parent: string; sized: boolean };
+  type Mat = { id: string; material: string; size: string; yard: string; quantity: number };
+  type Tool = {
+    id: string; tool: string; type: string; number: number; size: string;
+    status: string; holder: string; issued: string;
+  };
+
+  const [tab, setTab] = useState<"materials" | "tools">("materials");
+  const [catalog, setCatalog] = useState<Cat[]>([]);
+  const [yards, setYards] = useState<string[]>([]);
+  const [mats, setMats] = useState<Mat[]>([]);
+  const [tools, setTools] = useState<Tool[]>([]);
+  const [crew, setCrew] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const [sheet, setSheet] = useState<
+    | null
+    | { kind: "addMat" }
+    | { kind: "editMat"; m: Mat }
+    | { kind: "addTool" }
+    | { kind: "tool"; t: Tool }
+    | { kind: "addCat"; catKind: string; parent?: string }
+  >(null);
+
+  async function load() {
+    setLoading(true);
+    const [inv, rd] = await Promise.all([
+      fetch("/api/inventory?action=all&ownerPin=5314").then((r) => r.json()).catch(() => ({ ok: false })),
+      fetch("/api/roster").then((r) => r.json()).catch(() => ({})),
+    ]);
+    if (inv?.ok) {
+      setCatalog(inv.catalog || []);
+      setYards(inv.yards || []);
+      setMats(inv.materials || []);
+      setTools(inv.tools || []);
+    } else setMsg(inv?.error || "Couldn't load inventory.");
+    if (Array.isArray(rd?.workers)) setCrew(rd.workers);
+    setLoading(false);
+  }
+  useEffect(() => { load(); }, []);
+
+  async function post(payload: any): Promise<any> {
+    setBusy(true);
+    setMsg("");
+    const res = await fetch("/api/inventory", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ownerPin: "5314", ...payload }),
+    }).then((r) => r.json()).catch(() => ({ ok: false }));
+    setBusy(false);
+    if (!res?.ok) setMsg(res?.error || "That didn't save.");
+    return res;
+  }
+
+  const materialNames = catalog.filter((c) => c.kind === "Material").map((c) => c.name);
+  const toolTypes = catalog.filter((c) => c.kind === "Tool Type");
+  const sizesFor = (parent: string) =>
+    catalog.filter((c) => c.kind === "Size" && c.parent === parent).map((c) => c.name);
+
+  // Tools grouped by who has them — the view that answers "who has what".
+  const issued = tools.filter((t) => t.status === "Issued");
+  const holders = Array.from(new Set(issued.map((t) => t.holder))).sort();
+  const inYard = tools.filter((t) => t.status === "In Yard");
+  const problem = tools.filter((t) => t.status === "Broken" || t.status === "Lost");
+
+  const pill = (on: boolean) =>
+    `flex-1 rounded-full h-10 text-sm font-bold ${on ? "bg-safety text-steel" : "bg-steel text-rebar border border-line"}`;
+
+  const ToolRow = ({ t }: { t: Tool }) => (
+    <button
+      onClick={() => setSheet({ kind: "tool", t })}
+      className="w-full text-left flex items-center justify-between px-3 py-3 border-b border-line/40 last:border-0 active:bg-steel"
+    >
+      <span className="text-concrete text-sm font-semibold truncate">
+        {t.tool}
+        {t.size ? <span className="text-rebar font-normal"> · {t.size}</span> : null}
+      </span>
+      {t.issued && t.status === "Issued" ? (
+        <span className="text-rebar text-[11px] shrink-0 ml-2">since {t.issued.slice(5)}</span>
+      ) : null}
+    </button>
+  );
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-steel overflow-y-auto overscroll-contain">
+      <div className="max-w-2xl mx-auto p-5 pb-28">
+        <div className="flex items-center justify-between mb-4">
+          <div className="font-bold text-concrete text-lg">Inventory</div>
+          <button onClick={onClose} className="text-rebar text-sm font-bold bg-graphite px-3 py-2 rounded-full">
+            Close
+          </button>
+        </div>
+
+        <div className="flex gap-2 mb-4">
+          <button onClick={() => setTab("materials")} className={pill(tab === "materials")}>Materials</button>
+          <button onClick={() => setTab("tools")} className={pill(tab === "tools")}>Tools</button>
+        </div>
+
+        {msg && <div className="text-xs font-bold mb-3" style={{ color: "#e5533c" }}>{msg}</div>}
+
+        {loading ? (
+          <div className="text-rebar text-sm">Loading…</div>
+        ) : tab === "materials" ? (
+          <>
+            <button
+              onClick={() => setSheet({ kind: "addMat" })}
+              className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-4"
+            >
+              + Add leftover
+            </button>
+            {yards.map((y) => {
+              const here = mats
+                .filter((m) => m.yard === y)
+                .sort((a, b) => a.material.localeCompare(b.material) || a.size.localeCompare(b.size, undefined, { numeric: true }));
+              return (
+                <div key={y} className="mb-4">
+                  <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2">{y}</div>
+                  {here.length === 0 ? (
+                    <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">Nothing here.</div>
+                  ) : (
+                    <div className="bg-graphite border border-line rounded-2xl overflow-hidden">
+                      {here.map((m) => (
+                        <button
+                          key={m.id}
+                          onClick={() => setSheet({ kind: "editMat", m })}
+                          className="w-full text-left flex items-center justify-between px-4 py-3 border-b border-line/40 last:border-0 active:bg-steel"
+                        >
+                          <span className="text-concrete font-semibold truncate">
+                            {m.material} <span className="text-rebar font-normal">{m.size}</span>
+                          </span>
+                          <span className="text-concrete font-extrabold shrink-0 ml-2">{m.quantity}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </>
+        ) : (
+          <>
+            <button
+              onClick={() => setSheet({ kind: "addTool" })}
+              className="w-full bg-safety text-steel rounded-xl py-3 font-bold mb-4"
+            >
+              + Add tool
+            </button>
+
+            <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2">Out with crew</div>
+            {holders.length === 0 ? (
+              <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4 mb-4">Nothing issued.</div>
+            ) : (
+              holders.map((h) => {
+                const mine = issued.filter((t) => t.holder === h);
+                return (
+                  <div key={h} className="bg-graphite border border-line rounded-2xl mb-2 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-white/10">
+                      <span className="text-concrete font-bold truncate">{h}</span>
+                      <span className="text-rebar text-xs shrink-0 ml-2">
+                        {mine.length} {mine.length === 1 ? "tool" : "tools"}
+                      </span>
+                    </div>
+                    {mine.map((t) => <ToolRow key={t.id} t={t} />)}
+                  </div>
+                );
+              })
+            )}
+
+            <div className="text-rebar text-xs font-bold uppercase tracking-wide mb-2 mt-4">In the yard</div>
+            {inYard.length === 0 ? (
+              <div className="text-rebar text-sm bg-graphite border border-line rounded-2xl p-4">None.</div>
+            ) : (
+              <div className="bg-graphite border border-line rounded-2xl overflow-hidden">
+                {inYard.map((t) => <ToolRow key={t.id} t={t} />)}
+              </div>
+            )}
+
+            {problem.length > 0 && (
+              <>
+                <div className="text-xs font-bold uppercase tracking-wide mb-2 mt-4" style={{ color: "#e5533c" }}>
+                  Broken / lost
+                </div>
+                <div className="bg-graphite border border-line rounded-2xl overflow-hidden">
+                  {problem.map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => setSheet({ kind: "tool", t })}
+                      className="w-full text-left flex items-center justify-between px-3 py-3 border-b border-line/40 last:border-0 active:bg-steel"
+                    >
+                      <span className="text-concrete text-sm font-semibold truncate">{t.tool}</span>
+                      <span className="text-[11px] font-bold shrink-0 ml-2" style={{ color: "#e5533c" }}>
+                        {t.status}{t.holder ? ` · ${t.holder}` : ""}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {sheet?.kind === "addMat" && (
+        <AddMaterialSheet
+          materials={materialNames}
+          sizesFor={sizesFor}
+          yards={yards}
+          busy={busy}
+          onAddSize={(parent) => setSheet({ kind: "addCat", catKind: "Size", parent })}
+          onClose={() => setSheet(null)}
+          onSave={async (v) => {
+            const r = await post({ op: "add_material", ...v });
+            if (r?.ok) { setSheet(null); load(); }
+          }}
+        />
+      )}
+      {sheet?.kind === "editMat" && (
+        <EditCountSheet
+          m={sheet.m}
+          busy={busy}
+          onClose={() => setSheet(null)}
+          onSave={async (q) => {
+            const r = await post({ op: "set_quantity", id: sheet.m.id, quantity: q });
+            if (r?.ok) { setSheet(null); load(); }
+          }}
+        />
+      )}
+      {sheet?.kind === "addTool" && (
+        <AddToolSheet
+          types={toolTypes}
+          sizesFor={sizesFor}
+          busy={busy}
+          onAddType={() => setSheet({ kind: "addCat", catKind: "Tool Type" })}
+          onAddSize={(parent) => setSheet({ kind: "addCat", catKind: "Size", parent })}
+          onClose={() => setSheet(null)}
+          onSave={async (v) => {
+            const r = await post({ op: "add_tool", ...v });
+            if (r?.ok) { setSheet(null); load(); }
+          }}
+        />
+      )}
+      {sheet?.kind === "tool" && (
+        <ToolSheet
+          t={sheet.t}
+          crew={crew}
+          busy={busy}
+          onClose={() => setSheet(null)}
+          onAction={async (action, person) => {
+            const r = await post({ op: "tool_action", id: sheet.t.id, action, person });
+            if (r?.ok) { setSheet(null); load(); }
+          }}
+        />
+      )}
+      {sheet?.kind === "addCat" && (
+        <AddCatalogSheet
+          catKind={sheet.catKind}
+          parent={sheet.parent}
+          busy={busy}
+          onClose={() => setSheet(null)}
+          onSave={async (name, sized) => {
+            const r = await post({ op: "add_catalog", kind: sheet.catKind, name, parent: sheet.parent, sized });
+            if (r?.ok) { setSheet(null); load(); }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Shared shell for the inventory sheets — top-anchored so the keyboard never
+// covers the number being typed.
+function InvSheet({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-[85] bg-black/70 flex items-start justify-center p-4 pt-8">
+      <div className="bg-graphite border border-line rounded-2xl w-full max-w-sm p-4 max-h-[85vh] overflow-y-auto">
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-concrete font-bold">{title}</div>
+          <button onClick={onClose} className="text-rebar text-xs font-bold bg-steel px-3 py-1.5 rounded-full">
+            Cancel
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const invLabel = "block text-rebar text-xs font-bold uppercase tracking-wide mb-1";
+const invField = "w-full bg-steel border border-line rounded-xl h-11 px-3 text-concrete mb-3";
+
+// Chips rather than a native select: one tap each, and the choice is visible
+// at a glance while standing in a yard.
+function Chips({ options, value, onPick }: { options: string[]; value: string; onPick: (v: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2 mb-3">
+      {options.map((o) => (
+        <button
+          key={o}
+          onClick={() => onPick(o)}
+          className={`rounded-full px-3 h-9 text-sm font-bold border ${
+            value === o ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
+          }`}
+        >
+          {o}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function AddMaterialSheet({
+  materials, sizesFor, yards, busy, onAddSize, onClose, onSave,
+}: {
+  materials: string[];
+  sizesFor: (p: string) => string[];
+  yards: string[];
+  busy: boolean;
+  onAddSize: (parent: string) => void;
+  onClose: () => void;
+  onSave: (v: { material: string; size: string; yard: string; quantity: number }) => void;
+}) {
+  const [material, setMaterial] = useState(materials[0] || "");
+  const [size, setSize] = useState("");
+  const [yard, setYard] = useState(yards[0] || "");
+  const [qty, setQty] = useState("");
+  const sizes = material ? sizesFor(material) : [];
+  const q = parseInt(qty, 10);
+  const ok = material && size && yard && q > 0;
+
+  return (
+    <InvSheet title="Add leftover" onClose={onClose}>
+      <label className={invLabel}>Material</label>
+      <Chips options={materials} value={material} onPick={(v) => { setMaterial(v); setSize(""); }} />
+
+      <label className={invLabel}>Size</label>
+      {sizes.length === 0 ? (
+        <div className="text-rebar text-sm mb-2">No sizes yet for {material}.</div>
+      ) : (
+        <Chips options={sizes} value={size} onPick={setSize} />
+      )}
+      <button onClick={() => onAddSize(material)} className="text-rebar text-xs font-bold mb-4">
+        + Add a size
+      </button>
+
+      <label className={invLabel}>Yard</label>
+      <Chips options={yards} value={yard} onPick={setYard} />
+
+      <label className={invLabel}>How many</label>
+      <input type="number" inputMode="numeric" min="0" value={qty} onChange={(e) => setQty(e.target.value)} className={invField} />
+      <div className="text-rebar text-[11px] -mt-2 mb-4">
+        If this size is already in that yard, it adds to the count.
+      </div>
+
+      <button
+        disabled={!ok || busy}
+        onClick={() => onSave({ material, size, yard, quantity: q })}
+        className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+      >
+        {busy ? "…" : "Add"}
+      </button>
+    </InvSheet>
+  );
+}
+
+function EditCountSheet({ m, busy, onClose, onSave }: { m: { material: string; size: string; yard: string; quantity: number }; busy: boolean; onClose: () => void; onSave: (q: number) => void }) {
+  const [qty, setQty] = useState(String(m.quantity));
+  const q = parseInt(qty, 10);
+  return (
+    <InvSheet title={`${m.material} ${m.size}`} onClose={onClose}>
+      <div className="text-rebar text-xs mb-3">{m.yard}</div>
+      <label className={invLabel}>Count on hand</label>
+      <input type="number" inputMode="numeric" min="0" value={qty} autoFocus onChange={(e) => setQty(e.target.value)} className={invField} />
+      <div className="text-rebar text-[11px] -mt-2 mb-4">Set it to 0 once the pile is gone and it drops off the list.</div>
+      <button
+        disabled={!(q >= 0) || busy}
+        onClick={() => onSave(q)}
+        className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+      >
+        {busy ? "…" : "Save"}
+      </button>
+    </InvSheet>
+  );
+}
+
+function AddToolSheet({
+  types, sizesFor, busy, onAddType, onAddSize, onClose, onSave,
+}: {
+  types: { name: string; sized: boolean }[];
+  sizesFor: (p: string) => string[];
+  busy: boolean;
+  onAddType: () => void;
+  onAddSize: (parent: string) => void;
+  onClose: () => void;
+  onSave: (v: { type: string; size: string }) => void;
+}) {
+  const [type, setType] = useState("");
+  const [size, setSize] = useState("");
+  const t = types.find((x) => x.name === type);
+  const sizes = t?.sized ? sizesFor(type) : [];
+  const ok = !!type && (!t?.sized || !!size);
+
+  return (
+    <InvSheet title="Add tool" onClose={onClose}>
+      <label className={invLabel}>Type</label>
+      <Chips options={types.map((x) => x.name)} value={type} onPick={(v) => { setType(v); setSize(""); }} />
+      <button onClick={onAddType} className="text-rebar text-xs font-bold mb-4">+ Add a tool type</button>
+
+      {t?.sized && (
+        <>
+          <label className={invLabel}>Size</label>
+          {sizes.length === 0 ? (
+            <div className="text-rebar text-sm mb-2">No sizes yet for {type}.</div>
+          ) : (
+            <Chips options={sizes} value={size} onPick={setSize} />
+          )}
+          <button onClick={() => onAddSize(type)} className="text-rebar text-xs font-bold mb-4">+ Add a size</button>
+        </>
+      )}
+
+      <div className="text-rebar text-[11px] mb-4">It gets the next number automatically — mark it on the tool.</div>
+      <button
+        disabled={!ok || busy}
+        onClick={() => onSave({ type, size })}
+        className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+      >
+        {busy ? "…" : "Add"}
+      </button>
+    </InvSheet>
+  );
+}
+
+function ToolSheet({
+  t, crew, busy, onClose, onAction,
+}: {
+  t: { id: string; tool: string; size: string; status: string; holder: string; issued: string };
+  crew: string[];
+  busy: boolean;
+  onClose: () => void;
+  onAction: (action: string, person?: string) => void;
+}) {
+  const [picking, setPicking] = useState(false);
+  const [q, setQ] = useState("");
+  const [history, setHistory] = useState<{ action: string; person: string; date: string }[] | null>(null);
+
+  useEffect(() => {
+    fetch(`/api/inventory?action=history&ownerPin=5314&toolId=${t.id}`)
+      .then((r) => r.json())
+      .then((d) => setHistory(d?.ok ? d.events : []))
+      .catch(() => setHistory([]));
+  }, [t.id]);
+
+  const btn = "w-full rounded-xl py-3 font-bold mb-2";
+  const matches = crew.filter((n) => !q.trim() || n.toLowerCase().includes(q.trim().toLowerCase()));
+
+  return (
+    <InvSheet title={t.tool} onClose={onClose}>
+      <div className="text-rebar text-xs mb-4">
+        {t.size ? `${t.size} · ` : ""}
+        {t.status === "Issued" ? `With ${t.holder} since ${t.issued}` : t.status}
+      </div>
+
+      {picking ? (
+        <>
+          <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Who's taking it?" className={invField} />
+          <div className="max-h-[141px] overflow-y-auto border border-line rounded-xl mb-3">
+            {matches.map((n) => (
+              <button
+                key={n}
+                disabled={busy}
+                onClick={() => onAction("Issued", n)}
+                className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-0"
+              >
+                {n}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => setPicking(false)} className="text-rebar text-xs font-bold">Back</button>
+        </>
+      ) : (
+        <>
+          {t.status === "In Yard" && (
+            <button onClick={() => setPicking(true)} className={`${btn} bg-safety text-steel`}>Issue to…</button>
+          )}
+          {t.status === "Issued" && (
+            <button disabled={busy} onClick={() => onAction("Returned")} className={`${btn} bg-safety text-steel`}>Returned</button>
+          )}
+          {(t.status === "Broken" || t.status === "Lost") && (
+            <button disabled={busy} onClick={() => onAction("Found")} className={`${btn} bg-safety text-steel`}>
+              {t.status === "Lost" ? "Found it" : "Fixed — back in the yard"}
+            </button>
+          )}
+          {t.status !== "Broken" && (
+            <button disabled={busy} onClick={() => onAction("Broken")} className={`${btn} bg-steel border border-line text-concrete`}>Broken</button>
+          )}
+          {t.status !== "Lost" && (
+            <button
+              disabled={busy}
+              onClick={() => onAction("Lost")}
+              className={`${btn} border`}
+              style={{ color: "#e5533c", borderColor: "rgba(229,83,60,.5)" }}
+            >
+              Lost
+            </button>
+          )}
+
+          <div className="text-rebar text-xs font-bold uppercase tracking-wide mt-4 mb-2">History</div>
+          {history === null ? (
+            <div className="text-rebar text-sm">…</div>
+          ) : history.length === 0 ? (
+            <div className="text-rebar text-sm">No history yet.</div>
+          ) : (
+            history.map((h, i) => (
+              <div key={i} className="flex justify-between text-xs py-1.5 border-b border-line/30 last:border-0">
+                <span className="text-concrete">
+                  {h.action}{h.person ? ` · ${h.person}` : ""}
+                </span>
+                <span className="text-rebar shrink-0 ml-2">{h.date}</span>
+              </div>
+            ))
+          )}
+        </>
+      )}
+    </InvSheet>
+  );
+}
+
+function AddCatalogSheet({
+  catKind, parent, busy, onClose, onSave,
+}: {
+  catKind: string;
+  parent?: string;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (name: string, sized: boolean) => void;
+}) {
+  const [name, setName] = useState("");
+  const [sized, setSized] = useState(false);
+  const titleTxt = catKind === "Size" ? `New size for ${parent}` : "New tool type";
+  return (
+    <InvSheet title={titleTxt} onClose={onClose}>
+      <input
+        autoFocus
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder={catKind === "Size" ? `e.g. 3"` : "e.g. Rebar Bender"}
+        className={invField}
+      />
+      {catKind === "Tool Type" && (
+        <button
+          onClick={() => setSized(!sized)}
+          className={`rounded-full px-3 h-9 text-sm font-bold border mb-4 ${
+            sized ? "bg-safety text-steel border-transparent" : "bg-steel text-concrete border-line"
+          }`}
+        >
+          Comes in sizes
+        </button>
+      )}
+      <div className="text-rebar text-[11px] mb-4">
+        Once added it's a choice from then on, so it's only ever spelled one way.
+      </div>
+      <button
+        disabled={!name.trim() || busy}
+        onClick={() => onSave(name.trim(), sized)}
+        className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
+      >
+        {busy ? "…" : "Add"}
+      </button>
+    </InvSheet>
   );
 }

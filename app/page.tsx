@@ -11803,11 +11803,21 @@ function RosterMergeModal({
   onClose,
   onDone,
 }: {
-  from: { id: string; name: string };
-  people: { id: string; name: string; active: boolean }[];
+  from: { id: string; name: string; active: boolean; status?: string };
+  people: { id: string; name: string; active: boolean; status?: string }[];
   onClose: () => void;
   onDone: () => void;
 }) {
+  // Same direction rules the server enforces — the screen just never offers a
+  // name that would be refused. Merging always folds a stray INTO a real
+  // person: never into a merged-away name, never into an unconfirmed one, and
+  // an active name only into another active name.
+  const isMergedAway = (p: { status?: string }) => /^merged into/i.test(p.status || "");
+  const isUnconfirmed = (p: { status?: string }) => /^unconfirmed/i.test(p.status || "");
+  const allowedTarget = (p: { active: boolean; status?: string }) =>
+    !isMergedAway(p) && !isUnconfirmed(p) && (from.active ? p.active : true);
+  const [confirmInactive, setConfirmInactive] = useState(false);
+
   function weekStart(offset = 0): string {
     const now = new Date();
     const l = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -11835,7 +11845,12 @@ function RosterMergeModal({
   const needle = q.trim().toLowerCase();
   const options = people
     .filter((p) => p.id !== from.id)
-    .filter((p) => !needle || p.name.toLowerCase().includes(needle));
+    .filter(allowedTarget)
+    .filter((p) => !needle || p.name.toLowerCase().includes(needle))
+    // Active people first — they're almost always the right target.
+    .sort((a, b) => Number(b.active) - Number(a.active) || a.name.localeCompare(b.name));
+  const targetPerson = people.find((p) => p.name === target);
+  const targetInactive = !!targetPerson && !targetPerson.active;
 
   async function runPreview(name: string) {
     setBusy(true);
@@ -11872,6 +11887,7 @@ function RosterMergeModal({
         startISO,
         endISO,
         combineCollisions: true,
+        confirmInactive,
       }),
     }).then((r) => r.json()).catch(() => null);
     setBusy(false);
@@ -11932,10 +11948,15 @@ function RosterMergeModal({
                 options.slice(0, 40).map((p) => (
                   <button
                     key={p.id}
-                    onClick={() => { setTarget(p.name); setQ(""); runPreview(p.name); }}
-                    className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-0 truncate"
+                    onClick={() => { setTarget(p.name); setQ(""); setConfirmInactive(false); runPreview(p.name); }}
+                    className="w-full text-left px-3 py-3 text-concrete bg-steel active:bg-graphite border-b border-line last:border-0 flex items-center justify-between gap-2"
                   >
-                    {p.name}
+                    <span className="truncate">{p.name}</span>
+                    {!p.active && (
+                      <span className="shrink-0 text-[10px] font-bold" style={{ color: "#e0a63b" }}>
+                        DEACTIVATED
+                      </span>
+                    )}
                   </button>
                 ))
               )}
@@ -11968,9 +11989,31 @@ function RosterMergeModal({
 
         {err && <div className="text-xs font-bold mb-2" style={{ color: "#e5533c" }}>{err}</div>}
 
+        {targetInactive && preview && preview.willRename > 0 && (
+          <button
+            onClick={() => setConfirmInactive(!confirmInactive)}
+            className="w-full text-left flex items-start gap-2 bg-steel border rounded-xl p-3 mb-3"
+            style={{ borderColor: "rgba(224,166,59,.5)" }}
+          >
+            <span
+              className="shrink-0 mt-0.5 w-4 h-4 rounded border flex items-center justify-center text-[10px] font-bold"
+              style={
+                confirmInactive
+                  ? { background: "#e8801a", borderColor: "#e8801a", color: "#1c2127" }
+                  : { borderColor: "rgba(154,163,175,.6)", color: "transparent" }
+              }
+            >
+              ✓
+            </span>
+            <span className="text-xs text-concrete">
+              {target} is deactivated. Merge into them anyway?
+            </span>
+          </button>
+        )}
+
         <button
           onClick={apply}
-          disabled={busy || !target || !preview || preview.willRename === 0}
+          disabled={busy || !target || !preview || preview.willRename === 0 || (targetInactive && !confirmInactive)}
           className="w-full bg-safety text-steel rounded-xl py-3 font-bold disabled:opacity-40"
         >
           {busy ? "…" : preview && preview.willRename === 0 ? "Nothing to merge" : "Merge"}

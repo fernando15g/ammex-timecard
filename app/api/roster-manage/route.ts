@@ -220,6 +220,70 @@ export async function POST(req: NextRequest) {
       const fromKey = key(fromName);
       const toKey = key(toName);
 
+      // --- Direction check, against the roster as it is RIGHT NOW. The screen
+      // hides names that shouldn't be picked, but a screen open since this
+      // morning doesn't know about merges made since; this can't be fooled.
+      // A merge must fold a stray INTO a real person, never the reverse:
+      //   · never into a name already merged away (a dead end)
+      //   · never into an unconfirmed name (usually the misspelling itself)
+      //   · an active name only merges into another active name
+      //   · a stray may merge into someone deactivated, with a confirmation
+      const rosterRow = async (name: string): Promise<any | null> => {
+        let cur: string | undefined;
+        do {
+          const res: any = await notion.databases.query({
+            database_id: CREW_ROSTER_DB_ID,
+            start_cursor: cur,
+            page_size: 100,
+          });
+          for (const pg of res.results) {
+            if (key(readText(pg.properties?.[ROSTER_PROPS.name])) === key(name)) return pg;
+          }
+          cur = res.has_more ? res.next_cursor : undefined;
+        } while (cur);
+        return null;
+      };
+      const describe = (pg: any) => {
+        const status = readText(pg?.properties?.[ROSTER_PROPS.status]).trim();
+        return {
+          active: !!pg?.properties?.[ROSTER_PROPS.active]?.checkbox,
+          merged: /^merged into/i.test(status),
+          unconfirmed: /^unconfirmed/i.test(status),
+          status,
+        };
+      };
+      const fromPg = body.fromId
+        ? await notion.pages.retrieve({ page_id: body.fromId }).catch(() => null)
+        : await rosterRow(fromName);
+      const toPg = await rosterRow(toName);
+      if (!toPg)
+        return NextResponse.json({ error: `${toName} isn't on the roster.` }, { status: 400 });
+      const from = describe(fromPg);
+      const to = describe(toPg);
+
+      if (to.merged)
+        return NextResponse.json(
+          { error: `${toName} was already merged away (${to.status}) — merge into that person instead.` },
+          { status: 400 }
+        );
+      if (to.unconfirmed)
+        return NextResponse.json(
+          { error: `${toName} is unconfirmed — merge into the real person instead.` },
+          { status: 400 }
+        );
+      if (from.active && !to.active)
+        return NextResponse.json(
+          { error: `${fromName} is active, so it can only merge into another active name.` },
+          { status: 400 }
+        );
+      // Stray into someone who's left: allowed, but only once confirmed.
+      const needsConfirm = !to.active;
+      if (op === "merge" && needsConfirm && !body.confirmInactive)
+        return NextResponse.json(
+          { error: `${toName} is deactivated — confirm you want to merge into them.` },
+          { status: 400 }
+        );
+
       // Every non-voided entry under the bad name, plus the target's entries,
       // so same-card collisions can be spotted.
       const inWindow: any[] = [];
@@ -258,6 +322,7 @@ export async function POST(req: NextRequest) {
           willRename: inWindow.length,
           outside: outsideCount.n,
           collisions: collisions.length,
+          needsConfirm,
         });
       }
 

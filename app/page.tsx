@@ -98,6 +98,9 @@ export default function Page() {
   // "Chuy" and land on Jesús, so he picks the real man instead of typing a
   // new name and creating a duplicate roster row.
   const [aliases, setAliases] = useState<Record<string, string[]>>({});
+  // Old name → real person, from a roster merge; and people who've left.
+  const [merged, setMerged] = useState<Record<string, string>>({});
+  const [inactiveNames, setInactiveNames] = useState<string[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [justUpdated, setJustUpdated] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -216,6 +219,8 @@ export default function Page() {
       if (Array.isArray(d.workers)) setRoster(d.workers);
       if (Array.isArray(d.foremen)) setForemen(d.foremen);
       if (d.aliases && typeof d.aliases === "object") setAliases(d.aliases);
+      if (d.merged && typeof d.merged === "object") setMerged(d.merged);
+      if (Array.isArray(d.inactive)) setInactiveNames(d.inactive);
     } catch {
       /* ignore */
     } finally {
@@ -258,6 +263,11 @@ export default function Page() {
       if (!dateManual.current && submitState !== "sent") {
         setDate(todayISO());
       }
+      // Re-read the roster whenever the app comes back to the screen. A phone
+      // that kept the app alive in the background would otherwise keep the
+      // crew list it loaded days ago. Data only: the screen doesn't reload and
+      // nothing the foreman has typed is touched.
+      loadRoster();
     }
     function onVisible() {
       if (document.visibilityState === "visible") refresh();
@@ -268,7 +278,48 @@ export default function Page() {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [submitState]);
+  }, [submitState, loadRoster]);
+
+  // ---- Silent name correction ----
+  // A phone starts each card with yesterday's crew, so a name merged away on
+  // the roster (Stiven → Steve Avalos Diaz) keeps coming back from the phone
+  // itself. Whenever fresh roster data arrives, swap merged names and nicknames
+  // for the real person — keeping any hours already typed. If the real person
+  // is already on the card, the old name is folded into him rather than
+  // listing him twice. No message: the foreman just sees the right name.
+  useEffect(() => {
+    if (!hydrated.current) return;
+    const rosterSet = new Set(roster.map((n) => n.toLowerCase()));
+    const aliasToName = new Map<string, string>();
+    for (const [name, list] of Object.entries(aliases)) {
+      for (const a of list || []) aliasToName.set(a.toLowerCase(), name);
+    }
+    setWorkers((prev) => {
+      let changed = false;
+      const out: Worker[] = [];
+      const idx = new Map<string, number>();
+      for (const w of prev) {
+        const k = (w.name || "").trim().toLowerCase();
+        let target = merged[k];
+        // Only treat it as a nickname if it isn't itself a real roster name.
+        if (!target && !rosterSet.has(k)) target = aliasToName.get(k) || "";
+        const name = target && target.toLowerCase() !== k ? target : w.name;
+        if (name !== w.name) changed = true;
+        const nk = name.toLowerCase();
+        const at = idx.get(nk);
+        if (at !== undefined) {
+          // Already on the card — keep his row, take these hours only if his
+          // had none, and drop the duplicate.
+          changed = true;
+          if (out[at].hours == null && w.hours != null) out[at] = { ...out[at], hours: w.hours };
+          continue;
+        }
+        idx.set(nk, out.length);
+        out.push(name === w.name ? w : { ...w, name, isNew: false });
+      }
+      return changed ? out : prev;
+    });
+  }, [roster, merged, aliases]);
 
   // ---- Persist draft whenever it changes ----
   useEffect(() => {
@@ -897,6 +948,15 @@ export default function Page() {
                     {lang === "es" ? "NUEVO" : "NEW"}
                   </div>
                 )}
+                {/* Deactivated and not merged — someone who's left. Marked
+                    rather than removed, so taking him off is a deliberate
+                    choice and nobody vanishes from a card unnoticed. */}
+                {!w.isNew &&
+                  inactiveNames.some((n) => n.toLowerCase() === w.name.toLowerCase()) && (
+                    <div className="text-[10px] font-bold" style={{ color: "#e0a63b" }}>
+                      {lang === "es" ? "YA NO ESTÁ EN LA LISTA" : "NO LONGER ON ROSTER"}
+                    </div>
+                  )}
               </div>
               <HoursControl
                 value={w.hours}

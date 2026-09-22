@@ -85,7 +85,46 @@ export async function GET() {
     workers.sort(sorter);
     foremen.sort(sorter);
 
-    return NextResponse.json({ workers, foremen, aliases });
+    // Inactive rows, read separately. Phones remember yesterday's crew and start
+    // today's card with the same names, so a merged or departed name can keep
+    // coming back from the phone itself without ever going through the picker.
+    // These two lists let the app correct that on the phone:
+    //   merged   — old name → the real person, from "Merged into …" status
+    //   inactive — deactivated and NOT merged or pending: someone who left
+    // "Unconfirmed" rows are deliberately in neither: those are new workers a
+    // foreman added who are waiting on the owner, not people who are gone.
+    const merged: Record<string, string> = {};
+    const inactive: string[] = [];
+    try {
+      let icur: string | undefined = undefined;
+      do {
+        const ires: any = await notion.databases.query({
+          database_id: CREW_ROSTER_DB_ID,
+          filter: { property: ROSTER_PROPS.active, checkbox: { equals: false } },
+          start_cursor: icur,
+          page_size: 100,
+        });
+        for (const page of ires.results) {
+          const name = (page.properties?.[ROSTER_PROPS.name]?.title || [])
+            .map((t: any) => t.plain_text)
+            .join("")
+            .trim();
+          if (!name) continue;
+          const status = (page.properties?.[ROSTER_PROPS.status]?.rich_text || [])
+            .map((t: any) => t.plain_text)
+            .join("")
+            .trim();
+          const m = status.match(/^merged into\s+(.+)$/i);
+          if (m) merged[name.toLowerCase()] = m[1].trim();
+          else if (!/^unconfirmed/i.test(status)) inactive.push(name);
+        }
+        icur = ires.has_more ? ires.next_cursor : undefined;
+      } while (icur);
+    } catch {
+      /* additive — the active list is what matters; never block on this */
+    }
+
+    return NextResponse.json({ workers, foremen, aliases, merged, inactive });
   } catch (err: any) {
     console.error("Roster read failed:", err?.message || err);
     return NextResponse.json(

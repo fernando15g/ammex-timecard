@@ -15,6 +15,10 @@ export interface ScheduleJob {
   cancelled?: boolean;
   cancelPartial?: boolean;
   cancelNote?: string;
+  // A job that got hours this day but was never scheduled — a last-minute move
+  // or a GC request. Added after the planned jobs so looking back shows every
+  // job actually worked, not just the ones that were planned.
+  offSchedule?: boolean;
 }
 export interface ScheduleData {
   date: string; // YYYY-MM-DD
@@ -108,8 +112,18 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
   // Title block
   page.drawText("AMMEX REBAR PLACERS", { x: MARGIN, y: PH - MARGIN - 4, size: 15, font: bold, color: steel });
   page.drawText(longDate(data.date).toUpperCase(), { x: MARGIN, y: PH - MARGIN - 24, size: 12, font: bold, color: steel });
-  const totalCrew = data.jobs.reduce((s, j) => s + j.crew.filter((c) => !c.unscheduled).length, 0);
-  page.drawText(`${data.jobs.length} jobs · ${totalCrew} crew`, { x: MARGIN, y: PH - MARGIN - 40, size: 10, font, color: gray });
+  // The header summarises the PLAN, so off-schedule jobs aren't folded into the
+  // job or crew count — otherwise a split worker is counted twice. They're
+  // named separately instead.
+  const planned = data.jobs.filter((j) => !(j as any).offSchedule);
+  const offCount = data.jobs.length - planned.length;
+  const totalCrew = planned.reduce((s, j) => s + j.crew.filter((c) => !c.unscheduled).length, 0);
+  page.drawText(
+    `${planned.length} ${planned.length === 1 ? "job" : "jobs"} · ${totalCrew} crew${
+      offCount ? ` · ${offCount} not on schedule` : ""
+    }`,
+    { x: MARGIN, y: PH - MARGIN - 40, size: 10, font, color: gray }
+  );
 
   // Key — colour tells the story; hours are shown next to each name.
   {
@@ -138,6 +152,12 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
     if (job.jobId) pg.drawText(`#${job.jobId}`, { x: x + 4, y: yy - headH + 6, size: 8, font, color: gray });
     yy -= headH;
     pg.drawLine({ start: { x, y: yy }, end: { x: x + colW, y: yy }, thickness: 0.6, color: line });
+    if ((job as any).offSchedule) {
+      // Worked but never scheduled — kept visibly distinct so the printed day
+      // shows every job actually worked without implying it was planned.
+      yy -= 13;
+      pg.drawText("NOT ON SCHEDULE", { x: x + 4, y: yy, size: 8, font: bold, color: rgb(0.85, 0.6, 0.18) });
+    }
     if ((job as any).cancelled) {
       // Cancelled marker: red label + note, plus a light diagonal line across
       // the column so a cancelled job reads at a glance on the printed sheet.
@@ -214,6 +234,7 @@ export async function buildSchedulePdf(data: ScheduleData): Promise<Uint8Array> 
           extra += wrap(`at ${c.elsewhere}`, font, 7, colW - 16).length * 9; // note lines
         }
       }
+      if ((job as any).offSchedule) extra += 13; // "NOT ON SCHEDULE" label
       maxLines = Math.max(maxLines, lines);
       maxGaps = Math.max(maxGaps, gaps);
       maxExtra = Math.max(maxExtra, extra);

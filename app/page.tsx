@@ -2029,6 +2029,7 @@ interface SchedJob {
   cancelled?: boolean;
   cancelPartial?: boolean;
   cancelNote?: string;
+  offSchedule?: boolean; // worked this day but never scheduled
 }
 
 function tomorrowISO(): string {
@@ -2585,6 +2586,19 @@ function SchedulePanel({
                       </span>
                     )}
                   </div>
+
+                  {/* Worked, but never planned — a last-minute move or a GC
+                      request. Shown so looking back tells the whole day. */}
+                  {j.offSchedule && (
+                    <div className="mb-2">
+                      <span
+                        className="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full"
+                        style={{ color: "#e0a63b", background: "rgba(224,166,59,.15)" }}
+                      >
+                        NOT ON SCHEDULE
+                      </span>
+                    </div>
+                  )}
 
                   {j.cancelled && (
                     <div

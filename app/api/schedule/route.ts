@@ -165,6 +165,31 @@ async function applyActuals(
       }
     }
   }
+
+  // Jobs that got hours but were never on this day's schedule. Only rows with
+  // a project assigned reach here (actualsForDate skips the rest), so a card
+  // still carrying just the foreman's typed text never shows up — it might be
+  // the scheduled job spelled differently. A split made in Reconcile and a
+  // second card the foreman submitted both land as the same kind of row, so
+  // both appear the same way.
+  const scheduledIds = new Set(jobs.map((j) => j.jobPageId));
+  const extra: ScheduleJob[] = [];
+  for (const [jobPageId, people] of actuals) {
+    if (scheduledIds.has(jobPageId)) continue;
+    const info = names.get(jobPageId);
+    extra.push({
+      jobPageId,
+      name: info?.name || "(job)",
+      jobId: info?.jobId || "",
+      offSchedule: true,
+      crew: Array.from(people.values())
+        .sort((a, b) => a.worker.localeCompare(b.worker))
+        .map((v) => ({ worker: v.worker, isLead: false, hours: v.hours })),
+    });
+  }
+  extra.sort((a, b) => a.name.localeCompare(b.name));
+  // At the bottom, after the planned jobs.
+  jobs.push(...extra);
 }
 
 // Load a full ScheduleData (plan + actuals) for one date. Shared by the
